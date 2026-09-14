@@ -1,0 +1,411 @@
+#include <Feather/Runtime.hpp>
+
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <unordered_set>
+#include <utility>
+
+namespace Feather {
+namespace {
+class FunctionObject final : public NativeObject {
+public:
+    FunctionObject(std::shared_ptr<Module> Owner, std::shared_ptr<FunctionPrototype> Body)
+        : Owner(std::move(Owner)), Body(std::move(Body)) {}
+    ObjectType GetObjectType() const override { return ObjectType::Function; }
+    bool IsCallable() const override { return true; }
+    const FunctionPrototype& GetBody() const { return *Body; }
+    const std::shared_ptr<Module>& GetOwner() const { return Owner; }
+private:
+    std::shared_ptr<Module> Owner;
+    std::shared_ptr<FunctionPrototype> Body;
+};
+struct Frame {
+    std::shared_ptr<FunctionObject> Function;
+    std::size_t Pc = 0;
+    std::vector<Value> Locals;
+    std::vector<Value> Stack;
+};
+struct ActiveRunGuard {
+    explicit ActiveRunGuard(std::uint32_t& Count) : Count(Count) { ++Count; }
+    ~ActiveRunGuard() { --Count; }
+    std::uint32_t& Count;
+};
+Value Error(std::string Message) { return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message))); }
+bool Equal(const Value& Left, const Value& Right) {
+    if (Left.GetType() != Right.GetType()) return false;
+    switch (Left.GetType()) {
+    case ValueType::Null: return true;
+    case ValueType::Bool: return Left.AsBool() == Right.AsBool();
+    case ValueType::Number: return Left.AsNumber() == Right.AsNumber();
+    case ValueType::String: return Left.AsString() == Right.AsString();
+    case ValueType::Object: return Left.AsObject() == Right.AsObject();
+    }
+    return false;
+}
+std::uint32_t ReadU32(const std::vector<std::uint8_t>& Code, std::size_t& Pc) {
+    std::uint32_t Result = 0;
+    for (unsigned I = 0; I < 4; ++I) Result |= std::uint32_t(Code[Pc++]) << (I * 8);
+    return Result;
+}
+Value ConstantValue(const Constant& Item, const std::shared_ptr<Object>& Function) {
+    switch (Item.Type) {
+    case Constant::Kind::Number: return Value::Number(Item.Numeric);
+    case Constant::Kind::String: return Value::String(Item.Text);
+    case Constant::Kind::Function: return Value::FromObject(Function);
+    }
+    throw std::logic_error("invalid constant kind");
+}
+} // namespace
+
+Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects)
+    : ScriptObjectLimit(MaxScriptObjects) {
+    if (!Input) throw std::invalid_argument("null module");
+    if (ScriptObjectLimit == 0) throw std::invalid_argument("ScriptObject limit must include RootMetaObject");
+    Input->Validate();
+    SourceProgram = Input;
+    ScriptHeap.emplace_back(new ScriptObject(this));
+    RootMetaObject = ScriptHeap.back().get();
+    // Freeze the mutable builder's module before any execution.
+    Program = std::make_shared<Module>(*Input);
+    for (auto& Item : Program->Constants) {
+        if (Item.Type == Constant::Kind::Function)
+            Item.Function = std::make_shared<FunctionPrototype>(*Item.Function);
+    }
+    Functions.resize(Program->Constants.size());
+    for (std::size_t I = 0; I < Functions.size(); ++I) {
+        const auto& Item = Program->Constants[I];
+        if (Item.Type == Constant::Kind::Function)
+            Functions[I] = std::make_shared<FunctionObject>(Program, Item.Function);
+    }
+}
+
+ScriptObject* Vm::CreateScriptObject() {
+    if (ScriptHeap.size() >= ScriptObjectLimit) throw std::bad_alloc();
+    ScriptHeap.emplace_back(new ScriptObject(this, RootMetaObject));
+    return ScriptHeap.back().get();
+}
+ScriptObject* Vm::CreateMetaObject() { return CreateScriptObject(); }
+bool Vm::OwnsScript(ScriptObject* Input) const {
+    return std::any_of(ScriptHeap.begin(), ScriptHeap.end(),
+                       [Input](const auto& Entry) { return Entry.get() == Input; });
+}
+void Vm::SetMetaObject(ScriptObject* Target, ScriptObject* MetaObject) {
+    if (!Target || !MetaObject || Target == RootMetaObject ||
+        !OwnsScript(Target) || !OwnsScript(MetaObject))
+        throw std::invalid_argument("invalid MetaObject replacement");
+    Target->MetaObject = MetaObject;
+}
+Value Vm::GetGlobal(const std::string& Name) const {
+    Value::String(Name); // Validate the host-supplied UTF-8 key.
+    auto Found = Globals.find(Name);
+    return Found == Globals.end() ? Error("undefined global") : Found->second;
+}
+void Vm::SetGlobal(std::string Name, Value Input) {
+    Value::String(Name);
+    if (Input.IsScriptObject() && !OwnsScript(Input.AsScriptObject()))
+        throw std::invalid_argument("cannot store foreign ScriptObject as global");
+    Globals.insert_or_assign(std::move(Name), std::move(Input));
+}
+void Vm::RegisterNativeFunction(std::string Name, std::shared_ptr<NativeObject> Input) {
+    if (!Input || !Input->IsCallable()) throw std::invalid_argument("native function must be callable");
+    Value::String(Name);
+    RegisterNativeObject(Input);
+    SetGlobal(std::move(Name), Value::FromObject(std::move(Input)));
+}
+
+RootHandle::RootHandle(Vm* InputOwner, std::weak_ptr<int> InputLifetime, std::uint64_t InputToken)
+    : Owner(InputOwner), Lifetime(std::move(InputLifetime)), Token(InputToken) {}
+RootHandle::RootHandle(RootHandle&& Other) noexcept
+    : Owner(std::exchange(Other.Owner, nullptr)), Lifetime(std::move(Other.Lifetime)),
+      Token(std::exchange(Other.Token, 0)) {}
+RootHandle& RootHandle::operator=(RootHandle&& Other) noexcept {
+    if (this != &Other) {
+        if (Token && !Lifetime.expired()) Owner->RemoveFromRoot(Token);
+        Owner = std::exchange(Other.Owner, nullptr);
+        Lifetime = std::move(Other.Lifetime);
+        Token = std::exchange(Other.Token, 0);
+    }
+    return *this;
+}
+RootHandle::~RootHandle() {
+    if (Token && !Lifetime.expired()) Owner->RemoveFromRoot(Token);
+}
+Value RootHandle::Get() const {
+    if (!Token || Lifetime.expired()) throw std::logic_error("RootHandle is invalid");
+    return Owner->HostRoots.at(Token);
+}
+void RootHandle::Reset() {
+    if (!Token) throw std::logic_error("RootHandle already released");
+    if (!Lifetime.expired()) Owner->RemoveFromRoot(Token);
+    Owner = nullptr;
+    Token = 0;
+    Lifetime.reset();
+}
+RootHandle Vm::AddToRoot(Value Input) {
+    if (Input.IsScriptObject() && !OwnsScript(Input.AsScriptObject()))
+        throw std::invalid_argument("cannot root foreign ScriptObject");
+    if (NextRootToken == 0) throw std::overflow_error("RootHandle token space exhausted");
+    auto Token = NextRootToken++;
+    HostRoots.emplace(Token, std::move(Input));
+    return RootHandle(this, Lifetime, Token);
+}
+void Vm::RemoveFromRoot(std::uint64_t Token) {
+    if (HostRoots.erase(Token) != 1) throw std::logic_error("RootHandle already released");
+}
+void Vm::RegisterNativeObject(const std::shared_ptr<NativeObject>& Input) {
+    if (!Input) throw std::invalid_argument("null NativeObject");
+    NativeRegistry.push_back(Input);
+}
+std::size_t Vm::CollectGarbage() {
+    if (ActiveRuns != 0 || ActiveNativeCalls != 0)
+        throw std::logic_error("GC requires an idle VM");
+    struct MarkReset {
+        std::vector<std::unique_ptr<ScriptObject>>& Heap;
+        ~MarkReset() { for (auto& Entry : Heap) Entry->Marked = false; }
+    } Reset{ScriptHeap};
+    std::unordered_set<ScriptObject*> HeapPointers;
+    for (const auto& Entry : ScriptHeap) HeapPointers.insert(Entry.get());
+    std::vector<ScriptObject*> ScriptWork;
+    std::vector<std::shared_ptr<NativeObject>> NativeWork;
+    std::unordered_set<NativeObject*> SeenNative;
+    auto MarkScript = [&](ScriptObject* Input) {
+        if (!HeapPointers.contains(Input)) throw std::invalid_argument("foreign or stale ScriptObject in GC graph");
+        if (!Input->Marked) { Input->Marked = true; ScriptWork.push_back(Input); }
+    };
+    auto MarkValue = [&](const Value& Input) {
+        if (Input.GetType() != ValueType::Object) return;
+        if (Input.IsScriptObject()) MarkScript(Input.AsScriptObject());
+        else {
+            auto Native = std::dynamic_pointer_cast<NativeObject>(Input.AsNativeObject());
+            if (Native && SeenNative.insert(Native.get()).second) NativeWork.push_back(std::move(Native));
+        }
+    };
+    MarkScript(RootMetaObject);
+    for (const auto& [_, Entry] : Globals) MarkValue(Entry);
+    for (const auto& [_, Entry] : HostRoots) MarkValue(Entry);
+    for (auto It = NativeRegistry.begin(); It != NativeRegistry.end();) {
+        if (auto Native = It->lock()) {
+            if (SeenNative.insert(Native.get()).second) NativeWork.push_back(std::move(Native));
+            ++It;
+        } else It = NativeRegistry.erase(It);
+    }
+    while (!ScriptWork.empty() || !NativeWork.empty()) {
+        while (!ScriptWork.empty()) {
+            auto Script = ScriptWork.back(); ScriptWork.pop_back();
+            if (Script->MetaObject) MarkScript(Script->MetaObject);
+            for (const auto& [_, Entry] : Script->Members) MarkValue(Entry);
+        }
+        while (!NativeWork.empty()) {
+            auto Native = std::move(NativeWork.back()); NativeWork.pop_back();
+            for (const auto& [_, Entry] : Native->GcVisibleMembers) MarkValue(Entry);
+        }
+    }
+    auto Before = ScriptHeap.size();
+    std::erase_if(ScriptHeap, [](const auto& Entry) { return !Entry->Marked; });
+    for (auto& Entry : ScriptHeap) Entry->Marked = false;
+    return Before - ScriptHeap.size();
+}
+GcStatistics Vm::GetGcStatistics() const {
+    GcStatistics Result;
+    Result.ScriptObjectCount = ScriptHeap.size();
+    Result.EstimatedScriptBytes = ScriptHeap.size() * sizeof(ScriptObject);
+    for (const auto& Script : ScriptHeap) {
+        Result.ScriptMemberCount += Script->Members.size();
+        Result.EstimatedScriptBytes += Script->Members.bucket_count() * sizeof(void*);
+        for (const auto& [Key, _] : Script->Members)
+            Result.EstimatedScriptBytes += sizeof(Key) + sizeof(Value) + 2 * sizeof(void*) + Key.Text.capacity();
+    }
+    return Result;
+}
+
+Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Arguments) {
+    ActiveRunGuard Guard(ActiveRuns);
+    if (FunctionConstant >= Functions.size() || !Functions[FunctionConstant])
+        throw std::invalid_argument("entry is not a function constant");
+    for (const auto& Input : Arguments) {
+        if (Input.IsScriptObject() && !OwnsScript(Input.AsScriptObject()))
+            throw std::invalid_argument("ScriptObject belongs to another VM");
+    }
+    std::vector<Frame> Frames;
+    auto PushFrame = [&](const std::shared_ptr<FunctionObject>& Function,
+                         const std::vector<Value>& Args) {
+        if (Frames.size() >= 1024) throw std::runtime_error("VM call depth exceeded");
+        const auto& Body = Function->GetBody();
+        Frame Next;
+        Next.Function = Function;
+        Next.Locals.resize(Body.LocalCount);
+        for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
+            if (I < Args.size()) Next.Locals[I] = Args[I];
+            else if (Body.Defaults[I]) Next.Locals[I] = *Body.Defaults[I];
+        }
+        Frames.push_back(std::move(Next));
+    };
+    PushFrame(std::static_pointer_cast<FunctionObject>(Functions[FunctionConstant]), Arguments);
+    while (!Frames.empty()) {
+        Frame& Current = Frames.back();
+        const auto& Code = Current.Function->GetBody().Code;
+        if (Current.Pc >= Code.size()) throw std::runtime_error("VM PC out of range");
+        auto Instruction = static_cast<Op>(Code[Current.Pc++]);
+        auto Pop = [&]() -> Value {
+            if (Current.Stack.empty()) throw std::runtime_error("VM stack underflow");
+            Value Result = std::move(Current.Stack.back());
+            Current.Stack.pop_back();
+            return Result;
+        };
+        auto Push = [&](Value Input) {
+            if (Current.Stack.size() >= 65'536) throw std::runtime_error("VM stack limit exceeded");
+            Current.Stack.push_back(std::move(Input));
+        };
+        std::function<void(Value, std::vector<Value>, unsigned, bool)> DispatchCall;
+        DispatchCall = [&](Value Target, std::vector<Value> Args, unsigned Depth, bool MetaCall) {
+            if (Depth >= 64) { Push(Error("MetaObject call cycle")); return; }
+            if (Target.GetType() != ValueType::Object) {
+                Push(Error(MetaCall ? "metafunction is not callable" : "value is not callable")); return;
+            }
+            auto ObjectValue = Target.AsObject();
+            if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue)) {
+                auto Meta = Script->GetMetaObject();
+                auto Method = Meta ? Meta->GetRaw(Value::String("__call")) : std::nullopt;
+                if (!Method) { Push(Error("__call is missing")); return; }
+                Args.insert(Args.begin(), Target);
+                DispatchCall(*Method, std::move(Args), Depth + 1, true);
+                return;
+            }
+            auto Native = dynamic_cast<NativeObject*>(ObjectValue);
+            if (!Native || !Native->IsCallable()) {
+                Push(Error(MetaCall ? "metafunction is not callable" : "value is not callable")); return;
+            }
+            if (Native->GetObjectType() == ObjectType::Function) {
+                auto Function = std::static_pointer_cast<FunctionObject>(Target.AsNativeObject());
+                if (Function->GetOwner() != Program)
+                    throw std::invalid_argument("function belongs to another VM module");
+                PushFrame(Function, Args);
+            } else {
+                ActiveRunGuard NativeGuard(ActiveNativeCalls);
+                Push(Native->Call(Args));
+            }
+        };
+        switch (Instruction) {
+        case Op::Const: {
+            auto Id = ReadU32(Code, Current.Pc);
+            Push(ConstantValue(Program->Constants[Id], Functions[Id])); break;
+        }
+        case Op::Null: Push({}); break;
+        case Op::True: Push(Value::Bool(true)); break;
+        case Op::False: Push(Value::Bool(false)); break;
+        case Op::Pop: Pop(); break;
+        case Op::GetLocal: Push(Current.Locals[ReadU32(Code, Current.Pc)]); break;
+        case Op::SetLocal: {
+            auto Id = ReadU32(Code, Current.Pc);
+            Current.Locals[Id] = Current.Stack.back(); break;
+        }
+        case Op::GetGlobal: {
+            auto Id = ReadU32(Code, Current.Pc);
+            auto Found = Globals.find(Program->Constants[Id].Text);
+            Push(Found == Globals.end() ? Error("undefined global") : Found->second); break;
+        }
+        case Op::SetGlobal: {
+            auto Id = ReadU32(Code, Current.Pc);
+            Globals[Program->Constants[Id].Text] = Current.Stack.back(); break;
+        }
+        case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
+        case Op::Equal: case Op::Less: {
+            auto Right = Pop(); auto Left = Pop();
+            if (Instruction == Op::Equal) { Push(Value::Bool(Equal(Left, Right))); break; }
+            if (Instruction == Op::Add && Left.GetType() == ValueType::String &&
+                Right.GetType() == ValueType::String) {
+                Push(Value::String(Left.AsString() + Right.AsString())); break;
+            }
+            if (Left.GetType() != ValueType::Number || Right.GetType() != ValueType::Number) {
+                Push(Error("invalid operands")); break;
+            }
+            double A = Left.AsNumber(), B = Right.AsNumber();
+            switch (Instruction) {
+            case Op::Add: Push(Value::Number(A + B)); break;
+            case Op::Sub: Push(Value::Number(A - B)); break;
+            case Op::Mul: Push(Value::Number(A * B)); break;
+            case Op::Div: {
+                // Explicit IEEE-754 behavior even when the host FP environment traps divide-by-zero.
+                if (B == 0) {
+                    if (A == 0 || std::isnan(A)) Push(Value::Number(std::numeric_limits<double>::quiet_NaN()));
+                    else Push(Value::Number(std::copysign(std::numeric_limits<double>::infinity(), A * std::copysign(1.0, B))));
+                } else Push(Value::Number(A / B));
+                break;
+            }
+            case Op::Less: Push(Value::Bool(A < B)); break;
+            default: throw std::logic_error("invalid arithmetic opcode");
+            }
+            break;
+        }
+        case Op::Negate: {
+            auto Input = Pop();
+            Push(Input.GetType() == ValueType::Number ? Value::Number(-Input.AsNumber()) : Error("invalid operand"));
+            break;
+        }
+        case Op::Jump: case Op::JumpIf: {
+            auto Bits = ReadU32(Code, Current.Pc);
+            bool Take = Instruction == Op::Jump || Pop().IsTruthy();
+            if (Take) Current.Pc = static_cast<std::size_t>(static_cast<std::int64_t>(Current.Pc) +
+                                                           std::bit_cast<std::int32_t>(Bits));
+            break;
+        }
+        case Op::Call: {
+            std::uint16_t Count = std::uint16_t(Code[Current.Pc]) |
+                                  (std::uint16_t(Code[Current.Pc + 1]) << 8);
+            Current.Pc += 2;
+            std::vector<Value> Args(Count);
+            for (std::size_t I = Count; I > 0; --I) Args[I - 1] = Pop();
+            Value Target = Pop();
+            DispatchCall(std::move(Target), std::move(Args), 0, false);
+            break;
+        }
+        case Op::Return: {
+            auto Result = Pop();
+            Frames.pop_back();
+            if (Frames.empty()) return Result;
+            Frames.back().Stack.push_back(std::move(Result));
+            break;
+        }
+        case Op::NewObject:
+            Push(Value::FromScript(CreateScriptObject()));
+            break;
+        case Op::GetMember: {
+            auto Key = Pop(); auto Target = Pop();
+            if (Target.GetType() != ValueType::Object) { Push(Error("value has no members")); break; }
+            auto ObjectValue = Target.AsObject();
+            if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue)) {
+                if ((Key.GetType() != ValueType::String && Key.GetType() != ValueType::Number) ||
+                    (Key.GetType() == ValueType::Number && std::isnan(Key.AsNumber()))) {
+                    Push(Error("invalid ScriptObject key")); break;
+                }
+                auto Found = Script->GetRaw(Key);
+                if (Found) { Push(*Found); break; }
+                auto Meta = Script->GetMetaObject();
+                auto Method = Meta ? Meta->GetRaw(Value::String("__index")) : std::nullopt;
+                if (!Method) { Push(Error("member does not exist")); break; }
+                DispatchCall(*Method, {Target, Key}, 0, true);
+            } else if (auto Native = dynamic_cast<NativeObject*>(ObjectValue))
+                Push(Native->GetMember(Key));
+            else Push(Error("value has no members"));
+            break;
+        }
+        case Op::SetMember: {
+            auto Input = Pop(); auto Key = Pop(); auto Target = Pop();
+            if (Target.GetType() != ValueType::Object) { Push(Error("value has no members")); break; }
+            auto ObjectValue = Target.AsObject();
+            if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue))
+                Push(Script->SetRaw(Key, Input));
+            else if (auto Native = dynamic_cast<NativeObject*>(ObjectValue))
+                Push(Native->SetMember(Key, Input));
+            else Push(Error("value has no members"));
+            break;
+        }
+        default: throw std::logic_error("invalid opcode");
+        }
+    }
+    throw std::logic_error("VM ended without Return");
+}
+} // namespace Feather
