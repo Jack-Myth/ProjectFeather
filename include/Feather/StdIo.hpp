@@ -1,0 +1,30 @@
+#pragma once
+
+#include <Feather/Runtime.hpp>
+
+#include <iosfwd>
+#include <memory>
+#include <string_view>
+
+namespace Feather {
+
+// Optional standard library. The VM core does not create or own these objects.
+// The supplied streams must outlive the library and every VM using its objects.
+class StdIoLibrary final {
+public:
+    StdIoLibrary(std::istream& Input, std::ostream& Output);
+    ~StdIoLibrary();
+    StdIoLibrary(const StdIoLibrary&) = delete;
+    StdIoLibrary& operator=(const StdIoLibrary&) = delete;
+
+    // Returns null for an unrecognized specifier, so hosts can compose resolvers.
+    Value Resolve(std::string_view Specifier) const;
+
+private:
+    struct State;
+    std::shared_ptr<State> Shared;
+    std::shared_ptr<NativeObject> ConsoleObject;
+    std::shared_ptr<NativeObject> IOObject;
+};
+
+} // namespace Feather

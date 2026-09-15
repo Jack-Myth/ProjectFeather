@@ -17,6 +17,13 @@ class Object;
 class Module;
 class Vm;
 class ScriptObject;
+struct ExecutionState;
+class SnapshotHostCodec;
+
+struct HostSnapshotRecord {
+    std::string TypeId;
+    std::vector<std::uint8_t> Payload;
+};
 
 enum class ValueType { Null, Bool, Number, String, Object };
 enum class ObjectType { Script, Function, Error, Host };
@@ -82,6 +89,13 @@ public:
 private:
     friend class Vm;
     std::unordered_map<std::string, Value> GcVisibleMembers;
+};
+
+class SnapshotHostCodec {
+public:
+    virtual ~SnapshotHostCodec() = default;
+    virtual HostSnapshotRecord Encode(const std::shared_ptr<NativeObject>& Input) = 0;
+    virtual std::shared_ptr<NativeObject> Decode(Vm& Machine, const HostSnapshotRecord& Input) = 0;
 };
 
 class ScriptObject final : public Object {
@@ -191,8 +205,14 @@ private:
 class Vm final {
 public:
     explicit Vm(std::shared_ptr<Module> Program,
-                std::size_t MaxScriptObjects = std::numeric_limits<std::size_t>::max());
+                std::size_t MaxScriptObjects = std::numeric_limits<std::size_t>::max(),
+                std::size_t MaxInstructionsPerInvocation = std::numeric_limits<std::size_t>::max());
     Value Run(std::uint32_t FunctionConstant, const std::vector<Value>& Arguments = {});
+    std::vector<std::uint8_t> CaptureSnapshot(SnapshotHostCodec* Codec = nullptr,
+                                              std::size_t MaxBytes = 64 * 1024 * 1024) const;
+    Value ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
+                         SnapshotHostCodec* Codec = nullptr,
+                         std::size_t MaxBytes = 64 * 1024 * 1024);
     bool IsBuiltFrom(const std::shared_ptr<Module>& Source) const { return SourceProgram == Source; }
     ScriptObject* GetRootMetaObject() const { return RootMetaObject; }
     ScriptObject* CreateScriptObject();
@@ -212,6 +232,8 @@ private:
     friend class ScriptObject;
     void RemoveFromRoot(std::uint64_t Token);
     bool OwnsScript(ScriptObject* Input) const;
+    void ValidateOwnedValue(const Value& Input) const;
+    Value Execute(ExecutionState& Execution);
     std::shared_ptr<Module> Program;
     std::shared_ptr<Module> SourceProgram;
     std::vector<std::shared_ptr<Object>> Functions;
@@ -224,7 +246,12 @@ private:
     std::uint64_t NextRootToken = 1;
     std::uint32_t ActiveRuns = 0;
     std::uint32_t ActiveNativeCalls = 0;
+    ExecutionState* ActiveExecution = nullptr;
+    bool HasRun = false;
+    mutable bool SnapshotBusy = false;
     std::size_t ScriptObjectLimit;
+    std::size_t InstructionLimit;
+    std::size_t InstructionsRemaining = 0;
 };
 
 } // namespace Feather

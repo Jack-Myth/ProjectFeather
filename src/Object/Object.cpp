@@ -51,8 +51,7 @@ std::optional<Value> ScriptObject::GetRaw(const Value& Input) const {
 Value ScriptObject::SetRaw(const Value& InputKey, const Value& Input) {
     auto Key = ConvertKey(InputKey);
     if (!Key) return Error("invalid ScriptObject key");
-    if (Input.IsScriptObject() && !Owner->OwnsScript(Input.AsScriptObject()))
-        throw std::invalid_argument("foreign ScriptObject cannot be stored");
+    Owner->ValidateOwnedValue(Input);
     Members.insert_or_assign(std::move(*Key), Input);
     return Input;
 }

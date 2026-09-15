@@ -1,0 +1,6 @@
+def main() {
+    console.PrintLine("Feather stdio ready");
+    console.PrintLine("import ready");
+}
+
+var console = import("std:console");

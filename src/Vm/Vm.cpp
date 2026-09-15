@@ -1,4 +1,5 @@
 #include <Feather/Runtime.hpp>
+#include "Internal.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -10,24 +11,17 @@
 
 namespace Feather {
 namespace {
-class FunctionObject final : public NativeObject {
-public:
-    FunctionObject(std::shared_ptr<Module> Owner, std::shared_ptr<FunctionPrototype> Body)
-        : Owner(std::move(Owner)), Body(std::move(Body)) {}
-    ObjectType GetObjectType() const override { return ObjectType::Function; }
-    bool IsCallable() const override { return true; }
-    const FunctionPrototype& GetBody() const { return *Body; }
-    const std::shared_ptr<Module>& GetOwner() const { return Owner; }
-private:
-    std::shared_ptr<Module> Owner;
-    std::shared_ptr<FunctionPrototype> Body;
-};
-struct Frame {
-    std::shared_ptr<FunctionObject> Function;
-    std::size_t Pc = 0;
-    std::vector<Value> Locals;
-    std::vector<Value> Stack;
-};
+Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Value>& Args) {
+    const auto& Body = Function->GetBody();
+    Frame Next;
+    Next.Function = std::move(Function);
+    Next.Locals.resize(Body.LocalCount);
+    for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
+        if (I < Args.size()) Next.Locals[I] = Args[I];
+        else if (Body.Defaults[I]) Next.Locals[I] = *Body.Defaults[I];
+    }
+    return Next;
+}
 struct ActiveRunGuard {
     explicit ActiveRunGuard(std::uint32_t& Count) : Count(Count) { ++Count; }
     ~ActiveRunGuard() { --Count; }
@@ -60,10 +54,12 @@ Value ConstantValue(const Constant& Item, const std::shared_ptr<Object>& Functio
 }
 } // namespace
 
-Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects)
-    : ScriptObjectLimit(MaxScriptObjects) {
+Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
+       std::size_t MaxInstructionsPerInvocation)
+    : ScriptObjectLimit(MaxScriptObjects), InstructionLimit(MaxInstructionsPerInvocation) {
     if (!Input) throw std::invalid_argument("null module");
     if (ScriptObjectLimit == 0) throw std::invalid_argument("ScriptObject limit must include RootMetaObject");
+    if (InstructionLimit == 0) throw std::invalid_argument("instruction limit must be positive");
     Input->Validate();
     SourceProgram = Input;
     ScriptHeap.emplace_back(new ScriptObject(this));
@@ -103,10 +99,19 @@ Value Vm::GetGlobal(const std::string& Name) const {
     auto Found = Globals.find(Name);
     return Found == Globals.end() ? Error("undefined global") : Found->second;
 }
+void Vm::ValidateOwnedValue(const Value& Input) const {
+    if (Input.IsScriptObject() && !OwnsScript(Input.AsScriptObject()))
+        throw std::invalid_argument("ScriptObject belongs to another VM");
+    if (Input.GetType() == ValueType::Object &&
+        Input.GetObjectType() == ObjectType::Function) {
+        auto* Function = dynamic_cast<FunctionObject*>(Input.AsObject());
+        if (!Function || Function->GetOwner() != Program)
+            throw std::invalid_argument("function belongs to another VM module");
+    }
+}
 void Vm::SetGlobal(std::string Name, Value Input) {
     Value::String(Name);
-    if (Input.IsScriptObject() && !OwnsScript(Input.AsScriptObject()))
-        throw std::invalid_argument("cannot store foreign ScriptObject as global");
+    ValidateOwnedValue(Input);
     Globals.insert_or_assign(std::move(Name), std::move(Input));
 }
 void Vm::RegisterNativeFunction(std::string Name, std::shared_ptr<NativeObject> Input) {
@@ -145,8 +150,7 @@ void RootHandle::Reset() {
     Lifetime.reset();
 }
 RootHandle Vm::AddToRoot(Value Input) {
-    if (Input.IsScriptObject() && !OwnsScript(Input.AsScriptObject()))
-        throw std::invalid_argument("cannot root foreign ScriptObject");
+    ValidateOwnedValue(Input);
     if (NextRootToken == 0) throw std::overflow_error("RootHandle token space exhausted");
     auto Token = NextRootToken++;
     HostRoots.emplace(Token, std::move(Input));
@@ -222,29 +226,36 @@ GcStatistics Vm::GetGcStatistics() const {
 }
 
 Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Arguments) {
-    ActiveRunGuard Guard(ActiveRuns);
     if (FunctionConstant >= Functions.size() || !Functions[FunctionConstant])
         throw std::invalid_argument("entry is not a function constant");
-    for (const auto& Input : Arguments) {
-        if (Input.IsScriptObject() && !OwnsScript(Input.AsScriptObject()))
-            throw std::invalid_argument("ScriptObject belongs to another VM");
-    }
-    std::vector<Frame> Frames;
+    for (const auto& Input : Arguments) ValidateOwnedValue(Input);
+    ExecutionState Execution;
+    Execution.Frames.push_back(MakeFrame(
+        std::static_pointer_cast<FunctionObject>(Functions[FunctionConstant]), Arguments));
+    return Execute(Execution);
+}
+
+Value Vm::Execute(ExecutionState& Execution) {
+    if (ActiveRuns == 0) InstructionsRemaining = InstructionLimit;
+    ActiveRunGuard Guard(ActiveRuns);
+    HasRun = true;
+    auto* PreviousExecution = ActiveExecution;
+    ActiveExecution = &Execution;
+    struct RestoreExecution {
+        ExecutionState*& Target;
+        ExecutionState* Previous;
+        ~RestoreExecution() { Target = Previous; }
+    } Restore{ActiveExecution, PreviousExecution};
+    auto& Frames = Execution.Frames;
     auto PushFrame = [&](const std::shared_ptr<FunctionObject>& Function,
                          const std::vector<Value>& Args) {
         if (Frames.size() >= 1024) throw std::runtime_error("VM call depth exceeded");
-        const auto& Body = Function->GetBody();
-        Frame Next;
-        Next.Function = Function;
-        Next.Locals.resize(Body.LocalCount);
-        for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
-            if (I < Args.size()) Next.Locals[I] = Args[I];
-            else if (Body.Defaults[I]) Next.Locals[I] = *Body.Defaults[I];
-        }
-        Frames.push_back(std::move(Next));
+        Frames.push_back(MakeFrame(Function, Args));
     };
-    PushFrame(std::static_pointer_cast<FunctionObject>(Functions[FunctionConstant]), Arguments);
     while (!Frames.empty()) {
+        if (InstructionsRemaining == 0)
+            throw std::runtime_error("VM instruction budget exceeded");
+        --InstructionsRemaining;
         Frame& Current = Frames.back();
         const auto& Code = Current.Function->GetBody().Code;
         if (Current.Pc >= Code.size()) throw std::runtime_error("VM PC out of range");
@@ -256,6 +267,7 @@ Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Argument
             return Result;
         };
         auto Push = [&](Value Input) {
+            ValidateOwnedValue(Input);
             if (Current.Stack.size() >= 65'536) throw std::runtime_error("VM stack limit exceeded");
             Current.Stack.push_back(std::move(Input));
         };
@@ -359,7 +371,9 @@ Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Argument
             std::vector<Value> Args(Count);
             for (std::size_t I = Count; I > 0; --I) Args[I - 1] = Pop();
             Value Target = Pop();
+            Execution.PendingCallResult = true;
             DispatchCall(std::move(Target), std::move(Args), 0, false);
+            Execution.PendingCallResult = false;
             break;
         }
         case Op::Return: {

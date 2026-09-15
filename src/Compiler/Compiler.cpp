@@ -13,10 +13,11 @@ namespace Feather {
 namespace {
 
 enum class TokenKind {
-    End, Name, Number, String, Fn, Let, Return, If, Else, While, Null,
+    End, Name, Number, String, Def, Var, Return, If, Else, While, Null,
     True, False, Object, LeftParen, RightParen, LeftBrace, RightBrace,
     LeftBracket, RightBracket, Comma, Dot, Semicolon, Assign, Equal,
-    Less, Plus, Minus, Star, Slash
+    Less, Plus, Minus, Star, Slash, QuickHash, QuickDollar,
+    QuickAmpersand, QuickRightAngle
 };
 struct Token {
     TokenKind Kind;
@@ -73,20 +74,44 @@ public:
             Fail(At, "invalid UTF-8 source");
         }
         std::vector<Token> Output;
+        bool AtLineStart = true;
         while (Position < Input.size()) {
             char C = Input[Position];
-            if (C == ' ' || C == '\t' || C == '\r' || C == '\n') { Advance(); continue; }
+            if (C == ' ' || C == '\t' || C == '\r' || C == '\n') {
+                if (C == '\n') AtLineStart = true;
+                Advance(); continue;
+            }
             if (C == '/' && Position + 1 < Input.size() && Input[Position + 1] == '/') {
                 while (Position < Input.size() && Input[Position] != '\n') Advance();
                 continue;
             }
             Token Start{TokenKind::End, {}, Position, Line, Column};
+            if (AtLineStart && (C == '#' || C == '$' || C == '&' || C == '>')) {
+                Start.Kind = C == '#' ? TokenKind::QuickHash :
+                             C == '$' ? TokenKind::QuickDollar :
+                             C == '&' ? TokenKind::QuickAmpersand : TokenKind::QuickRightAngle;
+                Advance();
+                while (Position < Input.size() && Input[Position] != '\n' && Input[Position] != '\r') {
+                    if (Input[Position] == '\\' && Position + 2 < Input.size() &&
+                        Input[Position + 1] == '/' && Input[Position + 2] == '/') {
+                        Start.Text += "//";
+                        Advance(); Advance(); Advance();
+                    } else if (Input[Position] == '/' && Position + 1 < Input.size() &&
+                               Input[Position + 1] == '/') break;
+                    else { Start.Text += Input[Position]; Advance(); }
+                }
+                while (!Start.Text.empty() && (Start.Text.back() == ' ' || Start.Text.back() == '\t'))
+                    Start.Text.pop_back();
+                Output.push_back(std::move(Start));
+                AtLineStart = false;
+                continue;
+            }
             if (Alpha(C)) {
                 std::size_t Begin = Position;
                 do { Advance(); } while (Position < Input.size() && (Alpha(Input[Position]) || Digit(Input[Position])));
                 Start.Text = std::string(Input.substr(Begin, Position - Begin));
                 static const std::unordered_map<std::string, TokenKind> Keywords{
-                    {"fn", TokenKind::Fn}, {"let", TokenKind::Let}, {"return", TokenKind::Return},
+                    {"def", TokenKind::Def}, {"var", TokenKind::Var}, {"return", TokenKind::Return},
                     {"if", TokenKind::If}, {"else", TokenKind::Else}, {"while", TokenKind::While},
                     {"null", TokenKind::Null}, {"true", TokenKind::True}, {"false", TokenKind::False},
                     {"object", TokenKind::Object}};
@@ -159,6 +184,7 @@ public:
                 }
             }
             Output.push_back(std::move(Start));
+            AtLineStart = false;
         }
         Output.push_back({TokenKind::End, {}, Position, Line, Column});
         return Output;
@@ -173,7 +199,7 @@ private:
 };
 
 enum class NodeKind { Literal, Name, Object, Member, Call, Unary, Binary, Assign,
-    Let, Return, If, While, Block, Expression };
+    Var, Return, If, While, Block, Expression };
 struct Node {
     NodeKind Kind;
     Token At;
@@ -205,13 +231,13 @@ public:
         ProgramAst Result;
         std::unordered_set<std::string> Declared;
         while (!Check(TokenKind::End)) {
-            if (Match(TokenKind::Fn)) {
+            if (Match(TokenKind::Def)) {
                 auto Function = ParseFunction(Previous());
                 if (!Declared.insert(Function.Name).second) Fail(Function.At, "duplicate global declaration");
                 Result.Functions.push_back(std::move(Function));
             } else {
                 auto Statement = ParseStatement();
-                if (Statement->Kind == NodeKind::Let && !Declared.insert(Statement->Name).second)
+                if (Statement->Kind == NodeKind::Var && !Declared.insert(Statement->Name).second)
                     Fail(Statement->At, "duplicate global declaration");
                 Result.Statements.push_back(std::move(Statement));
             }
@@ -266,7 +292,7 @@ private:
         auto Result = Make(NodeKind::Block, At);
         while (!Check(TokenKind::RightBrace)) {
             if (Check(TokenKind::End)) Fail(Peek(), "unterminated block");
-            if (Check(TokenKind::Fn)) Fail(Peek(), "function declarations are top-level only");
+            if (Check(TokenKind::Def)) Fail(Peek(), "function declarations are top-level only");
             Result->Children.push_back(ParseStatement());
         }
         Expect(TokenKind::RightBrace, "expected '}'");
@@ -275,8 +301,11 @@ private:
     NodePtr ParseStatement() {
         DepthGuard Guard(Depth, Peek());
         if (Check(TokenKind::LeftBrace)) return ParseBlock();
-        if (Match(TokenKind::Let)) {
-            auto Result = Make(NodeKind::Let, Previous());
+        if (Match(TokenKind::QuickHash) || Match(TokenKind::QuickDollar) ||
+            Match(TokenKind::QuickAmpersand) || Match(TokenKind::QuickRightAngle))
+            return ParseQuickLine(Previous());
+        if (Match(TokenKind::Var)) {
+            auto Result = Make(NodeKind::Var, Previous());
             Result->Name = Expect(TokenKind::Name, "expected variable name").Text;
             if (Match(TokenKind::Assign)) Result->Children.push_back(ParseExpression());
             Expect(TokenKind::Semicolon, "expected ';'"); return Result;
@@ -305,6 +334,26 @@ private:
         auto Result = Make(NodeKind::Expression, Peek());
         Result->Children.push_back(ParseExpression());
         Expect(TokenKind::Semicolon, "expected ';'"); return Result;
+    }
+    NodePtr ParseQuickLine(const Token& At) {
+        const char* Function = nullptr;
+        switch (At.Kind) {
+        case TokenKind::QuickHash: Function = "__QuickOperatorHash"; break;
+        case TokenKind::QuickDollar: Function = "__QuickOperatorDollar"; break;
+        case TokenKind::QuickAmpersand: Function = "__QuickOperatorAmpersand"; break;
+        case TokenKind::QuickRightAngle: Function = "__QuickOperatorRightAngleBucket"; break;
+        default: Fail(At, "internal invalid quick operator");
+        }
+        auto Statement = Make(NodeKind::Expression, At);
+        auto Call = Make(NodeKind::Call, At);
+        auto Target = Make(NodeKind::Name, At);
+        Target->Name = Function;
+        auto Argument = Make(NodeKind::Literal, At);
+        Argument->Literal = Value::String(At.Text);
+        Call->Children.push_back(std::move(Target));
+        Call->Children.push_back(std::move(Argument));
+        Statement->Children.push_back(std::move(Call));
+        return Statement;
     }
     NodePtr ParseExpression() { DepthGuard Guard(Depth, Peek()); return ParseAssignment(); }
     NodePtr ParseAssignment() {
@@ -442,7 +491,7 @@ private:
     void EmitStatement(const Node& Statement, bool TopLevel) {
         DepthGuard Guard(Depth, Statement.At);
         switch (Statement.Kind) {
-        case NodeKind::Let: {
+        case NodeKind::Var: {
             if (!TopLevel && Scopes.back().contains(Statement.Name))
                 Fail(Statement.At, "duplicate local declaration");
             if (Statement.Children.empty()) Emit(Op::Null);
@@ -567,8 +616,15 @@ private:
 } // namespace
 
 CompiledProgram Compile(std::string_view Source) {
-    auto Ast = Parser(Lexer(Source).Scan()).Parse();
+    auto Tokens = Lexer(Source).Scan();
+    bool UsesQuickOperators = false;
+    for (const auto& Token : Tokens)
+        if (Token.Kind == TokenKind::QuickHash || Token.Kind == TokenKind::QuickDollar ||
+            Token.Kind == TokenKind::QuickAmpersand || Token.Kind == TokenKind::QuickRightAngle)
+            UsesQuickOperators = true;
+    auto Ast = Parser(std::move(Tokens)).Parse();
     CompiledProgram Result;
+    Result.UsesQuickOperators = UsesQuickOperators;
     Result.Program = std::make_shared<Module>();
     for (const auto& Function : Ast.Functions) {
         auto Prototype = std::make_shared<FunctionPrototype>();
