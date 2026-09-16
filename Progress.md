@@ -5,7 +5,7 @@
 
 ## 当前状态
 
-**M1 至 M5 首版、单 VM 多文件模块、嵌入式调试 target、TCP 控制台调试器和 DAP adapter 可运行；`var`、`def`、`export` 和命令行程序已加入。** ScriptObject 使用 VM 非移动堆；VM 可在指令安全点自动执行完整标记清除，也保留空闲时显式 GC、RootHandle、NativeObject 登记、内存与收集统计和分配故障通道。宿主可注册 native 函数、读写模块全局值。`Compile(source)` 生成模块、初始化函数、命名函数映射和导出表。实验版 v3 `.fbc` 支持独立编译和加载；可选 v3 `.fbs` 保存源码位置、可断点标记、函数名及带生命周期的局部变量名。v3 快照已能保存/恢复模块集合、跨模块函数和对象。默认静态 runtime 包含 `DebugTarget` 与 `DapAdapter`；`-Ddebugger=false` 可完整移除 JSON 调试实现和控制台调试器，核心仍只保留传输无关的安全点接口。公开 C++ API、调试协议和磁盘格式仍处实验阶段。
+**0.3.1 版本节点已形成：M1 至 M5 首版、单 VM 多文件模块、源码与字节码统一运行入口、精简 `feathervm`、嵌入式调试 target、TCP 控制台调试器、DAP adapter，以及带基础语言支持的 VS Code 扩展均可运行。** Release 流程已固定三级优化、LTO、`NDEBUG` 和完整测试；版本内容见 `CHANGELOG.md`。ScriptObject 使用 VM 非移动堆；VM 可在指令安全点自动执行完整标记清除，也保留空闲时显式 GC、RootHandle、NativeObject 登记、内存与收集统计和分配故障通道。宿主可注册 native 函数、读写模块全局值。`Compile(source)` 生成模块、初始化函数、命名函数映射和导出表。实验版 v3 `.fbc` 支持独立编译和加载；可选 v3 `.fbs` 保存源码位置、可断点标记、函数名及带生命周期的局部变量名。v3 快照已能保存/恢复模块集合、跨模块函数和对象。默认静态 runtime 包含 `DebugTarget` 与 `DapAdapter`；`-Ddebugger=false` 可完整移除 JSON 调试实现和控制台调试器，核心仍只保留传输无关的安全点接口。公开 C++ API、调试协议和磁盘格式仍处实验阶段。
 
 ### 已确定的主要方向
 
@@ -17,7 +17,7 @@
 - 栈式 VM 已确定；第 3 节定义初版内存模块 ISA、调用帧与校验规则。`JUMP_IF` 为真时跳转并弹出条件值，NaN 条件为 true。语言层错误是普通 Error 值，不自动传播；VM/宿主致命故障不包装成 Error。
 - GC 在执行中的安全指令边界按动态阈值自动触发，VM 空闲时宿主也可显式触发；根集由 VM 私有维护，宿主以 AddToRoot/RemoveFromRoot 持有 GC 对象。NativeObject 本体不由 GC 回收，但其 GC 可见成员表由 VM 遍历；未登记的 C++ 成员由 NativeObject 自行管理。VM 快照只保证 VM 内部一致，宿主状态由宿主接口负责。
 
-`feather run <source.fe>`、`featherc <source.fe> -o <program.fbc>` 和 `feathervm <program.fbc>` 均已加入。运行入口先执行顶层语句，再调用可选的无参数 `main`；独立程序未注册快捷函数，会明确拒绝快捷行。嵌入式宿主可在初始化前用 `RegisterNativeFunction` 注入 `__QuickOperator…`，用 `SetGlobal` 注入一般宿主对象；编译器保留快捷行标记供加载后使用。
+`feather run <program.fe|program.fbc>`、`featherc <source.fe> -o <program.fbc>` 和精简的 `feathervm <program.fbc>` 均已加入。源码运行会优先使用不早于 `.fe` 的同名、有效 `.fbc`，源码调试仍总是重新编译；`feathervm` 不链接编译器和调试实现。运行入口先执行顶层语句，再调用可选的无参数 `main`；独立程序未注册快捷函数，会明确拒绝快捷行。嵌入式宿主可在初始化前用 `RegisterNativeFunction` 注入 `__QuickOperator…`，用 `SetGlobal` 注入一般宿主对象；编译器保留快捷行标记供加载后使用。
 
 `RegisterImport` 只校验并转发普通全局调用；宿主自行解析来源、创建子 VM、代理导出值并管理缓存。CLI 宿主从可执行文件旁的 `modules/` 搜索裸名，Native 动态库优先于同名 Feather 文件；`stdio.felib` 是可运行的独立模块，返回含 Console/IO 的单一对象，不直接注入全局名。解释器与 Native 库分别静态链接同一套 runtime 源码，不要求旁置 Feather DLL。跨 VM ScriptObject/Function 不通过旧适配器返回。
 
@@ -45,11 +45,11 @@
 
 - **单 VM 多文件模块**：第一版已完成；模块实例的私有全局表、函数/帧身份、显式导出、重复/循环初始化、GC 和 v3 快照见 `SPEC-multimodule.md`。CLI 宿主层已能按调用方目录解析相对 `.fe`/`.fbc` 导入并缓存文件模块。
 - **运行时源码位置诊断**：内存指令位置表、普通 Error 查询、独立 `.fbs` 与 VM 故障位置已完成；需要时的快照 Error 来源再按版本演进，v3 `.fbc` 可单独加载并使用无位置回退。
-- **嵌入式调试**：v1 Feather 调试协议、宿主 channel、跨线程命令队列和 VM 线程内暂停检查已完成。v3 `.fbs` 已提供可断点标记、函数名、参数名、局部变量名和词法范围；合成的函数绑定和隐式返回不会抢占源码断点。Error 结果边界可按前端请求暂停，并区分操作结果与函数返回；DAP adapter 映射标准 exception breakpoint filter。`feather-debugger` 已用一条双向 TCP 连接完成真实独立进程消费；`--debug-listen` 默认异步附加，显式 `--wait-debugger` 才允许先设断点再运行，脚本 stdio 与调试传输隔离。
+- **嵌入式调试**：v1 Feather 调试协议、宿主 channel、跨线程命令队列和 VM 线程内暂停检查已完成。v3 `.fbs` 已提供可断点标记、函数名、参数名、局部变量名和词法范围；合成的函数绑定和隐式返回不会抢占源码断点。Error 结果边界可按前端请求暂停，并区分操作结果与函数返回；暂停线程还支持 Feather 表达式求值、条件断点以及 locals/stack/globals 和已有对象属性修改，求值期间屏蔽递归调试回调。DAP adapter 映射标准 exception breakpoint filter、evaluate 与 setVariable。`feather-debugger` 和 VS Code 扩展均用一条双向 TCP 连接消费同一 target；VS Code 侧在 extension host 内完成 DAP 转换并支持 launch/attach。`--debug-listen` 默认异步附加，显式 `--wait-debugger` 才允许先设断点再运行，脚本 stdio 与调试传输隔离。
 - 快照保存/恢复的返回值、代码身份、RootMetaObject 身份和宿主恢复失败语义。
 - NativeObject 的 GC 追踪与释放钩子；脚本主动构造 Error 及更多错误字段。
 - 字节码/快照格式版本校验、恶意或损坏输入的验证策略。
 
 ## 下一个具体动作
 
-本节点已完成嵌入式调试 target、v3 `.fbs` 具名变量与可断点位置、单 TCP 控制台调试器、同步等待/异步附加两种解释器模式和传输无关 DAP adapter。后续可选择具体 IDE 插件完成编辑器端联调，不需要增加独立 DAP 中继进程；模块目录配置和 Native 上下文服务也可作为新的独立节点推进。`Compile`、内存模块、调试协议、字节码、符号及快照字节格式仍处实验阶段。
+0.3.1 已完成构建、运行、调试与编辑器入口的第一轮收束。下一节点优先把当前单文件正则补全升级为可解析导入和导出表的语言服务，再考虑交互式终端、远端路径映射、日志点/命中次数，以及可配置模块目录。`Compile`、内存模块、调试协议、字节码、符号及快照字节格式仍处实验阶段；在承诺兼容性前应继续保持显式版本校验。

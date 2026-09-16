@@ -206,20 +206,28 @@ struct DebugProperty {
 // optional debugger hook.
 enum class DebugErrorOrigin { Operation, FunctionReturn };
 
-// A read-only view valid only during the active VmDebugController callback.
+// A callback-scoped VM view. Inspection is read-only by default; the explicit
+// Set*/Evaluate methods are the only supported mutation and debug-execution paths.
 class FEATHER_API VmDebugContext final {
 public:
     std::size_t GetFrameCount() const;
     DebugFrameView GetFrame(std::size_t FrameId) const;
     std::vector<DebugNamedValue> GetGlobals(std::size_t FrameId) const;
     std::vector<DebugProperty> GetProperties(const Value& Input) const;
+    Value Evaluate(std::size_t FrameId, const std::shared_ptr<Module>& Program,
+                   std::uint32_t FunctionConstant,
+                   const std::vector<Value>& Arguments) const;
+    void SetLocal(std::size_t FrameId, std::size_t Slot, Value Input) const;
+    void SetStack(std::size_t FrameId, std::size_t Slot, Value Input) const;
+    void SetGlobal(std::size_t FrameId, std::string Name, Value Input) const;
+    Value SetProperty(const Value& Target, const Value& Key, Value Input) const;
 private:
     friend class Vm;
-    VmDebugContext(const Vm* Machine, const ExecutionState* Execution,
+    VmDebugContext(Vm* Machine, ExecutionState* Execution,
                    std::optional<std::size_t> TopFramePc = std::nullopt)
         : Machine(Machine), Execution(Execution), TopFramePc(TopFramePc) {}
-    const Vm* Machine;
-    const ExecutionState* Execution;
+    Vm* Machine;
+    ExecutionState* Execution;
     std::optional<std::size_t> TopFramePc;
 };
 
@@ -355,6 +363,10 @@ private:
     void RemoveFromRoot(std::uint64_t Token);
     bool OwnsScript(ScriptObject* Input) const;
     void ValidateOwnedValue(const Value& Input) const;
+    Value EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t FrameId,
+                                  const std::shared_ptr<Module>& EvaluationProgram,
+                                  std::uint32_t FunctionConstant,
+                                  const std::vector<Value>& Arguments);
     Value Execute(ExecutionState& Execution);
     void ReachDebugSafePoint(ExecutionState& Execution);
     void ReachDebugError(ExecutionState& Execution, const Value& Error,
@@ -384,6 +396,7 @@ private:
     std::uint64_t NextRootToken = 1;
     std::uint32_t ActiveRuns = 0;
     std::uint32_t ActiveNativeCalls = 0;
+    std::uint32_t DebugCallbackSuppression = 0;
     ExecutionState* ActiveExecution = nullptr;
     bool HasRun = false;
     mutable bool SnapshotBusy = false;

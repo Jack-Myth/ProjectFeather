@@ -39,4 +39,26 @@ void WriteFile(const std::filesystem::path& Path, std::span<const std::uint8_t> 
     if (!Output) throw std::runtime_error("cannot write output file");
 }
 
+#ifdef FEATHER_CLI_SOURCE_LOADER
+CompiledProgram LoadSourceProgram(const std::filesystem::path& SourcePath) {
+    auto BytecodePath = SourcePath;
+    BytecodePath.replace_extension(".fbc");
+    std::error_code Error;
+    const bool HasBytecode = std::filesystem::is_regular_file(BytecodePath, Error);
+    Error.clear();
+    const auto SourceTime = std::filesystem::last_write_time(SourcePath, Error);
+    if (!Error && HasBytecode) {
+        Error.clear();
+        const auto BytecodeTime = std::filesystem::last_write_time(BytecodePath, Error);
+        if (!Error && BytecodeTime >= SourceTime) {
+            try { return DeserializeProgram(ReadFile(BytecodePath)); }
+            catch (const std::exception&) {
+                // A cache is only an optimization. Compile the authoritative source below.
+            }
+        }
+    }
+    return Compile(ReadSource(SourcePath));
+}
+#endif
+
 } // namespace Feather::Cli

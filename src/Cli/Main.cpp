@@ -34,25 +34,35 @@ int main(int ArgCount, char** Arguments) {
     constexpr bool DebugCommand = false;
 #endif
     if (!RunCommand && !DebugCommand) {
-        std::cerr << "usage: feather run <source.fe>\n";
+        std::cerr << "usage: feather run <program.fe|program.fbc>\n";
 #ifdef FEATHER_CLI_DEBUGGER
         std::cerr << "       feather debug --listen <host:port> [--wait-debugger] <source.fe>\n";
 #endif
         return 2;
     }
-    auto SourcePath = std::filesystem::path(Arguments[DebugCommand ? ArgCount - 1 : 2]);
+    auto ProgramPath = std::filesystem::path(Arguments[DebugCommand ? ArgCount - 1 : 2]);
     try {
-        auto Program = Feather::Compile(Feather::Cli::ReadSource(SourcePath));
+        const auto Extension = ProgramPath.extension();
+        if (DebugCommand && Extension != ".fe")
+            throw std::invalid_argument("debug requires a .fe source file");
+        if (!DebugCommand && Extension != ".fe" && Extension != ".fbc")
+            throw std::invalid_argument("run requires a .fe or .fbc file");
+        const auto Kind = Extension == ".fbc" ? Feather::Cli::ModuleFileKind::Bytecode :
+            Feather::Cli::ModuleFileKind::Source;
+        auto Program = Kind == Feather::Cli::ModuleFileKind::Bytecode ?
+            Feather::DeserializeProgram(Feather::Cli::ReadFile(ProgramPath)) :
+            (DebugCommand ? Feather::Compile(Feather::Cli::ReadSource(ProgramPath)) :
+                            Feather::Cli::LoadSourceProgram(ProgramPath));
 #ifdef FEATHER_CLI_DEBUGGER
         if (DebugCommand)
             return Feather::Cli::RunDebugProgram(
-                Program, SourcePath, Feather::Cli::ModuleFileKind::Source,
+                Program, ProgramPath, Feather::Cli::ModuleFileKind::Source,
                 Feather::Cli::PathText(std::filesystem::path(Arguments[3])),
                 HasWaitDebugger);
 #endif
-        return Feather::Cli::RunProgram(Program, SourcePath, Feather::Cli::ModuleFileKind::Source);
+        return Feather::Cli::RunProgram(Program, ProgramPath, Kind);
     } catch (const std::exception& Failure) {
-        std::cerr << "feather: " << Feather::Cli::PathText(SourcePath) << ": "
+        std::cerr << "feather: " << Feather::Cli::PathText(ProgramPath) << ": "
                   << Failure.what() << '\n';
         return 1;
     }

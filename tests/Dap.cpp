@@ -50,6 +50,10 @@ void Run() {
     Adapter.DispatchDapMessage(R"({"seq":1,"type":"request","command":"initialize"})");
     Check(Channel->DapContains(R"("supportsConfigurationDoneRequest":true)"),
           "initialize capabilities missing");
+    Check(Channel->DapContains(R"("supportsConditionalBreakpoints":true)") &&
+          Channel->DapContains(R"("supportsEvaluateForHovers":true)") &&
+          Channel->DapContains(R"("supportsSetVariable":true)"),
+          "inspection and mutation capabilities missing");
 
     Adapter.DispatchDapMessage(R"({"seq":2,"type":"request","command":"attach"})");
     Check(Channel->TargetContains(R"("method":"Debugger.enable")"), "attach did not enable target");
@@ -57,8 +61,10 @@ void Run() {
     Check(Channel->DapContains(R"("event":"initialized")"), "initialized event missing");
 
     Adapter.DispatchDapMessage(
-        R"({"seq":3,"type":"request","command":"setBreakpoints","arguments":{"source":{"path":"main.fe"},"breakpoints":[{"line":4}]}})");
+        R"({"seq":3,"type":"request","command":"setBreakpoints","arguments":{"source":{"path":"main.fe"},"breakpoints":[{"line":4,"condition":"value == 2"}]}})");
     Check(Channel->TargetContains(R"("moduleId":"")"), "primary source was not mapped to root module");
+    Check(Channel->TargetContains(R"("condition":"value == 2")"),
+          "conditional breakpoint was not forwarded");
     Adapter.DispatchTargetMessage(R"({"id":2,"result":{"breakpointId":7}})");
     Check(Channel->DapContains(R"("command":"setBreakpoints")"), "setBreakpoints response missing");
 
@@ -109,6 +115,35 @@ void Run() {
     Check(Channel->DapContains(R"("reason":"exception")") &&
           Channel->DapContains(R"("text":"Error: invalid operands")"),
           "Error stop was not mapped to a DAP exception stop");
+
+    Adapter.DispatchDapMessage(
+        R"({"seq":10,"type":"request","command":"evaluate","arguments":{"frameId":0,"expression":"value + 1","context":"watch"}})");
+    Check(Channel->TargetContains(R"("method":"Debugger.evaluate")") &&
+          Channel->TargetContains(R"("expression":"value + 1")"),
+          "DAP evaluate was not forwarded");
+    Adapter.DispatchTargetMessage(
+        R"({"id":8,"result":{"type":"number","description":"43","value":43}})");
+    Check(Channel->DapContains(R"("command":"evaluate")") &&
+          Channel->DapContains(R"("result":"43")"),
+          "evaluate result was not mapped to DAP");
+
+    Adapter.DispatchDapMessage(
+        R"({"seq":11,"type":"request","command":"scopes","arguments":{"frameId":0}})");
+    Adapter.DispatchDapMessage(
+        R"({"seq":12,"type":"request","command":"setVariable","arguments":{"variablesReference":1,"name":"value","value":"43"}})");
+    Check(Channel->TargetContains(R"("method":"Debugger.setVariable")") &&
+          Channel->TargetContains(R"("scope":"locals")"),
+          "DAP variable mutation was not forwarded");
+    Adapter.DispatchTargetMessage(
+        R"({"id":9,"result":{"type":"number","description":"43","value":43}})");
+    Check(Channel->DapContains(R"("command":"setVariable")") &&
+          Channel->DapContains(R"("value":"43")"),
+          "setVariable result was not mapped to DAP");
+
+    Adapter.DispatchTargetMessage(
+        R"({"method":"Debugger.paused","params":{"stopId":3,"reason":"breakpoint","conditionError":"expected expression"}})");
+    Check(Channel->DapContains(R"("description":"expected expression")"),
+          "condition failure was not exposed in the stopped event");
 }
 
 } // namespace

@@ -1,6 +1,6 @@
 # 工程结构与开工顺序
 
-状态：M1 至 M5、单 VM 多文件模块、Native 动态库、嵌入式调试协议端、TCP 控制台调试器和传输无关 DAP adapter 首版可运行，源码与独立字节码命令行程序已接入；`stdio.felib` 是首个独立 Native 模块。公开 API 和字节格式仍处实验阶段。运行时语义以 `SPEC-runtime-design.md` 为准，源码语法以 `SPEC-syntax.md` 为准，多模块以 `SPEC-multimodule.md` 为准，快照行为以 `SPEC-snapshot.md` 为准，磁盘编译产物以 `SPEC-bytecode-format.md` 为准，导入以 `SPEC-import.md`、`SPEC-native-modules.md` 为准，标准输入输出以 `SPEC-stdio.md` 为准，调试嵌入边界以 `SPEC-debug-protocol.md`、`SPEC-debugger-cli.md` 和 `SPEC-dap-adapter.md` 为准。
+状态：M1 至 M5、单 VM 多文件模块、Native 动态库、嵌入式调试协议端、TCP 控制台调试器、传输无关 DAP adapter 和 VS Code 扩展首版可运行，源码与独立字节码命令行程序已接入；`stdio.felib` 是首个独立 Native 模块。公开 API 和字节格式仍处实验阶段。运行时语义以 `SPEC-runtime-design.md` 为准，源码语法以 `SPEC-syntax.md` 为准，多模块以 `SPEC-multimodule.md` 为准，快照行为以 `SPEC-snapshot.md` 为准，磁盘编译产物以 `SPEC-bytecode-format.md` 为准，导入以 `SPEC-import.md`、`SPEC-native-modules.md` 为准，标准输入输出以 `SPEC-stdio.md` 为准，调试嵌入边界以 `SPEC-debug-protocol.md`、`SPEC-debugger-cli.md` 和 `SPEC-dap-adapter.md` 为准。
 
 ## 目录
 
@@ -8,6 +8,8 @@
 ProjectFeather/
 ├─ meson.build                    # C++20；静态 runtime、命令行入口与测试目标
 ├─ meson_options.txt              # 可选 debugger 打包开关
+├─ scripts/build-release.ps1      # 固定优化选项并验证 Release 构建
+├─ CHANGELOG.md                   # 可交付版本节点与兼容性边界
 ├─ SPEC-runtime-design.md        # 唯一的运行时语义规范
 ├─ SPEC-syntax.md                # 独立的源码词法、文法与名称解析规范
 ├─ SPEC-snapshot.md              # M5 保存/恢复及格式契约
@@ -38,6 +40,7 @@ ProjectFeather/
 │  └─ Debug/                     # 可选、可剥离的调试目标和 DAP adapter
 ├─ stdlib/                       # 独立于核心库的 Console/IO 实现
 ├─ modules/                      # Native 模块构建目标；输出到 build/modules/
+├─ editors/vscode-feather/       # 进程内 DAP 转换与单 TCP VS Code 调试扩展
 └─ tests/
    ├─ M1.cpp                    # 手写模块与 VM
    ├─ M2.cpp                    # 对象协议
@@ -58,9 +61,11 @@ ProjectFeather/
    └─ fixtures/                 # 命令行集成样例
 ```
 
-目录在首次添加相应代码时创建；不放空占位文件。使用 Meson 构建位置无关的静态 runtime、四个自包含命令行程序（含 `feather-debugger`）、`stdio.felib` 动态库和测试可执行程序。Native C++ 接口要求同工具链/运行时，不承诺跨工具链稳定 ABI；磁盘字节码格式为实验版。构建目录放在工作区内的 `build/`，不纳入源码。
+目录在首次添加相应代码时创建；不放空占位文件。使用 Meson 构建位置无关的静态 runtime、四个命令行程序（含 `feather-debugger`）、`stdio.felib` 动态库和测试可执行程序。`feather` 完整链接编译器与可选调试实现；`feathervm` 通过普通静态链接只拉入字节码执行路径，不链接源码编译器、调试协议或 Socket transport。Native C++ 接口要求同工具链/运行时，不承诺跨工具链稳定 ABI；磁盘字节码格式为实验版。开发与 Release 构建目录分别使用 `build/` 和 `build-release/`，均不纳入源码。
 
 在 Windows 上，从 Visual Studio 的 **x64 Native Tools Command Prompt** 进入本目录，运行 `meson setup build`，随后运行 `meson compile -C build` 和 `meson test -C build --print-errorlogs`。
+
+Release 流程统一由 `scripts/build-release.ps1` 驱动，显式设置 `buildtype=release`、`optimization=3`、`b_lto=true` 和 `b_ndebug=true`，并把完整测试作为成功条件。默认仍构建调试协议与前端，以保持 0.3.1 的完整功能面；传入 `-WithoutDebugger` 才设置 `-Ddebugger=false`，用于只需要运行能力的分发。不要把 Release 与“无调试功能”混为一谈：前者是编译优化配置，后者是独立的功能裁剪开关。
 
 ## 依赖方向
 
@@ -68,7 +73,9 @@ ProjectFeather/
 
 `stdio.felib` 静态链接 runtime 的公开嵌入实现，核心不反向依赖标准输入输出，也不再要求旁置 `feather-core.dll`。`feather` 和 `feathervm` 运行时从旁边的 `modules/` 装载它；`featherc` 不装载。`StdIoLibrary::GetModule()` 也允许嵌入式宿主自行装配；库不注入标准输入输出全局名。Native 库入口见 `include/Feather/NativeModule.hpp`，动态库加载与缓存位于 `src/Cli/NativeModules.cpp`。
 
-默认静态 runtime 在 core 之后加入 `DebugTarget`、共用 JSON 和 `DapAdapter`；`-Ddebugger=false` 会从目标源码中完全移除后三者以及 `feather-debugger`。core 只公开 `VmDebugController` 和回调期内有效的 `VmDebugContext`，不反向调用调试实现。宿主分别实现 `DebugChannel` 与 `DapChannel` 传输完整消息。可复用库仍不依赖 Socket；TCP、字节流 framing 和控制台交互位于 `src/Cli` 的薄宿主中。CLI 的 `--debug-listen` 采用异步附加生命周期，`--wait-debugger` 才启用连接与启动门控。
+默认静态 runtime 在 core 之后加入 `DebugTarget`、共用 JSON 和 `DapAdapter`；`feather` 可链接这些实现，`feathervm` 始终不链接。`-Ddebugger=false` 会从 runtime 源码中完全移除后三者以及 `feather-debugger`。core 只公开 `VmDebugController` 和回调期内有效的 `VmDebugContext`，不反向调用调试实现。宿主分别实现 `DebugChannel` 与 `DapChannel` 传输完整消息。可复用库仍不依赖 Socket；TCP、字节流 framing 和控制台交互位于 `src/Cli` 的薄宿主中。`feather` 的 `--debug-listen` 采用异步附加生命周期，`--wait-debugger` 才启用连接与启动门控。
+
+`editors/vscode-feather` 使用 VS Code 的 inline debug adapter API，在 extension host 内将 DAP 映射到 Feather 协议，并直接持有到解释器的唯一 TCP 连接。它不链接 C++ runtime，也不启动独立 DAP 中继；`launch` 只额外创建用户要调试的 `feather` 进程，`attach` 则连接已有 target。扩展还以 TextMate grammar、语言配置和轻量 completion provider 提供基础语言支持；当前只分析单个文档，不承担完整语义分析。JavaScript 映射应与 `SPEC-dap-adapter.md` 及 C++ `DapAdapter` 的可观察行为保持一致。
 
 ## 里程碑
 

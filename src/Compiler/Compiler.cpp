@@ -723,22 +723,4 @@ CompiledProgram Compile(std::string_view Source) {
     return Result;
 }
 
-Value CompiledProgram::Initialize(Vm& Machine) const {
-    if (!Program || !Machine.IsBuiltFrom(Program))
-        throw std::invalid_argument("compiled program belongs to another VM module");
-    return Machine.Run(Initializer);
-}
-
-void CompiledProgram::LoadInto(Vm& Machine, std::string Id) const {
-    if (!Program) throw std::invalid_argument("missing compiled module");
-    auto Identity = SerializeProgram(*this);
-    Machine.LoadModule(std::move(Id), Program, Exports, Identity);
-}
-
-Value CompiledProgram::InitializeModule(Vm& Machine, std::string_view Id) const {
-    if (!Program || !Machine.IsModuleBuiltFrom(Id, Program, SerializeProgram(*this)))
-        throw std::invalid_argument("compiled program belongs to another VM module");
-    return Machine.InitializeModule(Id, Initializer);
-}
-
 } // namespace Feather

@@ -368,7 +368,7 @@
 
 源码诊断另见 `ROADMAP-runtime-diagnostics.md`：编译器生成可选的内存指令位置表，也可写入独立 `.fbs`；VM 为首次观察到的 Error 记录每 VM 独立来源，宿主通过 `Vm::GetErrorLocation(value)` 查询。执行预算、分配和宿主回调等未捕获故障继续抛原有 C++ 异常，宿主可在捕获后通过 `Vm::GetFaultLocation()` 查询位置。最外层新执行会清除上次故障位置；继承 `std::exception` 的同一异常穿过宿主重入时保留内层位置，宿主改抛的新异常标在当前调用点。这些位置不进入 Error 值本身，也不改变 Error 的普通值语义。普通来源查询记录对象的首次位置；Error 调试事件观察每个结果边界，两者相互独立。
 
-通用嵌入式调试见 `SPEC-debug-protocol.md`。核心在指令前安全点及 Error 结果边界调用可选 `VmDebugController`，并提供回调期间有效的只读帧、全局和对象属性视图；JSON 命令、暂停等待和宿主 channel 位于可剥离的 `feather-debug`。暂停时执行帧仍在 `ExecutionState` 中，继续作为 GC 根；协议线程不得直接访问该上下文。
+通用嵌入式调试见 `SPEC-debug-protocol.md`。核心在指令前安全点及 Error 结果边界调用可选 `VmDebugController`，并提供回调期间有效的帧、全局和对象属性视图；默认检查为只读，受控调试接口可修改槽位/global/属性，或在同一 VM 中运行由上层编译好的临时表达式函数。临时执行屏蔽安全点、Error 与结束回调，避免递归进入控制器；它仍受当前 VM 预算和所有权校验约束。JSON 命令、暂停等待、表达式编译和宿主 channel 位于可剥离的调试实现。暂停时执行帧仍在 `ExecutionState` 中，继续作为 GC 根；协议线程不得直接访问该上下文。
 
 ### 5.3 条件真值与数值边界
 
@@ -481,8 +481,8 @@
 - [x] 与第 6 节快照功能相关的 C++ API 首版：`CaptureSnapshot(codec)`、
       `ResumeSnapshot(bytes, codec)` 与 `SnapshotHostCodec` 接口，语义见
       `SPEC-snapshot.md`；公开签名和磁盘格式尚未承诺稳定。
-- [ ] 调试钩子注册方式（对应 5.2 节"调试钩子"，宿主如何注册 Error 产生时的
-      回调，回调参数需包含来源标记：VM 内部产生 / 脚本主动构造）：
+- [x] 调试钩子以 `Vm::SetDebugController` 注册；`VmDebugController` 接收安全点、
+      Error 结果边界和执行结束回调，Error 来源区分 Operation / FunctionReturn。
 
 ---
 

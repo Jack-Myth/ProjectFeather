@@ -80,8 +80,14 @@ Value ModuleLoader::LoadFile(const std::filesystem::path& Candidate) {
 
     CompiledProgram Program;
     try {
-        Program = Kind == ModuleFileKind::Source ? Compile(ReadSource(Path)) :
+#ifdef FEATHER_CLI_SOURCE_LOADER
+        Program = Kind == ModuleFileKind::Source ? LoadSourceProgram(Path) :
             DeserializeProgram(ReadFile(Path));
+#else
+        if (Kind != ModuleFileKind::Bytecode)
+            throw std::logic_error("source loading is not available in this runner");
+        Program = DeserializeProgram(ReadFile(Path));
+#endif
     } catch (const std::exception& Failure) {
         throw std::runtime_error("module " + Id + ": " + Failure.what());
     }

@@ -13,7 +13,7 @@ Native 模块不是 Feather 字节码实例：它返回一个只读的 `NativeOb
 独立解释器保存一份有序的模块目录列表。当前默认列表只有**可执行文件所在目录的 `modules/`**；目录以绝对路径记录。以后可以增加命令行或宿主 API 来修改列表，无需改 VM。裸名查找分两轮：
 
 1. 按目录顺序查找 `<name>.felib.<platform-suffix>`；找到第一个即装载 Native 模块。
-2. 如果全部目录都没有 Native 文件，再按同样的目录顺序查找 `<name>.fe`（`feather run`）或 `<name>.fbc`（`feathervm`），装载第一个 Feather 模块。
+2. 如果全部目录都没有 Native 文件，再按同样的目录顺序查找 `<name>.fe`（`feather run` 的源码模式）或 `<name>.fbc`（`feather run` 的字节码模式及 `feathervm`），装载第一个 Feather 模块；源码模式仍会对找到的 `.fe` 应用同目录新鲜 `.fbc` 缓存规则。
 
 这样即使较靠后的目录有 Native 文件、较靠前的目录有同名脚本文件，也由 Native 文件获胜；同类型候选由目录顺序决定。找到候选后若装载或初始化失败，报告该候选的错误，不自动换下一个同名文件。缺失全部候选时返回可诊断的导入 Error。Native 动态库只接受裸名，不允许把 `./foo`、`../foo` 或绝对路径当作动态库路径。
 

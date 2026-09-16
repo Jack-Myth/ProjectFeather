@@ -5,7 +5,7 @@
 调试运行由两个独立进程组成：
 
 ```text
-feather-debugger  <====== one full-duplex TCP connection ======>  feather / feathervm
+feather-debugger  <====== one full-duplex TCP connection ======>  feather
 console commands                 Feather JSON protocol           DebugTarget -> VM
 ```
 
@@ -18,12 +18,7 @@ feather debug --listen 127.0.0.1:4711 --wait-debugger main.fe
 feather-debugger --connect 127.0.0.1:4711
 ```
 
-字节码入口使用：
-
-```text
-feathervm main.fbc --symbols main.fbs --debug-listen 127.0.0.1:4711 --wait-debugger
-feather-debugger --connect 127.0.0.1:4711
-```
+`feathervm` 是纯字节码运行器，不提供调试监听；需要调试时使用源码入口。
 
 解释器一次只接受一个调试器连接。当前没有鉴权、加密或远端暴露保护，开发时应监听 `127.0.0.1` 或 `::1`；把监听地址暴露到不可信网络不属于支持范围。
 
@@ -51,11 +46,15 @@ header 最多 8 KiB，每条 JSON 默认最多 1 MiB。`Content-Length` 不得�
 
 - `run`：解除启动等待。
 - `break <line> [module]`、`delete <breakpoint-id>`：管理断点；省略 module 表示入口模块。
+- `breakif <line> <expression>`：在入口模块设置条件断点。
 - `errors on`、`errors off`：开启或关闭 Error 结果断点；默认关闭。
 - `continue`、`pause`、`step`、`next`、`out`：执行控制。
 - `stack`：调用栈。
 - `locals <frame-id>`、`values <frame-id>`、`globals <frame-id>`：三个变量 scope。
 - `properties <object-id>`：展开对象。
+- `eval <frame-id> <expression>`：在暂停帧求值。
+- `set <frame-id> <locals|stack|globals> <name> <expression>`：修改 scope 变量。
+- `setprop <frame-id> <object-id> <name> <expression>`：修改可枚举对象属性。
 - `raw <json>`：直接发送一条 Feather 调试协议消息，供实验协议时使用。
 - `help`、`quit`：帮助和退出。
 
@@ -63,4 +62,4 @@ frame ID 和 object ID 只在当前暂停中有效。没有 `.fbs` 的字节码�
 
 ## 5. 与 DAP 的关系
 
-`feather-debugger` 直接消费 Feather 调试协议，不使用 `DapAdapter`，也不涉及 IDE。未来 IDE 插件可以在插件进程内链接传输无关的 `DapAdapter`，并复用同一条到解释器的 TCP 连接；独立 DAP 中继进程不是本版本架构的一部分。
+`feather-debugger` 直接消费 Feather 调试协议，不使用 `DapAdapter`，也不涉及 IDE。VS Code 扩展在 extension host 内完成同等 DAP 转换，并复用同一条到解释器的 TCP 连接；独立 DAP 中继进程不是本版本架构的一部分。

@@ -2,7 +2,7 @@ project(
   'project-feather',
   'cpp',
   meson_version : '>=1.11.0',
-  version : '0.3.0',
+  version : '0.3.1',
   default_options : [
     'cpp_std=c++20',
     'warning_level=2',
@@ -65,10 +65,9 @@ FeatherCliSources = files('src/Cli/Main.cpp', 'src/Cli/File.cpp', 'src/Cli/Runne
   'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp')
 FeatherVmCliSources = files('src/Cli/VmMain.cpp', 'src/Cli/File.cpp', 'src/Cli/Runner.cpp',
   'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp')
-FeatherCliArguments = []
+FeatherCliArguments = ['-DFEATHER_CLI_SOURCE_LOADER=1']
 if get_option('debugger')
   FeatherCliSources += files('src/Cli/Socket.cpp', 'src/Cli/DebugHost.cpp')
-  FeatherVmCliSources += files('src/Cli/Socket.cpp', 'src/Cli/DebugHost.cpp')
   FeatherCliArguments += '-DFEATHER_CLI_DEBUGGER=1'
 endif
 
@@ -79,8 +78,7 @@ FeatherCli = executable('feather', FeatherCliSources,
 FeatherCompilerCli = executable('featherc', 'src/Cli/CompilerMain.cpp',
   'src/Cli/File.cpp', dependencies : FeatherDependency, install : true)
 FeatherVmCli = executable('feathervm', FeatherVmCliSources,
-  cpp_args : FeatherCliArguments,
-  dependencies : [FeatherBundledDependency, NativeLoaderSystemDependency] + SocketSystemDependencies,
+  dependencies : [FeatherDependency, NativeLoaderSystemDependency],
   install : true)
 
 if get_option('debugger')

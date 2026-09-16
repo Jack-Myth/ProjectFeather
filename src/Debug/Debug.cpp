@@ -1,4 +1,5 @@
 #include <Feather/Debug.hpp>
+#include <Feather/Compiler.hpp>
 
 #include "../Protocol/Json.hpp"
 
@@ -55,12 +56,18 @@ struct DebugTarget::Impl final {
         std::size_t Pc = 0;
         bool operator==(const LocationKey&) const = default;
     };
+    struct ExpressionPlan {
+        CompiledProgram Compiled;
+        std::vector<std::uint32_t> LocalSlots;
+    };
     struct Breakpoint {
         std::uint64_t Id = 0;
         std::string ModuleId;
         std::size_t Line = 0;
         std::optional<std::size_t> Column;
+        std::string Condition;
         std::optional<LocationKey> Resolved;
+        std::shared_ptr<ExpressionPlan> ConditionPlan;
     };
     struct PendingCommand {
         std::uint64_t Id = 0;
@@ -166,6 +173,132 @@ struct DebugTarget::Impl final {
         return Result;
     }
 
+    static std::string PropertyName(const Value& Key) {
+        if (Key.GetType() == ValueType::String) return Key.AsString();
+        if (Key.GetType() == ValueType::Number) return NumberDescription(Key.AsNumber());
+        return "<invalid key>";
+    }
+
+    std::shared_ptr<ExpressionPlan> CompileExpressionPlan(
+        const VmDebugContext& Context, std::size_t FrameId, std::string_view Expression) {
+        if (Expression.empty()) throw std::invalid_argument("expression must not be empty");
+        auto Frame = Context.GetFrame(FrameId);
+        auto Plan = std::make_shared<ExpressionPlan>();
+        std::vector<std::string> Names;
+        std::unordered_set<std::string> SeenNames;
+        for (auto It = Frame.LocalVariables.rbegin(); It != Frame.LocalVariables.rend(); ++It) {
+            if (Frame.Pc < It->StartPc || Frame.Pc >= It->EndPc) continue;
+            if (!SeenNames.insert(It->Name).second) continue;
+            Names.push_back(It->Name);
+            Plan->LocalSlots.push_back(It->Slot);
+        }
+        std::reverse(Names.begin(), Names.end());
+        std::reverse(Plan->LocalSlots.begin(), Plan->LocalSlots.end());
+        std::string Source = "def __debug_expression(";
+        for (std::size_t I = 0; I < Names.size(); ++I) {
+            if (I) Source += ',';
+            Source += Names[I];
+        }
+        Source += ") { return (";
+        Source += Expression;
+        Source += "); }";
+        Plan->Compiled = Compile(Source);
+        return Plan;
+    }
+
+    Value EvaluateExpression(const VmDebugContext& Context, std::size_t FrameId,
+                             const std::shared_ptr<ExpressionPlan>& Plan) {
+        auto Frame = Context.GetFrame(FrameId);
+        std::vector<Value> Arguments;
+        Arguments.reserve(Plan->LocalSlots.size());
+        for (auto Slot : Plan->LocalSlots) {
+            if (Slot >= Frame.Locals.size()) throw std::logic_error("debug local slot is invalid");
+            Arguments.push_back(Frame.Locals[Slot]);
+        }
+        return Context.Evaluate(FrameId, Plan->Compiled.Program,
+            Plan->Compiled.Functions.at("__debug_expression"), Arguments);
+    }
+
+    Json::Object Evaluate(const VmDebugContext& Context, const Json::Object& Params) {
+        auto FrameValue = Find(Params, "frameId");
+        auto ExpressionValue = Find(Params, "expression");
+        if (!FrameValue || !ExpressionValue || !ExpressionValue->IsString())
+            throw std::invalid_argument("frameId and expression are required");
+        auto FrameId = static_cast<std::size_t>(Integer(*FrameValue, "frameId"));
+        auto Plan = CompileExpressionPlan(Context, FrameId, ExpressionValue->String());
+        auto Summary = ValueSummary(EvaluateExpression(Context, FrameId, Plan));
+        Summary.emplace("stopId", Json(StopId));
+        return Summary;
+    }
+
+    Json::Object SetVariable(const VmDebugContext& Context, const Json::Object& Params) {
+        auto ExpressionValue = Find(Params, "expression");
+        auto NameValue = Find(Params, "name");
+        if (!ExpressionValue || !ExpressionValue->IsString() ||
+            !NameValue || !NameValue->IsString() || NameValue->String().empty())
+            throw std::invalid_argument("name and expression are required");
+        auto ObjectValue = Find(Params, "objectId");
+        std::size_t FrameId = 0;
+        if (auto FrameValue = Find(Params, "frameId"))
+            FrameId = static_cast<std::size_t>(Integer(*FrameValue, "frameId"));
+        else if (!ObjectValue) throw std::invalid_argument("frameId or objectId is required");
+        auto Plan = CompileExpressionPlan(Context, FrameId, ExpressionValue->String());
+        auto Input = EvaluateExpression(Context, FrameId, Plan);
+
+        Value Written = Input;
+        if (ObjectValue) {
+            auto Id = Integer(*ObjectValue, "objectId");
+            if (Id == 0 || Id > Objects.size())
+                throw std::invalid_argument("objectId is not valid for this stop");
+            auto Target = Objects[static_cast<std::size_t>(Id - 1)];
+            auto Properties = Context.GetProperties(Target);
+            const DebugProperty* Match = nullptr;
+            for (const auto& Property : Properties) {
+                if (PropertyName(Property.Key) != NameValue->String()) continue;
+                if (Match) throw std::invalid_argument("property name is ambiguous");
+                Match = &Property;
+            }
+            if (!Match) throw std::invalid_argument("property was not found");
+            if (Match->Key.GetType() == ValueType::String &&
+                Match->Key.AsString() == "[[MetaObject]]")
+                throw std::invalid_argument("MetaObject inspection entry is read-only");
+            Written = Context.SetProperty(Target, Match->Key, std::move(Input));
+        } else {
+            auto ScopeValue = Find(Params, "scope");
+            if (!ScopeValue || !ScopeValue->IsString())
+                throw std::invalid_argument("scope is required");
+            auto Frame = Context.GetFrame(FrameId);
+            const auto& Name = NameValue->String();
+            auto ParseSlot = [&](std::size_t Limit) {
+                if (Name.size() < 2 || Name[0] != '$')
+                    throw std::invalid_argument("slot name must use $N");
+                std::size_t Slot = 0;
+                auto Parsed = std::from_chars(Name.data() + 1, Name.data() + Name.size(), Slot);
+                if (Parsed.ec != std::errc{} || Parsed.ptr != Name.data() + Name.size() || Slot >= Limit)
+                    throw std::invalid_argument("slot name is out of range");
+                return Slot;
+            };
+            if (ScopeValue->String() == "locals") {
+                std::optional<std::size_t> Slot;
+                if (Frame.LocalVariables.empty()) Slot = ParseSlot(Frame.Locals.size());
+                else for (auto It = Frame.LocalVariables.rbegin(); It != Frame.LocalVariables.rend(); ++It) {
+                    if (Frame.Pc >= It->StartPc && Frame.Pc < It->EndPc && It->Name == Name) {
+                        Slot = It->Slot; break;
+                    }
+                }
+                if (!Slot) throw std::invalid_argument("local variable is not visible");
+                Context.SetLocal(FrameId, *Slot, std::move(Input));
+            } else if (ScopeValue->String() == "stack") {
+                Context.SetStack(FrameId, ParseSlot(Frame.Stack.size()), std::move(Input));
+            } else if (ScopeValue->String() == "globals") {
+                Context.SetGlobal(FrameId, Name, std::move(Input));
+            } else throw std::invalid_argument("unknown variable scope");
+        }
+        auto Summary = ValueSummary(Written);
+        Summary.emplace("stopId", Json(StopId));
+        return Summary;
+    }
+
     Json::Object StackTrace(const VmDebugContext& Context) {
         Json::Array Frames;
         Frames.reserve(Context.GetFrameCount());
@@ -231,6 +364,7 @@ struct DebugTarget::Impl final {
         Properties.reserve(Values.size());
         for (const auto& Item : Values) {
             auto Summary = ValueSummary(Item.Data);
+            Summary.emplace("name", Json(PropertyName(Item.Key)));
             Summary.emplace("key", Json(ValueSummary(Item.Key)));
             Properties.emplace_back(std::move(Summary));
         }
@@ -304,6 +438,7 @@ struct DebugTarget::Impl final {
                 auto Module = Find(Params, "moduleId");
                 auto Line = Find(Params, "line");
                 auto Column = Find(Params, "column");
+                auto Condition = Find(Params, "condition");
                 if (!Module || !Module->IsString() || !Line)
                     throw std::invalid_argument("moduleId and line are required");
                 auto LineNumber = Integer(*Line, "line");
@@ -314,12 +449,19 @@ struct DebugTarget::Impl final {
                     if (Value == 0) throw std::invalid_argument("column is one-based");
                     ColumnNumber = static_cast<std::size_t>(Value);
                 }
+                std::string ConditionText;
+                if (Condition) {
+                    if (!Condition->IsString() || Condition->String().empty())
+                        throw std::invalid_argument("condition must be a nonempty string");
+                    ConditionText = Condition->String();
+                }
                 std::uint64_t BreakpointId;
                 {
                     std::lock_guard Lock(Mutex);
                     BreakpointId = NextBreakpointId++;
                     Breakpoints.push_back({BreakpointId, Module->String(),
-                        static_cast<std::size_t>(LineNumber), ColumnNumber, std::nullopt});
+                        static_cast<std::size_t>(LineNumber), ColumnNumber,
+                        std::move(ConditionText), std::nullopt, {}});
                 }
                 Result(*RequestId, {{"breakpointId", Json(BreakpointId)}});
                 return;
@@ -361,7 +503,8 @@ struct DebugTarget::Impl final {
             if (Method == "Debugger.resume" || Method == "Debugger.stepInto" ||
                 Method == "Debugger.stepOver" || Method == "Debugger.stepOut" ||
                 Method == "Debugger.getStackTrace" || Method == "Debugger.getVariables" ||
-                Method == "Debugger.getProperties") {
+                Method == "Debugger.getProperties" || Method == "Debugger.evaluate" ||
+                Method == "Debugger.setVariable") {
                 bool IsPaused;
                 {
                     std::lock_guard Lock(Mutex);
@@ -390,6 +533,12 @@ struct DebugTarget::Impl final {
             }
             if (Command.Method == "Debugger.getProperties") {
                 Result(Command.Id, Properties(Context, Command.Params)); return;
+            }
+            if (Command.Method == "Debugger.evaluate") {
+                Result(Command.Id, Evaluate(Context, Command.Params)); return;
+            }
+            if (Command.Method == "Debugger.setVariable") {
+                Result(Command.Id, SetVariable(Context, Command.Params)); return;
             }
             Step NextStep = Step::None;
             if (Command.Method == "Debugger.stepInto") NextStep = Step::Into;
@@ -446,6 +595,10 @@ struct DebugTarget::Impl final {
         auto Frame = Context.GetFrame(0);
         auto Current = Key(Frame);
         std::string Reason;
+        std::string Condition;
+        std::string ConditionError;
+        std::uint64_t ConditionalBreakpointId = 0;
+        std::shared_ptr<ExpressionPlan> ConditionPlan;
         std::vector<Json::Object> ResolvedEvents;
         {
             std::lock_guard Lock(Mutex);
@@ -474,20 +627,53 @@ struct DebugTarget::Impl final {
                         Fields.emplace("breakpointId", Json(Breakpoint.Id));
                         ResolvedEvents.push_back(std::move(Fields));
                     }
-                    Reason = "breakpoint";
+                    if (Reason.empty() && !Breakpoint.Condition.empty()) {
+                        Condition = Breakpoint.Condition;
+                        ConditionalBreakpointId = Breakpoint.Id;
+                        ConditionPlan = Breakpoint.ConditionPlan;
+                    } else Reason = "breakpoint";
                     break;
                 }
             }
-            if (Reason.empty()) return;
+        }
+        for (auto& Event : ResolvedEvents)
+            Notify("Debugger.breakpointResolved", std::move(Event));
+
+        if (!Condition.empty() && Reason.empty()) {
+            try {
+                if (!ConditionPlan) ConditionPlan = CompileExpressionPlan(Context, 0, Condition);
+                if (EvaluateExpression(Context, 0, ConditionPlan).IsTruthy()) Reason = "breakpoint";
+            } catch (const std::exception& Failure) {
+                ConditionError = Failure.what();
+                Reason = "breakpoint";
+            }
+            bool StillPresent = false;
+            {
+                std::lock_guard Lock(Mutex);
+                for (auto& Breakpoint : Breakpoints) {
+                    if (Breakpoint.Id != ConditionalBreakpointId || Breakpoint.Condition != Condition)
+                        continue;
+                    StillPresent = true;
+                    if (ConditionPlan && !Breakpoint.ConditionPlan)
+                        Breakpoint.ConditionPlan = ConditionPlan;
+                    break;
+                }
+            }
+            if (!StillPresent) return;
+        }
+        if (Reason.empty()) return;
+        {
+            std::lock_guard Lock(Mutex);
+            if (!Enabled) return;
             Paused = true;
             ++StopId;
             Objects.clear(); ObjectIds.clear();
         }
-        for (auto& Event : ResolvedEvents)
-            Notify("Debugger.breakpointResolved", std::move(Event));
         auto PausedFields = SourceFields(Frame);
         PausedFields.emplace("reason", Json(Reason));
         PausedFields.emplace("stopId", Json(StopId));
+        if (!ConditionError.empty())
+            PausedFields.emplace("conditionError", Json(std::move(ConditionError)));
         Notify("Debugger.paused", std::move(PausedFields));
 
         WaitWhilePaused(Context);

@@ -187,6 +187,64 @@ std::vector<DebugProperty> VmDebugContext::GetProperties(const Value& Input) con
     return Result;
 }
 
+Value VmDebugContext::Evaluate(std::size_t FrameId,
+                               const std::shared_ptr<Module>& EvaluationProgram,
+                               std::uint32_t FunctionConstant,
+                               const std::vector<Value>& Arguments) const {
+    return Machine->EvaluateDebugExpression(*Execution, FrameId, EvaluationProgram,
+                                            FunctionConstant, Arguments);
+}
+
+void VmDebugContext::SetLocal(std::size_t FrameId, std::size_t Slot, Value Input) const {
+    Machine->ValidateOwnedValue(Input);
+    if (FrameId >= Execution->Frames.size()) throw std::out_of_range("debug frame ID out of range");
+    auto& Frame = Execution->Frames[Execution->Frames.size() - 1 - FrameId];
+    if (Slot >= Frame.Locals.size()) throw std::out_of_range("debug local slot out of range");
+    Frame.Locals[Slot] = std::move(Input);
+}
+
+void VmDebugContext::SetStack(std::size_t FrameId, std::size_t Slot, Value Input) const {
+    Machine->ValidateOwnedValue(Input);
+    if (FrameId >= Execution->Frames.size()) throw std::out_of_range("debug frame ID out of range");
+    auto& Frame = Execution->Frames[Execution->Frames.size() - 1 - FrameId];
+    if (Slot >= Frame.Stack.size()) throw std::out_of_range("debug stack slot out of range");
+    Frame.Stack[Slot] = std::move(Input);
+}
+
+void VmDebugContext::SetGlobal(std::size_t FrameId, std::string Name, Value Input) const {
+    Machine->ValidateOwnedValue(Input);
+    (void)Value::String(Name);
+    if (FrameId >= Execution->Frames.size()) throw std::out_of_range("debug frame ID out of range");
+    const auto& Frame = Execution->Frames[Execution->Frames.size() - 1 - FrameId];
+    const auto& Owner = Frame.Function->GetOwner();
+    if (Owner == Machine->Program)
+        Machine->Globals.insert_or_assign(std::move(Name), std::move(Input));
+    else {
+        auto Found = Machine->ModuleByProgram.find(Owner.get());
+        if (Found == Machine->ModuleByProgram.end())
+            throw std::logic_error("debug frame has no module instance");
+        Found->second->Globals.insert_or_assign(std::move(Name), std::move(Input));
+    }
+}
+
+Value VmDebugContext::SetProperty(const Value& Target, const Value& Key, Value Input) const {
+    Machine->ValidateOwnedValue(Target);
+    Machine->ValidateOwnedValue(Input);
+    if (Target.GetType() != ValueType::Object)
+        throw std::invalid_argument("debug property target must be an object");
+    Value Result;
+    if (auto* Script = dynamic_cast<ScriptObject*>(Target.AsObject()))
+        Result = Script->SetRaw(Key, Input);
+    else if (auto* Native = dynamic_cast<NativeObject*>(Target.AsObject()))
+        Result = Native->SetMember(Key, Input);
+    else throw std::invalid_argument("debug property target has no writable members");
+    if (Result.IsError()) {
+        auto* ErrorValue = dynamic_cast<ErrorObject*>(Result.AsObject());
+        throw std::invalid_argument(ErrorValue ? ErrorValue->GetMessage() : "property write failed");
+    }
+    return Result;
+}
+
 Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
        std::size_t MaxInstructionsPerInvocation)
     : ScriptObjectLimit(MaxScriptObjects), InstructionLimit(MaxInstructionsPerInvocation) {
@@ -522,6 +580,66 @@ Value Vm::RunModule(std::string_view Id, std::uint32_t FunctionConstant,
     return Execute(Execution);
 }
 
+Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t FrameId,
+                                  const std::shared_ptr<Module>& EvaluationProgram,
+                                  std::uint32_t FunctionConstant,
+                                  const std::vector<Value>& Arguments) {
+    if (!EvaluationProgram) throw std::invalid_argument("missing debug expression program");
+    if (FrameId >= PausedExecution.Frames.size())
+        throw std::out_of_range("debug frame ID out of range");
+    EvaluationProgram->Validate();
+    for (const auto& Input : Arguments) ValidateOwnedValue(Input);
+
+    const auto& PausedFrame = PausedExecution.Frames[PausedExecution.Frames.size() - 1 - FrameId];
+    const auto& PausedOwner = PausedFrame.Function->GetOwner();
+    const std::unordered_map<std::string, Value>* PausedGlobals = &Globals;
+    if (PausedOwner != Program) {
+        auto Found = ModuleByProgram.find(PausedOwner.get());
+        if (Found == ModuleByProgram.end()) throw std::logic_error("debug frame has no module instance");
+        PausedGlobals = &Found->second->Globals;
+    }
+
+    auto Instance = std::make_shared<ModuleInstance>();
+    Instance->Id = "<debug-expression>";
+    Instance->Source = EvaluationProgram;
+    Instance->Program = std::make_shared<Module>(*EvaluationProgram);
+    Instance->Globals = *PausedGlobals;
+    for (auto& Item : Instance->Program->Constants)
+        if (Item.Type == Constant::Kind::Function)
+            Item.Function = std::make_shared<FunctionPrototype>(*Item.Function);
+    Instance->Functions.resize(Instance->Program->Constants.size());
+    for (std::size_t I = 0; I < Instance->Functions.size(); ++I) {
+        const auto& Item = Instance->Program->Constants[I];
+        if (Item.Type == Constant::Kind::Function)
+            Instance->Functions[I] = std::make_shared<FunctionObject>(Instance->Program, Item.Function);
+    }
+    if (FunctionConstant >= Instance->Functions.size() || !Instance->Functions[FunctionConstant])
+        throw std::invalid_argument("debug expression entry is not a function constant");
+    auto [Registration, Inserted] = ModuleByProgram.emplace(Instance->Program.get(), Instance);
+    if (!Inserted) throw std::logic_error("debug expression module identity collision");
+    struct EvaluationGuard {
+        Vm& Machine;
+        const Module* Program;
+        explicit EvaluationGuard(Vm& Input, const Module* Program)
+            : Machine(Input), Program(Program) { ++Machine.DebugCallbackSuppression; }
+        ~EvaluationGuard() {
+            --Machine.DebugCallbackSuppression;
+            Machine.ModuleByProgram.erase(Program);
+        }
+    } Guard(*this, Instance->Program.get());
+
+    ExecutionState Evaluation;
+    Evaluation.Frames.push_back(MakeFrame(
+        std::static_pointer_cast<FunctionObject>(Instance->Functions[FunctionConstant]), Arguments));
+    auto Result = Execute(Evaluation);
+    if (Result.GetType() == ValueType::Object && Result.GetObjectType() == ObjectType::Function) {
+        auto* Function = dynamic_cast<FunctionObject*>(Result.AsObject());
+        if (Function && Function->GetOwner() == Instance->Program)
+            throw std::invalid_argument("debug expression cannot return a temporary function");
+    }
+    return Result;
+}
+
 Value Vm::InitializeModule(std::string_view Id, std::uint32_t Initializer) {
     auto Found = LoadedModules.find(std::string(Id));
     if (Found == LoadedModules.end()) throw std::invalid_argument("unknown loaded module");
@@ -837,6 +955,7 @@ Value Vm::Execute(ExecutionState& Execution) {
 }
 
 void Vm::ReachDebugSafePoint(ExecutionState& Execution) {
+    if (DebugCallbackSuppression != 0) return;
     auto Controller = DebugController;
     if (!Controller) return;
     try {
@@ -849,6 +968,7 @@ void Vm::ReachDebugSafePoint(ExecutionState& Execution) {
 
 void Vm::ReachDebugError(ExecutionState& Execution, const Value& Error,
                          DebugErrorOrigin Origin, std::size_t InstructionPc) {
+    if (DebugCallbackSuppression != 0) return;
     auto Controller = DebugController;
     if (!Controller) return;
     try {
@@ -860,6 +980,7 @@ void Vm::ReachDebugError(ExecutionState& Execution, const Value& Error,
 }
 
 void Vm::NotifyDebugExecutionFinished(bool Faulted) {
+    if (DebugCallbackSuppression != 0) return;
     auto Controller = DebugController;
     if (!Controller) return;
     try { Controller->OnExecutionFinished(Faulted); }

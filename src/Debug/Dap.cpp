@@ -55,13 +55,17 @@ Json::Object SourceObject(std::string Path) {
 } // namespace
 
 struct DapAdapter::Impl final {
-    enum class PendingKind { Simple, Attach, Stack, Variables, Properties, SetBreakpoint, RemoveBreakpoint };
+    enum class PendingKind {
+        Simple, Attach, Stack, Variables, Properties, Evaluate, SetVariable,
+        SetBreakpoint, RemoveBreakpoint
+    };
     struct Pending {
         PendingKind Kind = PendingKind::Simple;
         std::uint64_t DapRequest = 0;
         std::string DapCommand;
         std::uint64_t Batch = 0;
         std::size_t Item = 0;
+        std::uint64_t FrameId = 0;
     };
     struct BreakpointBatch {
         std::uint64_t Request = 0;
@@ -76,6 +80,7 @@ struct DapAdapter::Impl final {
         enum class Kind { Scope, Object } Type = Kind::Scope;
         std::uint64_t FrameOrObject = 0;
         std::string Scope;
+        std::uint64_t FrameId = 0;
     };
 
     Impl(std::shared_ptr<DapChannel> Input, DapAdapterOptions InputOptions)
@@ -141,7 +146,7 @@ struct DapAdapter::Impl final {
         return Text && Text->IsString() ? Text->String() : "Feather debug request failed";
     }
 
-    Json::Object DapValue(const Json::Object& Input) {
+    Json::Object DapValue(const Json::Object& Input, std::uint64_t FrameId = 0) {
         Json::Object Result;
         auto Description = Find(Input, "description");
         Result.emplace("value", Json(Description && Description->IsString()
@@ -150,7 +155,8 @@ struct DapAdapter::Impl final {
         if (Type && Type->IsString()) Result.emplace("type", Json(Type->String()));
         std::uint64_t ReferenceId = 0;
         if (auto ObjectId = Find(Input, "objectId"))
-            ReferenceId = AddReference({Reference::Kind::Object, Integer(*ObjectId, "objectId"), {}});
+            ReferenceId = AddReference({Reference::Kind::Object,
+                Integer(*ObjectId, "objectId"), {}, FrameId});
         Result.emplace("variablesReference", Json(ReferenceId));
         return Result;
     }
@@ -190,7 +196,9 @@ struct DapAdapter::Impl final {
                 {"supportsConfigurationDoneRequest", Json(true)},
                 {"exceptionBreakpointFilters", Json(std::move(ExceptionFilters))},
                 {"supportsTerminateRequest", Json(false)},
-                {"supportsEvaluateForHovers", Json(false)}}));
+                {"supportsEvaluateForHovers", Json(true)},
+                {"supportsConditionalBreakpoints", Json(true)},
+                {"supportsSetVariable", Json(true)}}));
             return;
         }
         if (Command == "attach" || Command == "launch") {
@@ -230,7 +238,7 @@ struct DapAdapter::Impl final {
                 std::string Scope = Name;
                 std::transform(Scope.begin(), Scope.end(), Scope.begin(),
                                [](unsigned char C) { return static_cast<char>(std::tolower(C)); });
-                auto Ref = AddReference({Reference::Kind::Scope, Frame, std::move(Scope)});
+                auto Ref = AddReference({Reference::Kind::Scope, Frame, std::move(Scope), Frame});
                 Scopes.emplace_back(Json::Object{{"name", Json(Name)},
                     {"variablesReference", Json(Ref)}, {"expensive", Json(Name == std::string_view("Globals"))}});
             }
@@ -254,8 +262,37 @@ struct DapAdapter::Impl final {
                 Kind = PendingKind::Properties;
                 Out = TargetRequest("Debugger.getProperties", {{"objectId", Json(Found->second.FrameOrObject)}});
             }
-            PendingRequests.emplace(Out.first, Pending{Kind, Sequence, Command});
+            PendingRequests.emplace(Out.first, Pending{Kind, Sequence, Command, 0, 0,
+                Found->second.FrameId});
             TargetOutput.push_back(std::move(Out.second));
+            return;
+        }
+        if (Command == "evaluate") {
+            auto Frame = IntegerField(Arguments, "frameId");
+            auto Expression = StringField(Arguments, "expression");
+            auto [Id, Out] = TargetRequest("Debugger.evaluate",
+                {{"frameId", Json(Frame)}, {"expression", Json(std::move(Expression))}});
+            PendingRequests.emplace(Id, Pending{PendingKind::Evaluate, Sequence, Command, 0, 0, Frame});
+            TargetOutput.push_back(std::move(Out));
+            return;
+        }
+        if (Command == "setVariable") {
+            auto Ref = IntegerField(Arguments, "variablesReference");
+            auto Found = References.find(Ref);
+            if (Found == References.end()) {
+                DapOutput.push_back(Response(Sequence, Command, false, {}, "stale variablesReference"));
+                return;
+            }
+            Json::Object Params{{"name", Json(StringField(Arguments, "name"))},
+                                {"expression", Json(StringField(Arguments, "value"))},
+                                {"frameId", Json(Found->second.FrameId)}};
+            if (Found->second.Type == Reference::Kind::Scope)
+                Params.emplace("scope", Json(Found->second.Scope));
+            else Params.emplace("objectId", Json(Found->second.FrameOrObject));
+            auto [Id, Out] = TargetRequest("Debugger.setVariable", std::move(Params));
+            PendingRequests.emplace(Id, Pending{PendingKind::SetVariable, Sequence, Command,
+                                                0, 0, Found->second.FrameId});
+            TargetOutput.push_back(std::move(Out));
             return;
         }
         if (Command == "setBreakpoints") {
@@ -285,6 +322,10 @@ struct DapAdapter::Impl final {
                 Json::Object Params{{"moduleId", Json(ModuleId(Path))},
                                     {"line", Json(IntegerField(Item, "line"))}};
                 if (auto Column = Find(Item, "column")) Params.emplace("column", Json(Integer(*Column, "column")));
+                if (auto Condition = Find(Item, "condition")) {
+                    if (!Condition->IsString()) throw std::invalid_argument("breakpoint condition must be a string");
+                    if (!Condition->String().empty()) Params.emplace("condition", Json(Condition->String()));
+                }
                 auto [Id, Out] = TargetRequest("Debugger.setBreakpoint", std::move(Params));
                 PendingRequests.emplace(Id, Pending{PendingKind::SetBreakpoint, 0, {}, BatchId, I});
                 TargetOutput.push_back(std::move(Out));
@@ -390,12 +431,24 @@ struct DapAdapter::Impl final {
                 if (Values && Values->IsArray()) for (const auto& Value : Values->Items()) {
                     if (!Value.IsObject()) continue;
                     const auto& Fields = Value.Members();
-                    auto Out = DapValue(Fields);
+                    auto Out = DapValue(Fields, PendingValue.FrameId);
                     Out.emplace("name", Json(StringField(Fields, "name")));
                     Variables.emplace_back(std::move(Out));
                 }
                 DapOutput.push_back(Response(PendingValue.DapRequest, PendingValue.DapCommand, true,
                     {{"variables", Json(std::move(Variables))}}));
+            } else if (PendingValue.Kind == PendingKind::Evaluate ||
+                       PendingValue.Kind == PendingKind::SetVariable) {
+                auto Body = DapValue(Result, PendingValue.FrameId);
+                if (PendingValue.Kind == PendingKind::Evaluate) {
+                    auto Description = Find(Body, "value");
+                    if (Description) {
+                        Body.emplace("result", *Description);
+                        Body.erase("value");
+                    }
+                }
+                DapOutput.push_back(Response(PendingValue.DapRequest,
+                    PendingValue.DapCommand, true, std::move(Body)));
             } else {
                 Json::Object Body;
                 if (PendingValue.DapCommand == "continue") Body.emplace("allThreadsContinued", Json(true));
@@ -423,6 +476,9 @@ struct DapAdapter::Impl final {
                     Description && Description->IsString())
                     Body.emplace("text", Json(Description->String()));
             }
+            if (auto ConditionError = Find(Params, "conditionError");
+                ConditionError && ConditionError->IsString())
+                Body.emplace("description", Json(ConditionError->String()));
             DapOutput.push_back(Event("stopped", std::move(Body)));
         } else if (Method == "Debugger.resumed") {
             ResetReferences();

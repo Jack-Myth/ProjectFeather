@@ -1,6 +1,6 @@
 # Feather 符号文件格式（实验版 v3）
 
-`.fbs` 是可选的 `.fbc` 伴随文件，保存运行时源码位置、函数显示名以及局部槽位的名称和词法生命周期；普通 `.fbc` 不含这些调试信息，`feathervm` 不会自动寻找或加载 `.fbs`。编译器仅在 `--symbols` 被指定时写它，宿主可调用 `SerializeSymbols(program)` 和 `AttachSymbols(program, bytes)`。加载应在构造 VM 之前完成。源码 UTF-8 行列仍按 `SPEC-syntax.md` 的字节规则计算；符号文件不保存源码内容或绝对路径。
+`.fbs` 是可选的 `.fbc` 伴随文件，保存运行时源码位置、函数显示名以及局部槽位的名称和词法生命周期；普通 `.fbc` 不含这些调试信息，精简 `feathervm` 不寻找或加载 `.fbs`。编译器仅在 `--symbols` 被指定时写它，嵌入宿主可调用 `SerializeSymbols(program)` 和 `AttachSymbols(program, bytes)`。加载应在构造 VM 之前完成。源码 UTF-8 行列仍按 `SPEC-syntax.md` 的字节规则计算；符号文件不保存源码内容或绝对路径。
 
 快速开发期只接受当前 v3，不读取旧版本，也不提供跨版本兼容分支。
 

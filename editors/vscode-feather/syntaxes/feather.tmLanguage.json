@@ -1,0 +1,77 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Feather",
+  "scopeName": "source.feather",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#quick-lines" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.feather", "match": "//.*$" }
+      ]
+    },
+    "quick-lines": {
+      "patterns": [
+        {
+          "name": "meta.preprocessor.feather",
+          "match": "^\\s*([#$&>])(?=\\S|\\s)",
+          "captures": { "1": { "name": "keyword.control.directive.feather" } }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.feather",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.feather", "match": "\\\\(?:[\\\"nrt]|u[0-9A-Fa-f]{4})" }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.feather", "match": "\\b(?:\\d+\\.\\d+|\\d+)(?:[eE][+-]?\\d+)?\\b" }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(def)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.feather" },
+            "2": { "name": "entity.name.function.feather" }
+          }
+        },
+        {
+          "match": "\\b(var)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.feather" },
+            "2": { "name": "variable.other.definition.feather" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.feather", "match": "\\b(?:export|return|if|else|while)\\b" },
+        { "name": "constant.language.feather", "match": "\\b(?:null|true|false)\\b" },
+        { "name": "support.function.feather", "match": "\\b(?:import|object)\\b(?=\\s*\\()" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.feather", "match": "==|[=+\\-*/<]" }
+      ]
+    }
+  }
+}

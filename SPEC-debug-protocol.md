@@ -71,7 +71,7 @@ VM 在每条 Feather 指令执行前调用控制器安全点。断点、外部�
 
 ### 4.2 断点
 
-- `Debugger.setBreakpoint` 参数为 `moduleId`、从 1 开始的 `line`，以及可选的从 1 开始的 `column`。省略 column 表示该行任意列。返回数值 `breakpointId`。
+- `Debugger.setBreakpoint` 参数为 `moduleId`、从 1 开始的 `line`，以及可选的从 1 开始的 `column` 和非空字符串 `condition`。省略 column 表示该行任意列。返回数值 `breakpointId`。条件在断点位置首次解析后、每次命中时于该暂停帧求值；结果按 Feather truthiness 判断。条件编译或执行失败时仍暂停，并在 `Debugger.paused.conditionError` 中报告错误，避免失效条件静默放过执行。
 - `Debugger.removeBreakpoint` 参数为 `breakpointId`。
 
 断点按源码位置工作，需要内存位置表或匹配的 `.fbs`。v1 在执行首次经过匹配且标记为 breakable 的位置时把断点惰性解析到函数常量索引和 PC，并发送 `Debugger.breakpointResolved`；之后只在该指令停下。编译器生成的函数绑定及隐式返回保留诊断和单步位置，但不会抢先解析同一行断点。没有符号的位置不能解析源码断点。
@@ -83,12 +83,16 @@ Error 断点是一个会话级策略，不占用 `breakpointId`，也不伪装�
 - `Debugger.getStackTrace` 返回从栈顶开始的 frame。每个 frame 包含本次暂停内有效的 `frameId`、`functionId`、`functionName`、`pc` 和可用源码位置。缺少 v3 `.fbs` 调试名时，显示名回退为 `<function #N>`。
 - `Debugger.getVariables` 参数为 `frameId` 和 `scope`；scope 可为 `locals`、`stack` 或 `globals`。
 - `Debugger.getProperties` 参数为本次暂停返回的 `objectId`。ScriptObject 返回原始成员和 `[[MetaObject]]`；Error 返回 `message`；普通 NativeObject 只返回显式登记的 GC 可见成员。
+- `Debugger.evaluate` 参数为 `frameId` 和非空字符串 `expression`，返回普通值摘要。表达式采用 Feather 表达式语法，可读取该帧当前词法范围内的具名局部变量和所属模块 globals；缺少局部符号时只能通过 globals 求值。求值发生在暂停 VM 线程上，使用同一 VM 的对象和函数身份。
+- `Debugger.setVariable` 使用非空字符串 `expression` 计算新值。scope 变量要求 `frameId`、`scope`（`locals`、`stack` 或 `globals`）和 `name`；对象属性要求 `objectId` 和 `name`。局部变量只允许写当前词法范围内的具名变量或无符号帧的 `$N`，stack 使用 `$N`，global 可创建或覆盖当前帧所属模块的名字；对象属性必须是当前可枚举且名字无歧义的可写属性。返回写入后的值摘要。
+
+调试表达式是表达式而非语句，不能声明函数或变量。函数调用、Native 调用和成员赋值仍可能产生脚本可见副作用；对求值临时函数自身参数或临时 global 的直接赋值不会回写暂停帧，修改帧变量应使用 `Debugger.setVariable`。求值期间不触发安全点、Error 断点或 executionFinished 通知，因此不会递归进入调试器；它仍共享当前 VM 的指令预算和对象上限。
 
 值摘要包含 `type` 和可读 `description`；对象另含 `objectId`。有限 number 还包含 JSON 数值 `value`，bool 和 string 包含其原值。对象 ID 不是地址，不能跨暂停复用。
 
 ## 5. v1 通知
 
-- `Debugger.paused`：含 `stopId`、`reason`（`pause`、`breakpoint`、`step`、`error`）和栈顶位置。Error 停顿另含 `origin`（`operation` 或 `functionReturn`）以及普通值摘要格式的 `error`；其中的 `objectId` 可在本次暂停中传给 `Debugger.getProperties`。
+- `Debugger.paused`：含 `stopId`、`reason`（`pause`、`breakpoint`、`step`、`error`）和栈顶位置。Error 停顿另含 `origin`（`operation` 或 `functionReturn`）以及普通值摘要格式的 `error`；其中的 `objectId` 可在本次暂停中传给 `Debugger.getProperties`。条件断点求值失败时另含字符串 `conditionError`。
 - `Debugger.resumed`：含刚结束的 `stopId`。
 - `Debugger.breakpointResolved`：含断点 ID 及解析后的位置。
 - `Debugger.executionFinished`：一次最外层 `Vm::Run`/`RunModule` 正常返回或抛出故障后发送，参数 `faulted` 表示是否抛出。
@@ -98,4 +102,4 @@ Error 断点是一个会话级策略，不占用 `breakpointId`，也不伪装�
 
 ## 6. 暂不属于 v1
 
-DAP 转换由独立 `DapAdapter` 实现，见 `SPEC-dap-adapter.md`。网络监听、进程管理、鉴权、条件断点、日志点、表达式求值、修改变量、数据断点、热重载及 Native C++ 单步仍不属于 v1 target。v3 `.fbs` 提供可断点标记、函数和当前词法作用域内的局部变量名；没有局部符号的手写函数仍使用 `$0`、`$1` 等槽位名。
+DAP 转换由独立 `DapAdapter` 实现，见 `SPEC-dap-adapter.md`。网络监听、进程管理、鉴权、日志点、命中次数、数据断点、热重载及 Native C++ 单步仍不属于 v1 target。v3 `.fbs` 提供可断点标记、函数和当前词法作用域内的局部变量名；没有局部符号的手写函数仍使用 `$0`、`$1` 等槽位名，但这类局部槽只能修改，不能在表达式中以 `$N` 引用。

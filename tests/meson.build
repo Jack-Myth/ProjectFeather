@@ -52,6 +52,23 @@ UtilFbc = custom_target('util-fbc',
   build_by_default : true)
 test('cli-multifile-bytecode', FeatherVmCli,
   args : [MultiRootFbc], depends : [MathFbc, UtilFbc])
+test('cli-run-bytecode', FeatherCli,
+  args : ['run', MultiRootFbc], depends : [MathFbc, UtilFbc])
+
+CachedSource = configure_file(
+  input : 'fixtures/cache-entry-source.fe',
+  output : 'cache-entry.fe',
+  copy : true)
+CachedBytecode = custom_target('cache-entry-fbc',
+  input : 'fixtures/cache-entry-bytecode.fe', output : 'cache-entry.fbc',
+  command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
+  build_by_default : true,
+  build_always_stale : true)
+test('cli-fresh-bytecode-cache', FeatherCli,
+  args : ['run', CachedSource], depends : CachedBytecode)
+test('cli-vm-rejects-debug-option', FeatherVmCli,
+  args : [MultiRootFbc, '--wait-debugger'], depends : MultiRootFbc,
+  expected_fail : true)
 
 StdIoTests = executable('stdio-tests', 'StdIo.cpp', '../stdlib/StdIo.cpp',
   dependencies : FeatherDependency)
@@ -91,9 +108,6 @@ if get_option('debugger')
   SocketTests = executable('socket-tests', 'Socket.cpp', '../src/Cli/Socket.cpp',
     dependencies : [FeatherDependency] + SocketSystemDependencies)
   test('debug-socket-transport', SocketTests)
-  test('debug-wait-requires-listener', FeatherVmCli,
-    args : [MultiRootFbc, '--wait-debugger'], depends : MultiRootFbc,
-    expected_fail : true)
 endif
 
 MultimoduleTests = executable('multimodule-tests', 'Multimodule.cpp', dependencies : FeatherDependency)

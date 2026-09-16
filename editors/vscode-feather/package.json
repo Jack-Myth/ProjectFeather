@@ -1,0 +1,132 @@
+{
+  "name": "feather-debug",
+  "displayName": "Feather Debug",
+  "description": "Language and debugging support for Project Feather",
+  "version": "0.3.1",
+  "publisher": "project-feather",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onDebug:feather",
+    "onLanguage:feather"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "feather",
+        "aliases": ["Feather", "feather"],
+        "extensions": [".fe"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "feather",
+        "scopeName": "source.feather",
+        "path": "./syntaxes/feather.tmLanguage.json"
+      }
+    ],
+    "breakpoints": [
+      { "language": "feather" }
+    ],
+    "debuggers": [
+      {
+        "type": "feather",
+        "label": "Feather Debug",
+        "languages": ["feather"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the Feather entry source file."
+              },
+              "runtimeExecutable": {
+                "type": "string",
+                "description": "Path to feather.exe. Defaults to build/feather.exe in the workspace, then feather on PATH."
+              },
+              "runtimeArgs": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": [],
+                "description": "Arguments inserted before the Feather debug command."
+              },
+              "host": {
+                "type": "string",
+                "default": "127.0.0.1",
+                "description": "Loopback address used by the debug target."
+              },
+              "port": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "TCP port. Omit to choose an available local port."
+              },
+              "connectTimeout": {
+                "type": "number",
+                "minimum": 100,
+                "default": 5000,
+                "description": "Milliseconds to wait for the launched target."
+              }
+            }
+          },
+          "attach": {
+            "required": ["port"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Entry source path used to map the root module's breakpoints."
+              },
+              "host": {
+                "type": "string",
+                "default": "127.0.0.1",
+                "description": "Debug target host."
+              },
+              "port": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "Debug target TCP port."
+              },
+              "connectTimeout": {
+                "type": "number",
+                "minimum": 100,
+                "default": 5000,
+                "description": "Milliseconds to wait for the target."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "feather",
+            "request": "launch",
+            "name": "Debug Feather program",
+            "program": "${file}"
+          },
+          {
+            "type": "feather",
+            "request": "attach",
+            "name": "Attach to Feather target",
+            "program": "${file}",
+            "host": "127.0.0.1",
+            "port": 4711
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check extension.js && node --check src/completion.js && node --check src/session.js && node --check src/transport.js"
+  },
+  "devDependencies": {}
+}

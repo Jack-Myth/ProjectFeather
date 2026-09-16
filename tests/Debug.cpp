@@ -415,6 +415,102 @@ void ErrorBreakpoints() {
     Check(Result.wait_for(5s) == std::future_status::ready && Result.get().IsError(),
           "Error breakpoints changed the function result");
 }
+
+void EvaluationConditionsAndMutation() {
+    auto Program = Compile(
+        "var global = 10;\n"
+        "def main(input) {\n"
+        "  var local = 2;\n"
+        "  var item = object();\n"
+        "  item.answer = 5;\n"
+        "  local = local + 1;\n"
+        "  return local + global + item.answer;\n"
+        "}\n");
+    Vm Machine(Program.Program);
+    Program.Initialize(Machine);
+    auto Channel = std::make_shared<RecordingChannel>();
+    auto Target = std::make_shared<DebugTarget>(Channel);
+    TargetCloser Close{Target};
+    Machine.SetDebugController(Target);
+    Target->DispatchProtocolMessage(R"({"id":80,"method":"Debugger.enable"})");
+    Channel->WaitFor(R"("id":80)");
+    Target->DispatchProtocolMessage(
+        R"({"id":81,"method":"Debugger.setBreakpoint","params":{"moduleId":"","line":6,"condition":"local == 2"}})");
+    Channel->WaitFor(R"("id":81)");
+    auto Result = std::async(std::launch::async, [&] {
+        return Machine.Run(Program.Functions.at("main"), {Value::Number(1)});
+    });
+    auto Paused = Channel->WaitFor(R"("method":"Debugger.paused")");
+    Check(Paused.find(R"("reason":"breakpoint")") != std::string::npos,
+          "true conditional breakpoint did not pause");
+
+    Target->DispatchProtocolMessage(
+        R"({"id":82,"method":"Debugger.evaluate","params":{"frameId":0,"expression":"local + global"}})");
+    auto Evaluated = Channel->WaitFor(R"("id":82)");
+    Check(Evaluated.find(R"("value":12)") != std::string::npos,
+          "paused expression did not see locals and globals");
+    Target->DispatchProtocolMessage(
+        R"({"id":83,"method":"Debugger.getVariables","params":{"frameId":0,"scope":"locals"}})");
+    auto Locals = Channel->WaitFor(R"("id":83)");
+    Check(Locals.find(R"("name":"item")") != std::string::npos &&
+          Locals.find(R"("objectId":1)") != std::string::npos,
+          "mutation fixture object was not exposed");
+    Target->DispatchProtocolMessage(
+        R"({"id":84,"method":"Debugger.setVariable","params":{"frameId":0,"scope":"locals","name":"local","expression":"local + 5"}})");
+    Check(Channel->WaitFor(R"("id":84)").find(R"("value":7)") != std::string::npos,
+          "local variable mutation failed");
+    Target->DispatchProtocolMessage(
+        R"({"id":85,"method":"Debugger.setVariable","params":{"frameId":0,"scope":"globals","name":"global","expression":"global + 1"}})");
+    Check(Channel->WaitFor(R"("id":85)").find(R"("value":11)") != std::string::npos,
+          "global variable mutation failed");
+    Target->DispatchProtocolMessage(
+        R"({"id":86,"method":"Debugger.setVariable","params":{"frameId":0,"objectId":1,"name":"answer","expression":"local * 2"}})");
+    Check(Channel->WaitFor(R"("id":86)").find(R"("value":14)") != std::string::npos,
+          "object property mutation failed");
+    Target->DispatchProtocolMessage(
+        R"({"id":100,"method":"Debugger.setPauseOnErrors","params":{"enabled":true}})");
+    Channel->WaitFor(R"("id":100)");
+    Target->DispatchProtocolMessage(
+        R"({"id":101,"method":"Debugger.evaluate","params":{"frameId":0,"expression":"1 + \"bad\""}})");
+    auto ErrorValue = Channel->WaitFor(R"("id":101)");
+    Check(ErrorValue.find("Error: invalid operands") != std::string::npos,
+          "debug expression Error did not return as a value");
+    Target->DispatchProtocolMessage(
+        R"({"id":102,"method":"Debugger.setPauseOnErrors","params":{"enabled":false}})");
+    Channel->WaitFor(R"("id":102)");
+    Target->DispatchProtocolMessage(R"({"id":87,"method":"Debugger.resume"})");
+    Check(Result.wait_for(5s) == std::future_status::ready && Result.get().AsNumber() == 33,
+          "debug mutations were not observed by resumed execution");
+
+    Target->DispatchProtocolMessage(
+        R"({"id":88,"method":"Debugger.removeBreakpoint","params":{"breakpointId":1}})");
+    Channel->WaitFor(R"("id":88)");
+    Target->DispatchProtocolMessage(
+        R"({"id":89,"method":"Debugger.setBreakpoint","params":{"moduleId":"","line":6,"condition":"local == 99"}})");
+    Channel->WaitFor(R"("id":89)");
+    auto Skipped = std::async(std::launch::async, [&] {
+        return Machine.Run(Program.Functions.at("main"), {Value::Number(1)});
+    });
+    Check(Skipped.wait_for(5s) == std::future_status::ready && Skipped.get().AsNumber() == 19,
+          "false conditional breakpoint stopped or changed execution");
+
+    Target->DispatchProtocolMessage(
+        R"({"id":90,"method":"Debugger.removeBreakpoint","params":{"breakpointId":2}})");
+    Channel->WaitFor(R"("id":90)");
+    auto Start = Channel->Count();
+    Target->DispatchProtocolMessage(
+        R"({"id":91,"method":"Debugger.setBreakpoint","params":{"moduleId":"","line":6,"condition":"local +"}})");
+    Channel->WaitFor(R"("id":91)", Start);
+    auto Invalid = std::async(std::launch::async, [&] {
+        return Machine.Run(Program.Functions.at("main"), {Value::Number(1)});
+    });
+    auto FailedCondition = Channel->WaitFor(R"("method":"Debugger.paused")", Start);
+    Check(FailedCondition.find(R"("conditionError":)") != std::string::npos,
+          "invalid condition did not stop with a diagnostic");
+    Target->DispatchProtocolMessage(R"({"id":92,"method":"Debugger.resume"})");
+    Check(Invalid.wait_for(5s) == std::future_status::ready && Invalid.get().AsNumber() == 19,
+          "condition compilation failure changed execution");
+}
 }
 
 int main() {
@@ -426,6 +522,7 @@ int main() {
         StartupGate();
         SyntheticInitializerDoesNotCaptureLineBreakpoint();
         ErrorBreakpoints();
+        EvaluationConditionsAndMutation();
         ControllerIsolation();
         std::cout << "Debug protocol tests passed\n";
         return 0;

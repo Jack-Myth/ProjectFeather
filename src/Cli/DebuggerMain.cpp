@@ -27,6 +27,7 @@ void PrintHelp() {
         "commands:\n"
         "  run                         start the waiting program\n"
         "  break <line> [module]       set a source breakpoint\n"
+        "  breakif <line> <expression> set a conditional root breakpoint\n"
         "  delete <breakpoint-id>      remove a breakpoint\n"
         "  errors on | off             pause on Error results\n"
         "  continue | c                resume execution\n"
@@ -39,6 +40,9 @@ void PrintHelp() {
         "  values <frame-id>           show the operand stack\n"
         "  globals <frame-id>          show module globals\n"
         "  properties <object-id>      show object properties\n"
+        "  eval <frame-id> <expression> evaluate a Feather expression\n"
+        "  set <frame> <scope> <name> <expression>  modify a scope variable\n"
+        "  setprop <frame> <object> <name> <expression> modify an object property\n"
         "  raw <json>                  send a raw Feather request\n"
         "  help                        show this help\n"
         "  quit                        disconnect\n";
@@ -77,6 +81,8 @@ void PrintMessage(std::string_view Message) {
                         Description && Description->IsString())
                         std::cout << " - " << Description->String();
                 }
+                if (auto Error = Find(Fields, "conditionError"); Error && Error->IsString())
+                    std::cout << " - condition failed: " << Error->String();
                 std::cout << '\n';
                 return;
             }
@@ -183,6 +189,19 @@ int Run(std::string_view EndpointText) {
                                                    {"line", Json(*LineNumber)}});
                 continue;
             }
+            if (Command == "breakif") {
+                std::string LineText;
+                Input >> LineText;
+                auto LineNumber = Number(LineText);
+                if (!LineNumber || *LineNumber == 0)
+                    throw std::invalid_argument("line must be a positive integer");
+                std::string Expression;
+                std::getline(Input >> std::ws, Expression);
+                if (Expression.empty()) throw std::invalid_argument("breakif requires an expression");
+                Send("Debugger.setBreakpoint", {{"moduleId", Json("")},
+                    {"line", Json(*LineNumber)}, {"condition", Json(std::move(Expression))}});
+                continue;
+            }
             if (Command == "delete" || Command == "properties") {
                 std::string IdText;
                 Input >> IdText;
@@ -200,6 +219,38 @@ int Run(std::string_view EndpointText) {
                 if (!Frame) throw std::invalid_argument("a frame id is required");
                 auto Scope = Command == "values" ? "stack" : Command;
                 Send("Debugger.getVariables", {{"frameId", Json(*Frame)}, {"scope", Json(Scope)}});
+                continue;
+            }
+            if (Command == "eval") {
+                std::string FrameText, Expression;
+                Input >> FrameText;
+                auto Frame = Number(FrameText);
+                std::getline(Input >> std::ws, Expression);
+                if (!Frame || Expression.empty())
+                    throw std::invalid_argument("eval requires a frame id and expression");
+                Send("Debugger.evaluate", {{"frameId", Json(*Frame)},
+                                             {"expression", Json(std::move(Expression))}});
+                continue;
+            }
+            if (Command == "set" || Command == "setprop") {
+                std::string FrameText, TargetText, Name, Expression;
+                Input >> FrameText >> TargetText >> Name;
+                auto Frame = Number(FrameText);
+                std::getline(Input >> std::ws, Expression);
+                if (!Frame || Name.empty() || Expression.empty())
+                    throw std::invalid_argument("set command arguments are incomplete");
+                Json::Object Params{{"frameId", Json(*Frame)}, {"name", Json(std::move(Name))},
+                                    {"expression", Json(std::move(Expression))}};
+                if (Command == "set") {
+                    if (TargetText != "locals" && TargetText != "stack" && TargetText != "globals")
+                        throw std::invalid_argument("scope must be locals, stack, or globals");
+                    Params.emplace("scope", Json(std::move(TargetText)));
+                } else {
+                    auto Object = Number(TargetText);
+                    if (!Object) throw std::invalid_argument("setprop requires an object id");
+                    Params.emplace("objectId", Json(*Object));
+                }
+                Send("Debugger.setVariable", std::move(Params));
                 continue;
             }
             if (Command == "raw") {
