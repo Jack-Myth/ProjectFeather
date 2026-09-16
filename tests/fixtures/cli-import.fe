@@ -1,1 +1,1 @@
-var module = import("math");
+def main() { return import("math"); }

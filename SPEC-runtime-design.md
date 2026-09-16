@@ -174,7 +174,7 @@
       以 `std::bad_alloc` 向宿主报告分配失败，宿主应销毁该 VM，不保证故障后
       继续执行的状态。可在 VM 构造时配置脚本对象上限，用于资源限制和稳定
       测试同一故障路径；RootMetaObject 占用一个对象名额。不提供 fatal 回调。
-- [x] 根集包括 RootMetaObject、全局表、运行中帧的局部槽位和表达式栈、
+- [x] 根集包括 RootMetaObject、全部模块的私有全局表、运行中帧的局部槽位和表达式栈、
       宿主根句柄、native 回调登记的临时值及仍存活 NativeObject 的 GC 可见成员。
 - [x] 指令执行期间不触发 GC；native 回调若持有跨 GC 时点的 GC 对象，
       必须通过根句柄持有。第一版不允许 native 回调期间调用 GC。
@@ -199,7 +199,7 @@
 - [x] `AddToRoot(Value)` 返回不可复制、可移动的 `RootHandle`；析构或一次
       `Reset()` 解除根。VM 销毁后读取句柄报 API 错误。裸 ScriptObject Value
       在下一次 GC 后可能失效；宿主不可在未持根时跨 GC 使用它。
-- [x] `CollectGarbage()` 从 RootMetaObject、全局表、宿主根句柄及登记的
+- [x] `CollectGarbage()` 从 RootMetaObject、全部模块全局表、宿主根句柄及登记的
       NativeObject 成员开始标记，沿 ScriptObject 成员和 MetaObject 引用遍历，
       清除未标记对象。第一版仅在空闲安全点执行，因此不扫描活跃调用帧。
 - [x] `GetGcStatistics()` 提供 ScriptObject 数、成员数和 GC 管理脚本对象的
@@ -286,9 +286,9 @@
 
 - [x] 变量仅有局部和全局两种，不含 upvalue；形参和块内 `var` 分配独立局部槽位，
       编译期按词法作用域解析，内层可遮蔽。离开作用域后槽位不复用。
-- [x] 顶层 `var` 和未解析为局部的名称使用 VM 的字符串键全局表；顶层声明函数
-      在初始化函数中先绑定到全局，再执行顶层语句。编译结果由模块、初始化函数
-      索引和函数名到常量索引的映射组成，见 `Compiler.hpp`。
+- [x] 顶层 `var` 和未解析为局部的名称使用当前函数所属模块的字符串键全局表；顶层声明函数
+      在初始化函数中先绑定到该模块全局，再执行顶层语句。编译结果由模块、初始化函数、
+      函数名到常量索引的映射及显式导出名组成，见 `Compiler.hpp` 与 `SPEC-multimodule.md`。
 
 ---
 
@@ -355,11 +355,13 @@
   - 上报的 Error 需标记**来源**：由 VM 内部（未定义操作）产生 / 由脚本代码主动
         构造产生 —— 调试器据此自行决定过滤 / 忽略哪些来源的 Error，运行时不参与
         此过滤逻辑
-  - 非调试模式下不产生任何相关开销（正常执行路径完全不变）
+  - 非调试模式下不产生逐次事件上报开销；普通源码来源查询的成本另按下文约定
 - [ ] 错误信息如何传递给宿主：宿主每次调用脚本函数后，通过 `get_type` 检查
       返回值是否为 Error 类型，由宿主决定后续处理（详见第 7 节）
 - [x] Error 仅表示语言层操作错误。OOM、VM 内部故障及宿主故障不进入语言的
       Error 体系；由宿主自行处理，或走 VM 的致命故障路径。
+
+源码诊断另见 `ROADMAP-runtime-diagnostics.md`：编译器生成可选的内存指令位置表，也可写入独立 `.fbs`；VM 为首次观察到的 Error 记录每 VM 独立来源，宿主通过 `Vm::GetErrorLocation(value)` 查询。执行预算、分配和宿主回调等未捕获故障继续抛原有 C++ 异常，宿主可在捕获后通过 `Vm::GetFaultLocation()` 查询位置。最外层新执行会清除上次故障位置；继承 `std::exception` 的同一异常穿过宿主重入时保留内层位置，宿主改抛的新异常标在当前调用点。这些位置不进入 Error 值本身，也不改变 Error 的普通值语义。上述查询与尚未实现的逐次 Error 调试事件钩子是独立功能。
 
 ### 5.3 条件真值与数值边界
 
@@ -454,7 +456,7 @@
       登记，再使用专用 GC 可见成员 setter/移除接口。
 - [x] `Vm(shared_ptr<Module>, MaxScriptObjects, MaxInstructionsPerInvocation)` 构造时验证并冻结模块；
       析构销毁 VM 堆及全局状态。宿主用 `Run(functionConstantIndex, args)`
-      调用入口。`GetGlobal(name)`/`SetGlobal(name, value)` 访问 VM 全局表；
+      调用主模块入口。`GetGlobal(name)`/`SetGlobal(name, value)` 访问主模块全局表；
       未定义全局读取返回新 Error。跨 VM ScriptObject 或 Function 使用报 API 错误。
 - [x] 宿主对返回 Value 先看顶层类型，再看 `GetObjectType()` 或 `IsError()`；
       Error 的 `message` 可通过其 `get_member` 或 C++ ErrorObject 接口读取。
@@ -466,6 +468,9 @@
 - [x] `import` 是宿主通过 `RegisterImport(vm, callback)` 注册的普通 native 全局函数，
       编译器与 VM 不解析依赖或跨 VM 传递脚本对象。宿主 Feather 模块可通过
       NativeObject 代理暴露；参数、返回值和快照责任见 `SPEC-import.md`。
+- [x] 单 VM 多文件模块通过 `LoadModule` / `RunModule` / `InitializeModule` 维护私有全局和代码身份；
+      `RegisterModuleImport` 是另一种宿主适配器，可返回同一 VM 的脚本值。VM 不读取文件，
+      逻辑模块 ID、`export`、循环初始化、GC 和快照边界见 `SPEC-multimodule.md`。
 - [x] 与第 6 节快照功能相关的 C++ API 首版：`CaptureSnapshot(codec)`、
       `ResumeSnapshot(bytes, codec)` 与 `SnapshotHostCodec` 接口，语义见
       `SPEC-snapshot.md`；公开签名和磁盘格式尚未承诺稳定。

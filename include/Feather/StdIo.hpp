@@ -4,7 +4,6 @@
 
 #include <iosfwd>
 #include <memory>
-#include <string_view>
 
 namespace Feather {
 
@@ -17,14 +16,15 @@ public:
     StdIoLibrary(const StdIoLibrary&) = delete;
     StdIoLibrary& operator=(const StdIoLibrary&) = delete;
 
-    // Returns null for an unrecognized specifier, so hosts can compose resolvers.
-    Value Resolve(std::string_view Specifier) const;
+    // A read-only module with Console and IO members.
+    Value GetModule() const;
 
 private:
     struct State;
     std::shared_ptr<State> Shared;
     std::shared_ptr<NativeObject> ConsoleObject;
     std::shared_ptr<NativeObject> IOObject;
+    std::shared_ptr<NativeObject> ModuleObject;
 };
 
 } // namespace Feather

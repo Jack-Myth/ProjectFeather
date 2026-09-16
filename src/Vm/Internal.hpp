@@ -2,6 +2,8 @@
 
 #include <Feather/Runtime.hpp>
 
+#include <unordered_set>
+
 namespace Feather {
 
 class FunctionObject final : public NativeObject {
@@ -15,6 +17,31 @@ public:
 private:
     std::shared_ptr<Module> Owner;
     std::shared_ptr<FunctionPrototype> Body;
+};
+
+struct ModuleInstance {
+    enum class State { Loaded, Initializing, Initialized, Failed };
+    std::string Id;
+    std::shared_ptr<Module> Source;
+    std::vector<std::uint8_t> Identity;
+    std::shared_ptr<Module> Program;
+    std::vector<std::shared_ptr<Object>> Functions;
+    std::unordered_map<std::string, Value> Globals;
+    std::unordered_set<std::string> Exports;
+    std::shared_ptr<NativeObject> Namespace;
+    State Initialization = State::Loaded;
+    Value InitializationError;
+};
+
+class ModuleNamespace final : public NativeObject {
+public:
+    explicit ModuleNamespace(std::weak_ptr<ModuleInstance> Owner) : Owner(std::move(Owner)) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    Value GetMember(const Value& Key) override;
+    Value SetMember(const Value& Key, const Value& Input) override;
+    std::string GetModuleId() const;
+private:
+    std::weak_ptr<ModuleInstance> Owner;
 };
 
 struct Frame {

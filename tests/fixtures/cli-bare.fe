@@ -1,0 +1,5 @@
+var helper = import("helper");
+
+def main() {
+    return helper.Value() - 42;
+}

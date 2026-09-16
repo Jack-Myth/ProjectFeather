@@ -1,0 +1,3 @@
+export def Shadow() {
+    return 1;
+}

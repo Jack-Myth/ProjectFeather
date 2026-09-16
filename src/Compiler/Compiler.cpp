@@ -13,7 +13,7 @@ namespace Feather {
 namespace {
 
 enum class TokenKind {
-    End, Name, Number, String, Def, Var, Return, If, Else, While, Null,
+    End, Name, Number, String, Def, Var, Export, Return, If, Else, While, Null,
     True, False, Object, LeftParen, RightParen, LeftBrace, RightBrace,
     LeftBracket, RightBracket, Comma, Dot, Semicolon, Assign, Equal,
     Less, Plus, Minus, Star, Slash, QuickHash, QuickDollar,
@@ -111,7 +111,8 @@ public:
                 do { Advance(); } while (Position < Input.size() && (Alpha(Input[Position]) || Digit(Input[Position])));
                 Start.Text = std::string(Input.substr(Begin, Position - Begin));
                 static const std::unordered_map<std::string, TokenKind> Keywords{
-                    {"def", TokenKind::Def}, {"var", TokenKind::Var}, {"return", TokenKind::Return},
+                    {"def", TokenKind::Def}, {"var", TokenKind::Var},
+                    {"export", TokenKind::Export}, {"return", TokenKind::Return},
                     {"if", TokenKind::If}, {"else", TokenKind::Else}, {"while", TokenKind::While},
                     {"null", TokenKind::Null}, {"true", TokenKind::True}, {"false", TokenKind::False},
                     {"object", TokenKind::Object}};
@@ -222,6 +223,7 @@ struct FunctionAst {
 struct ProgramAst {
     std::vector<FunctionAst> Functions;
     std::vector<NodePtr> Statements;
+    std::vector<std::string> Exports;
 };
 
 class Parser {
@@ -231,14 +233,19 @@ public:
         ProgramAst Result;
         std::unordered_set<std::string> Declared;
         while (!Check(TokenKind::End)) {
+            bool Exported = Match(TokenKind::Export);
             if (Match(TokenKind::Def)) {
                 auto Function = ParseFunction(Previous());
                 if (!Declared.insert(Function.Name).second) Fail(Function.At, "duplicate global declaration");
+                if (Exported) Result.Exports.push_back(Function.Name);
                 Result.Functions.push_back(std::move(Function));
             } else {
+                if (Exported && !Check(TokenKind::Var))
+                    Fail(Peek(), "export requires a top-level var or def declaration");
                 auto Statement = ParseStatement();
                 if (Statement->Kind == NodeKind::Var && !Declared.insert(Statement->Name).second)
                     Fail(Statement->At, "duplicate global declaration");
+                if (Exported) Result.Exports.push_back(Statement->Name);
                 Result.Statements.push_back(std::move(Statement));
             }
         }
@@ -293,6 +300,7 @@ private:
         while (!Check(TokenKind::RightBrace)) {
             if (Check(TokenKind::End)) Fail(Peek(), "unterminated block");
             if (Check(TokenKind::Def)) Fail(Peek(), "function declarations are top-level only");
+            if (Check(TokenKind::Export)) Fail(Peek(), "export declarations are top-level only");
             Result->Children.push_back(ParseStatement());
         }
         Expect(TokenKind::RightBrace, "expected '}'");
@@ -441,7 +449,7 @@ private:
 
 class Emitter {
 public:
-    Emitter(Module& Program, const Token& At) : Program(Program), At(At) { Scopes.emplace_back(); }
+    Emitter(Module& Program, const Token& At) : Program(Program), At(At), CurrentAt(&this->At) { Scopes.emplace_back(); }
     void AddParameters(const FunctionAst& Function) {
         if (Function.Parameters.size() > 65'536) Fail(Function.At, "too many parameters");
         for (const auto& Name : Function.Parameters) Scopes.back()[Name] = LocalCount++;
@@ -453,6 +461,7 @@ public:
     void EmitInitializer(const ProgramAst& Ast,
                          const std::unordered_map<std::string, std::uint32_t>& Functions) {
         for (const auto& Function : Ast.Functions) {
+            SourceGuard Source(CurrentAt, Function.At);
             EmitU32(Op::Const, Functions.at(Function.Name));
             EmitU32(Op::SetGlobal, StringConstant(Function.Name));
             Emit(Op::Pop);
@@ -461,8 +470,18 @@ public:
         Emit(Op::Null); Emit(Op::Return);
     }
     std::vector<std::uint8_t> Finish() { return std::move(Code).Finish(); }
+    std::vector<InstructionLocation> FinishLocations() { return std::move(Locations); }
     std::uint32_t GetLocalCount() const { return LocalCount; }
 private:
+    struct SourceGuard {
+        SourceGuard(const Token*& Current, const Token& At) : Current(Current), Previous(Current) { Current = &At; }
+        ~SourceGuard() { Current = Previous; }
+        const Token*& Current;
+        const Token* Previous;
+    };
+    void RecordLocation() {
+        Locations.push_back({Code.Offset(), {CurrentAt->Offset, CurrentAt->Line, CurrentAt->Column}});
+    }
     std::uint32_t ConstantFor(const Value& Input, const Token& At) {
         if (Program.Constants.size() >= 65'536) Fail(At, "too many constants");
         if (Input.GetType() == ValueType::Number) return Program.AddNumber(Input.AsNumber());
@@ -480,8 +499,10 @@ private:
         }
         return std::nullopt;
     }
-    void Emit(Op Instruction) { Code.Emit(Instruction); }
-    void EmitU32(Op Instruction, std::uint32_t Operand) { Code.EmitU32(Instruction, Operand); }
+    void Emit(Op Instruction) { RecordLocation(); Code.Emit(Instruction); }
+    void EmitU16(Op Instruction, std::uint16_t Operand) { RecordLocation(); Code.EmitU16(Instruction, Operand); }
+    void EmitU32(Op Instruction, std::uint32_t Operand) { RecordLocation(); Code.EmitU32(Instruction, Operand); }
+    std::size_t EmitJump(Op Instruction) { RecordLocation(); return Code.EmitJump(Instruction); }
     void EmitBlock(const Node& Block, bool NewScope) {
         DepthGuard Guard(Depth, Block.At);
         if (NewScope) Scopes.emplace_back();
@@ -490,6 +511,7 @@ private:
     }
     void EmitStatement(const Node& Statement, bool TopLevel) {
         DepthGuard Guard(Depth, Statement.At);
+        SourceGuard Source(CurrentAt, Statement.At);
         switch (Statement.Kind) {
         case NodeKind::Var: {
             if (!TopLevel && Scopes.back().contains(Statement.Name))
@@ -515,12 +537,12 @@ private:
             EmitBlock(Statement, true); break;
         case NodeKind::If: {
             EmitExpression(*Statement.Children[0]);
-            auto True = Code.EmitJump(Op::JumpIf);
-            auto False = Code.EmitJump(Op::Jump);
+            auto True = EmitJump(Op::JumpIf);
+            auto False = EmitJump(Op::Jump);
             Code.PatchJump(True, Code.Offset());
             EmitBlock(*Statement.Children[1], true);
             if (Statement.Children.size() == 3) {
-                auto End = Code.EmitJump(Op::Jump);
+                auto End = EmitJump(Op::Jump);
                 Code.PatchJump(False, Code.Offset());
                 EmitBlock(*Statement.Children[2], true);
                 Code.PatchJump(End, Code.Offset());
@@ -530,11 +552,11 @@ private:
         case NodeKind::While: {
             auto Start = Code.Offset();
             EmitExpression(*Statement.Children[0]);
-            auto Body = Code.EmitJump(Op::JumpIf);
-            auto Exit = Code.EmitJump(Op::Jump);
+            auto Body = EmitJump(Op::JumpIf);
+            auto Exit = EmitJump(Op::Jump);
             Code.PatchJump(Body, Code.Offset());
             EmitBlock(*Statement.Children[1], true);
-            auto Back = Code.EmitJump(Op::Jump);
+            auto Back = EmitJump(Op::Jump);
             Code.PatchJump(Back, Start);
             Code.PatchJump(Exit, Code.Offset()); break;
         }
@@ -543,6 +565,7 @@ private:
     }
     void EmitExpression(const Node& Expression) {
         DepthGuard Guard(Depth, Expression.At);
+        SourceGuard Source(CurrentAt, Expression.At);
         switch (Expression.Kind) {
         case NodeKind::Literal:
             switch (Expression.Literal.GetType()) {
@@ -568,7 +591,7 @@ private:
             if (Expression.Children.size() - 1 > std::numeric_limits<std::uint16_t>::max())
                 Fail(Expression.At, "too many call arguments");
             for (const auto& Child : Expression.Children) EmitExpression(*Child);
-            Code.EmitU16(Op::Call, static_cast<std::uint16_t>(Expression.Children.size() - 1));
+            EmitU16(Op::Call, static_cast<std::uint16_t>(Expression.Children.size() - 1));
             break;
         }
         case NodeKind::Unary:
@@ -607,7 +630,9 @@ private:
     }
     Module& Program;
     Token At;
+    const Token* CurrentAt;
     Builder Code;
+    std::vector<InstructionLocation> Locations;
     std::uint32_t LocalCount = 0;
     std::size_t Depth = 0;
     std::vector<std::unordered_map<std::string, std::uint32_t>> Scopes;
@@ -625,6 +650,7 @@ CompiledProgram Compile(std::string_view Source) {
     auto Ast = Parser(std::move(Tokens)).Parse();
     CompiledProgram Result;
     Result.UsesQuickOperators = UsesQuickOperators;
+    Result.Exports = std::move(Ast.Exports);
     Result.Program = std::make_shared<Module>();
     for (const auto& Function : Ast.Functions) {
         auto Prototype = std::make_shared<FunctionPrototype>();
@@ -641,12 +667,14 @@ CompiledProgram Compile(std::string_view Source) {
         auto& Prototype = *Result.Program->Constants[Result.Functions.at(Function.Name)].Function;
         Prototype.LocalCount = Output.GetLocalCount();
         Prototype.Code = Output.Finish();
+        Prototype.Locations = Output.FinishLocations();
     }
     Token Start{TokenKind::End, {}, 0, 1, 1};
     Emitter Output(*Result.Program, Start);
     Output.EmitInitializer(Ast, Result.Functions);
     Initializer->LocalCount = Output.GetLocalCount();
     Initializer->Code = Output.Finish();
+    Initializer->Locations = Output.FinishLocations();
     try { Result.Program->Validate(); }
     catch (const std::exception& Error) { Fail(Start, std::string("generated bytecode invalid: ") + Error.what()); }
     return Result;
@@ -656,6 +684,18 @@ Value CompiledProgram::Initialize(Vm& Machine) const {
     if (!Program || !Machine.IsBuiltFrom(Program))
         throw std::invalid_argument("compiled program belongs to another VM module");
     return Machine.Run(Initializer);
+}
+
+void CompiledProgram::LoadInto(Vm& Machine, std::string Id) const {
+    if (!Program) throw std::invalid_argument("missing compiled module");
+    auto Identity = SerializeProgram(*this);
+    Machine.LoadModule(std::move(Id), Program, Exports, Identity);
+}
+
+Value CompiledProgram::InitializeModule(Vm& Machine, std::string_view Id) const {
+    if (!Program || !Machine.IsModuleBuiltFrom(Id, Program, SerializeProgram(*this)))
+        throw std::invalid_argument("compiled program belongs to another VM module");
+    return Machine.InitializeModule(Id, Initializer);
 }
 
 } // namespace Feather

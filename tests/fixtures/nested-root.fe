@@ -1,0 +1,5 @@
+var math = import("./nested/math");
+def main() {
+    if (math.sum(7) == 13) { return 0; }
+    return 1 + "wrong caller-relative import";
+}

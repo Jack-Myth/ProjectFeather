@@ -15,6 +15,8 @@ std::string PathText(const std::filesystem::path& Path);
 std::vector<std::uint8_t> ReadFile(const std::filesystem::path& Path);
 std::string ReadSource(const std::filesystem::path& Path);
 void WriteFile(const std::filesystem::path& Path, std::span<const std::uint8_t> Bytes);
-int RunProgram(const CompiledProgram& Program);
+enum class ModuleFileKind { Source, Bytecode };
+int RunProgram(const CompiledProgram& Program, const std::filesystem::path& EntryPath,
+               ModuleFileKind Kind);
 
 } // namespace Feather::Cli

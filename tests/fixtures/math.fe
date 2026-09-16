@@ -1,0 +1,3 @@
+var util = import("./util");
+export var base = util.answer;
+export def sum(x) { return base + x; }

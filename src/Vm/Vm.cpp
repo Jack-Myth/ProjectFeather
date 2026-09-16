@@ -52,7 +52,47 @@ Value ConstantValue(const Constant& Item, const std::shared_ptr<Object>& Functio
     }
     throw std::logic_error("invalid constant kind");
 }
+std::optional<SourceLocation> LocationAt(const FunctionPrototype& Body, std::size_t Pc) {
+    auto Found = std::lower_bound(Body.Locations.begin(), Body.Locations.end(), Pc,
+        [](const InstructionLocation& Location, std::size_t Target) { return Location.Pc < Target; });
+    if (Found == Body.Locations.end() || Found->Pc != Pc) return std::nullopt;
+    return Found->Source;
+}
+
+bool IsIdentifier(std::string_view Name) {
+    if (Name.empty()) return false;
+    auto Alpha = [](char C) { return (C >= 'A' && C <= 'Z') ||
+                                      (C >= 'a' && C <= 'z') || C == '_'; };
+    if (!Alpha(Name[0])) return false;
+    for (char C : Name.substr(1))
+        if (!Alpha(C) && (C < '0' || C > '9')) return false;
+    return true;
+}
 } // namespace
+
+Value ModuleNamespace::GetMember(const Value& Key) {
+    auto Instance = Owner.lock();
+    if (!Instance) throw std::logic_error("module namespace has expired");
+    if (Instance->Initialization != ModuleInstance::State::Initialized)
+        return Instance->Initialization == ModuleInstance::State::Failed ?
+            Instance->InitializationError : Error("module is not initialized");
+    if (Key.GetType() != ValueType::String || !Instance->Exports.contains(Key.AsString()))
+        return Error("unknown module export");
+    auto Found = Instance->Globals.find(Key.AsString());
+    return Found == Instance->Globals.end() ? Error("module export is not initialized") : Found->second;
+}
+
+Value ModuleNamespace::SetMember(const Value&, const Value&) {
+    return Error("module exports are read-only");
+}
+
+std::string ModuleNamespace::GetModuleId() const {
+    auto Instance = Owner.lock();
+    if (!Instance) throw std::logic_error("module namespace has expired");
+    return Instance->Id;
+}
+
+Vm::~Vm() = default;
 
 Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
        std::size_t MaxInstructionsPerInvocation)
@@ -76,6 +116,89 @@ Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
         if (Item.Type == Constant::Kind::Function)
             Functions[I] = std::make_shared<FunctionObject>(Program, Item.Function);
     }
+}
+
+void Vm::LoadModule(std::string Id, std::shared_ptr<Module> Source,
+                    std::vector<std::string> ExportNames,
+                    std::span<const std::uint8_t> Identity) {
+    if (Id.empty()) throw std::invalid_argument("loaded module ID must be nonempty");
+    (void)Value::String(Id);
+    if (!Source) throw std::invalid_argument("null loaded module");
+    std::unordered_set<std::string> Exports;
+    for (const auto& Name : ExportNames)
+        if (!IsIdentifier(Name) || !Exports.insert(Name).second)
+            throw std::invalid_argument("invalid loaded module export");
+    if (auto Found = LoadedModules.find(Id); Found != LoadedModules.end()) {
+        bool SameProgram = Identity.empty() == Found->second->Identity.empty() &&
+            (Identity.empty() ? Found->second->Source == Source :
+                std::equal(Identity.begin(), Identity.end(), Found->second->Identity.begin(),
+                           Found->second->Identity.end()));
+        if (SameProgram && Found->second->Exports == Exports) return;
+        throw std::invalid_argument("module ID already belongs to another program");
+    }
+    if (LoadedModules.size() >= 65'536) throw std::invalid_argument("too many loaded modules");
+    Source->Validate();
+    auto Instance = std::make_shared<ModuleInstance>();
+    Instance->Id = Id;
+    Instance->Source = Source;
+    Instance->Identity.assign(Identity.begin(), Identity.end());
+    Instance->Program = std::make_shared<Module>(*Source);
+    Instance->Exports = std::move(Exports);
+    for (auto& Item : Instance->Program->Constants)
+        if (Item.Type == Constant::Kind::Function)
+            Item.Function = std::make_shared<FunctionPrototype>(*Item.Function);
+    Instance->Functions.resize(Instance->Program->Constants.size());
+    for (std::size_t I = 0; I < Instance->Functions.size(); ++I) {
+        const auto& Item = Instance->Program->Constants[I];
+        if (Item.Type == Constant::Kind::Function)
+            Instance->Functions[I] = std::make_shared<FunctionObject>(Instance->Program, Item.Function);
+    }
+    Instance->Namespace = std::make_shared<ModuleNamespace>(Instance);
+    auto [Inserted, _] = LoadedModules.emplace(Id, Instance);
+    try { ModuleByProgram.emplace(Instance->Program.get(), Instance); }
+    catch (...) { LoadedModules.erase(Inserted); throw; }
+}
+
+bool Vm::IsModuleBuiltFrom(std::string_view Id, const std::shared_ptr<Module>& Source,
+                           std::span<const std::uint8_t> Identity) const {
+    auto Found = LoadedModules.find(std::string(Id));
+    if (Found == LoadedModules.end()) return false;
+    if (Identity.empty() != Found->second->Identity.empty()) return false;
+    if (!Identity.empty())
+        return std::equal(Identity.begin(), Identity.end(), Found->second->Identity.begin(),
+                          Found->second->Identity.end());
+    return Found->second->Source == Source;
+}
+
+Value Vm::GetModuleGlobal(std::string_view Id, const std::string& Name) const {
+    (void)Value::String(Name);
+    auto Found = LoadedModules.find(std::string(Id));
+    if (Found == LoadedModules.end()) throw std::invalid_argument("unknown loaded module");
+    auto Global = Found->second->Globals.find(Name);
+    return Global == Found->second->Globals.end() ? Error("undefined global") : Global->second;
+}
+
+void Vm::SetModuleGlobal(std::string_view Id, std::string Name, Value Input) {
+    (void)Value::String(Name);
+    ValidateOwnedValue(Input);
+    auto Found = LoadedModules.find(std::string(Id));
+    if (Found == LoadedModules.end()) throw std::invalid_argument("unknown loaded module");
+    Found->second->Globals.insert_or_assign(std::move(Name), std::move(Input));
+}
+
+Value Vm::GetModuleNamespace(std::string_view Id) const {
+    auto Found = LoadedModules.find(std::string(Id));
+    if (Found == LoadedModules.end()) throw std::invalid_argument("unknown loaded module");
+    return Value::FromObject(Found->second->Namespace);
+}
+
+std::string Vm::GetActiveModuleId() const {
+    if (!ActiveExecution || ActiveExecution->Frames.empty()) return {};
+    const auto& Owner = ActiveExecution->Frames.back().Function->GetOwner();
+    if (Owner == Program) return {};
+    auto Found = ModuleByProgram.find(Owner.get());
+    if (Found == ModuleByProgram.end()) throw std::logic_error("active function has no module instance");
+    return Found->second->Id;
 }
 
 ScriptObject* Vm::CreateScriptObject() {
@@ -105,7 +228,8 @@ void Vm::ValidateOwnedValue(const Value& Input) const {
     if (Input.GetType() == ValueType::Object &&
         Input.GetObjectType() == ObjectType::Function) {
         auto* Function = dynamic_cast<FunctionObject*>(Input.AsObject());
-        if (!Function || Function->GetOwner() != Program)
+        if (!Function || (Function->GetOwner() != Program &&
+                          !ModuleByProgram.contains(Function->GetOwner().get())))
             throw std::invalid_argument("function belongs to another VM module");
     }
 }
@@ -189,6 +313,11 @@ std::size_t Vm::CollectGarbage() {
     };
     MarkScript(RootMetaObject);
     for (const auto& [_, Entry] : Globals) MarkValue(Entry);
+    for (const auto& [_, Instance] : LoadedModules) {
+        for (const auto& [__, Entry] : Instance->Globals) MarkValue(Entry);
+        MarkValue(Instance->InitializationError);
+        MarkValue(Value::FromObject(Instance->Namespace));
+    }
     for (const auto& [_, Entry] : HostRoots) MarkValue(Entry);
     for (auto It = NativeRegistry.begin(); It != NativeRegistry.end();) {
         if (auto Native = It->lock()) {
@@ -226,6 +355,7 @@ GcStatistics Vm::GetGcStatistics() const {
 }
 
 Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Arguments) {
+    if (ActiveRuns == 0) { FaultLocation.reset(); FaultException = {}; FaultObject = nullptr; }
     if (FunctionConstant >= Functions.size() || !Functions[FunctionConstant])
         throw std::invalid_argument("entry is not a function constant");
     for (const auto& Input : Arguments) ValidateOwnedValue(Input);
@@ -235,7 +365,68 @@ Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Argument
     return Execute(Execution);
 }
 
+Value Vm::RunModule(std::string_view Id, std::uint32_t FunctionConstant,
+                    const std::vector<Value>& Arguments) {
+    if (ActiveRuns == 0) { FaultLocation.reset(); FaultException = {}; FaultObject = nullptr; }
+    auto Found = LoadedModules.find(std::string(Id));
+    if (Found == LoadedModules.end()) throw std::invalid_argument("unknown loaded module");
+    const auto& ModuleFunctions = Found->second->Functions;
+    if (FunctionConstant >= ModuleFunctions.size() || !ModuleFunctions[FunctionConstant])
+        throw std::invalid_argument("entry is not a function constant");
+    for (const auto& Input : Arguments) ValidateOwnedValue(Input);
+    ExecutionState Execution;
+    Execution.Frames.push_back(MakeFrame(
+        std::static_pointer_cast<FunctionObject>(ModuleFunctions[FunctionConstant]), Arguments));
+    return Execute(Execution);
+}
+
+Value Vm::InitializeModule(std::string_view Id, std::uint32_t Initializer) {
+    auto Found = LoadedModules.find(std::string(Id));
+    if (Found == LoadedModules.end()) throw std::invalid_argument("unknown loaded module");
+    auto& Instance = *Found->second;
+    if (Instance.Initialization == ModuleInstance::State::Initializing)
+        throw std::runtime_error("circular module initialization");
+    if (Instance.Initialization == ModuleInstance::State::Initialized) return {};
+    if (Instance.Initialization == ModuleInstance::State::Failed)
+        return Instance.InitializationError;
+    if (Initializer >= Instance.Functions.size() || !Instance.Functions[Initializer] ||
+        Instance.Program->Constants[Initializer].Function->ParameterCount != 0)
+        throw std::invalid_argument("invalid loaded module initializer");
+    Instance.Initialization = ModuleInstance::State::Initializing;
+    try {
+        auto Result = RunModule(Id, Initializer);
+        if (Result.IsError()) {
+            Instance.InitializationError = Result;
+            Instance.Initialization = ModuleInstance::State::Failed;
+        } else Instance.Initialization = ModuleInstance::State::Initialized;
+        return Result;
+    } catch (...) {
+        Instance.Initialization = ModuleInstance::State::Loaded;
+        throw;
+    }
+}
+
+std::optional<SourceLocation> Vm::GetErrorLocation(const Value& Input) const {
+    if (!Input.IsError()) return std::nullopt;
+    auto* Error = dynamic_cast<ErrorObject*>(Input.AsObject());
+    if (!Error) return std::nullopt;
+    auto Found = ErrorLocations.find(Error);
+    if (Found == ErrorLocations.end()) return std::nullopt;
+    auto Owner = Found->second.Lifetime.lock();
+    if (!Owner || Owner.get() != Error) return std::nullopt;
+    return Found->second.Source;
+}
+
 Value Vm::Execute(ExecutionState& Execution) {
+    if (ActiveRuns == 0) {
+        FaultLocation.reset();
+        FaultException = {};
+        FaultObject = nullptr;
+        for (auto It = ErrorLocations.begin(); It != ErrorLocations.end(); ) {
+            if (It->second.Lifetime.expired()) It = ErrorLocations.erase(It);
+            else ++It;
+        }
+    }
     if (ActiveRuns == 0) InstructionsRemaining = InstructionLimit;
     ActiveRunGuard Guard(ActiveRuns);
     HasRun = true;
@@ -252,13 +443,32 @@ Value Vm::Execute(ExecutionState& Execution) {
         if (Frames.size() >= 1024) throw std::runtime_error("VM call depth exceeded");
         Frames.push_back(MakeFrame(Function, Args));
     };
+    const FunctionPrototype* FaultBody = nullptr;
+    std::size_t FaultPc = 0;
+    std::string FaultModuleId;
+    try {
     while (!Frames.empty()) {
+        Frame& Next = Frames.back();
+        FaultBody = &Next.Function->GetBody();
+        FaultPc = Next.Pc;
+        auto FrameOwner = Next.Function->GetOwner();
+        ModuleInstance* FrameInstance = nullptr;
+        if (FrameOwner != Program) {
+            auto Found = ModuleByProgram.find(FrameOwner.get());
+            if (Found == ModuleByProgram.end())
+                throw std::logic_error("active function has no module instance");
+            FrameInstance = Found->second.get();
+        }
+        FaultModuleId = FrameInstance ? FrameInstance->Id : std::string{};
+        auto& FrameFunctions = FrameInstance ? FrameInstance->Functions : Functions;
+        auto& FrameGlobals = FrameInstance ? FrameInstance->Globals : Globals;
         if (InstructionsRemaining == 0)
             throw std::runtime_error("VM instruction budget exceeded");
         --InstructionsRemaining;
-        Frame& Current = Frames.back();
+        Frame& Current = Next;
         const auto& Code = Current.Function->GetBody().Code;
         if (Current.Pc >= Code.size()) throw std::runtime_error("VM PC out of range");
+        auto InstructionStart = Current.Pc;
         auto Instruction = static_cast<Op>(Code[Current.Pc++]);
         auto Pop = [&]() -> Value {
             if (Current.Stack.empty()) throw std::runtime_error("VM stack underflow");
@@ -269,6 +479,18 @@ Value Vm::Execute(ExecutionState& Execution) {
         auto Push = [&](Value Input) {
             ValidateOwnedValue(Input);
             if (Current.Stack.size() >= 65'536) throw std::runtime_error("VM stack limit exceeded");
+            if (Input.IsError()) {
+                auto* Error = dynamic_cast<ErrorObject*>(Input.AsObject());
+                if (Error) {
+                    auto Found = ErrorLocations.find(Error);
+                    if (Found == ErrorLocations.end() || Found->second.Lifetime.expired()) {
+                        if (auto Source = LocationAt(Current.Function->GetBody(), InstructionStart)) {
+                            Source->ModuleId = FaultModuleId;
+                            ErrorLocations.insert_or_assign(Error, ErrorOrigin{Input.AsNativeObject(), *Source});
+                        }
+                    }
+                }
+            }
             Current.Stack.push_back(std::move(Input));
         };
         std::function<void(Value, std::vector<Value>, unsigned, bool)> DispatchCall;
@@ -292,7 +514,8 @@ Value Vm::Execute(ExecutionState& Execution) {
             }
             if (Native->GetObjectType() == ObjectType::Function) {
                 auto Function = std::static_pointer_cast<FunctionObject>(Target.AsNativeObject());
-                if (Function->GetOwner() != Program)
+                if (Function->GetOwner() != Program &&
+                    !ModuleByProgram.contains(Function->GetOwner().get()))
                     throw std::invalid_argument("function belongs to another VM module");
                 PushFrame(Function, Args);
             } else {
@@ -303,7 +526,7 @@ Value Vm::Execute(ExecutionState& Execution) {
         switch (Instruction) {
         case Op::Const: {
             auto Id = ReadU32(Code, Current.Pc);
-            Push(ConstantValue(Program->Constants[Id], Functions[Id])); break;
+            Push(ConstantValue(FrameOwner->Constants[Id], FrameFunctions[Id])); break;
         }
         case Op::Null: Push({}); break;
         case Op::True: Push(Value::Bool(true)); break;
@@ -316,12 +539,12 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         case Op::GetGlobal: {
             auto Id = ReadU32(Code, Current.Pc);
-            auto Found = Globals.find(Program->Constants[Id].Text);
-            Push(Found == Globals.end() ? Error("undefined global") : Found->second); break;
+            auto Found = FrameGlobals.find(FrameOwner->Constants[Id].Text);
+            Push(Found == FrameGlobals.end() ? Error("undefined global") : Found->second); break;
         }
         case Op::SetGlobal: {
             auto Id = ReadU32(Code, Current.Pc);
-            Globals[Program->Constants[Id].Text] = Current.Stack.back(); break;
+            FrameGlobals[FrameOwner->Constants[Id].Text] = Current.Stack.back(); break;
         }
         case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
         case Op::Equal: case Op::Less: {
@@ -379,7 +602,12 @@ Value Vm::Execute(ExecutionState& Execution) {
         case Op::Return: {
             auto Result = Pop();
             Frames.pop_back();
-            if (Frames.empty()) return Result;
+            if (Frames.empty()) {
+                if (ActiveRuns == 1) {
+                    FaultLocation.reset(); FaultException = {}; FaultObject = nullptr;
+                }
+                return Result;
+            }
             Frames.back().Stack.push_back(std::move(Result));
             break;
         }
@@ -421,5 +649,24 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
     }
     throw std::logic_error("VM ended without Return");
+    } catch (const std::exception& Fault) {
+        auto Thrown = std::current_exception();
+        if (FaultObject != &Fault || !FaultLocation) {
+            FaultLocation = FaultBody ? LocationAt(*FaultBody, FaultPc) : std::nullopt;
+            if (FaultLocation) FaultLocation->ModuleId = FaultModuleId;
+        }
+        FaultObject = &Fault;
+        FaultException = std::move(Thrown);
+        throw;
+    } catch (...) {
+        auto Thrown = std::current_exception();
+        if (FaultException != Thrown || !FaultLocation) {
+            FaultLocation = FaultBody ? LocationAt(*FaultBody, FaultPc) : std::nullopt;
+            if (FaultLocation) FaultLocation->ModuleId = FaultModuleId;
+        }
+        FaultObject = nullptr;
+        FaultException = std::move(Thrown);
+        throw;
+    }
 }
 } // namespace Feather

@@ -4,13 +4,14 @@
 #include <bit>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace Feather {
 namespace {
 
 constexpr std::uint8_t Magic[8] = {'F', 'T', 'H', 'R', 'B', 'C', 0, 0};
-constexpr std::uint16_t FormatVersion = 2;
+constexpr std::uint16_t FormatVersion = 3;
 constexpr std::uint16_t InstructionVersion = 1;
 constexpr std::size_t HeaderSize = 16;
 constexpr std::uint32_t MaxEntries = 65'536;
@@ -142,6 +143,11 @@ void ValidateProgram(const CompiledProgram& Input) {
     if (Input.Functions.size() > MaxEntries) Invalid("too many named functions");
     for (const auto& [Name, Index] : Input.Functions)
         if (!IsIdentifier(Name) || !FunctionAt(Index)) Invalid("invalid named function");
+    if (Input.Exports.size() > MaxEntries) Invalid("too many exports");
+    std::unordered_set<std::string> SeenExports;
+    for (const auto& Name : Input.Exports)
+        if (!IsIdentifier(Name) || !SeenExports.insert(Name).second)
+            Invalid("invalid or duplicate export");
 }
 
 } // namespace
@@ -182,6 +188,10 @@ std::vector<std::uint8_t> SerializeProgram(const CompiledProgram& Input,
         Output.U32(Index);
     }
     Output.U8(Input.UsesQuickOperators ? 1 : 0);
+    auto Exports = Input.Exports;
+    std::sort(Exports.begin(), Exports.end());
+    Output.U32(static_cast<std::uint32_t>(Exports.size()));
+    for (const auto& Name : Exports) Output.String(Name);
     auto PayloadSize = Output.Size() - HeaderSize;
     if (PayloadSize > std::numeric_limits<std::uint32_t>::max()) Invalid("bytecode artifact too large");
     Output.PatchU32(12, static_cast<std::uint32_t>(PayloadSize));
@@ -240,6 +250,12 @@ CompiledProgram DeserializeProgram(std::span<const std::uint8_t> Bytes,
     auto Flag = Input.U8();
     if (Flag > 1) Invalid("invalid bytecode flags");
     Result.UsesQuickOperators = Flag == 1;
+    auto Count = Input.U32();
+    if (Count > MaxEntries) Invalid("invalid export count");
+    Result.Exports.reserve(Count);
+    for (std::uint32_t I = 0; I < Count; ++I) Result.Exports.push_back(Input.String());
+    if (!std::is_sorted(Result.Exports.begin(), Result.Exports.end()))
+        Invalid("unsorted exports");
     if (!Input.Done()) Invalid("trailing bytecode data");
     ValidateProgram(Result);
     return Result;

@@ -86,6 +86,13 @@ int main() {
         Vm AssignmentVm(Assign.Program);
         Check(AssignmentVm.Run(Assign.Functions.at("value")).AsNumber() == 14,
               "assignment value and precedence");
+        auto Exported = Compile("export var answer = 41; export def add(x) { return answer + x; } var hidden = 9;");
+        Check(Exported.Exports.size() == 2 && Exported.Exports[0] == "answer" &&
+              Exported.Exports[1] == "add", "export declarations were not recorded");
+        Vm ExportVm(Exported.Program);
+        Exported.Initialize(ExportVm);
+        Check(ExportVm.Run(Exported.Functions.at("add"), {Value::Number(1)}).AsNumber() == 42,
+              "export modifier changed function behavior");
         try { Compiled.Initialize(AssignmentVm); throw std::runtime_error("foreign module accepted"); }
         catch (const std::invalid_argument&) {}
 
@@ -94,6 +101,8 @@ int main() {
         Reject("def a(x, x) {}", "duplicate parameter accepted");
         Reject("def a(x = 1, y) {}", "invalid default order accepted");
         Reject("def a() { var x; var x; }", "duplicate local accepted");
+        Reject("def a() { export var x = 1; }", "block export accepted");
+        Reject("export return 1;", "nondeclaration export accepted");
         Reject("def a() { (1 + 2) = 3; }", "invalid assignment accepted");
         Reject("def a() { return \"bad\\q\"; }", "invalid escape accepted");
         Reject("def a() { return 1e9999; }", "number overflow accepted");

@@ -2,6 +2,7 @@
 #include "../Vm/Internal.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -15,6 +16,22 @@ namespace {
 
 constexpr std::uint32_t MaxEntries = 65'536;
 constexpr std::uint32_t NoObject = std::numeric_limits<std::uint32_t>::max();
+
+std::uint32_t SnapshotChecksum(std::span<const std::uint8_t> Bytes) {
+    static const auto Table = [] {
+        std::array<std::uint32_t, 256> Values{};
+        for (std::uint32_t I = 0; I < Values.size(); ++I) {
+            auto Crc = I;
+            for (int Bit = 0; Bit < 8; ++Bit)
+                Crc = (Crc >> 1) ^ ((Crc & 1) ? 0xedb88320u : 0u);
+            Values[I] = Crc;
+        }
+        return Values;
+    }();
+    std::uint32_t Crc = 0xffffffffu;
+    for (auto Byte : Bytes) Crc = Table[(Crc ^ Byte) & 0xffu] ^ (Crc >> 8);
+    return ~Crc;
+}
 
 [[noreturn]] void Invalid(const char* Message) { throw std::invalid_argument(Message); }
 
@@ -108,12 +125,43 @@ std::vector<std::uint8_t> ModuleImage(const Module& Program, std::size_t Limit) 
     return std::move(Output).Finish();
 }
 
+std::vector<std::uint8_t> ModuleSetImage(
+    const Module& Primary, const std::vector<std::shared_ptr<ModuleInstance>>& Loaded,
+    std::size_t Limit) {
+    Writer Output(Limit);
+    if (Loaded.size() >= MaxEntries) Invalid("too many snapshot modules");
+    Output.U32(static_cast<std::uint32_t>(Loaded.size() + 1));
+    Output.String("");
+    Output.Blob(ModuleImage(Primary, Limit));
+    Output.U32(0);
+    for (const auto& Instance : Loaded) {
+        Output.String(Instance->Id);
+        if (Instance->Identity.empty()) Output.Blob(ModuleImage(*Instance->Program, Limit));
+        else Output.Blob(Instance->Identity);
+        std::vector<std::string> Exports(Instance->Exports.begin(), Instance->Exports.end());
+        std::sort(Exports.begin(), Exports.end());
+        Output.U32(static_cast<std::uint32_t>(Exports.size()));
+        for (const auto& Name : Exports) Output.String(Name);
+    }
+    return std::move(Output).Finish();
+}
+
+struct FunctionId {
+    std::uint32_t Module = 0;
+    std::uint32_t Constant = 0;
+    bool operator==(const FunctionId&) const = default;
+};
+std::uint64_t FunctionKey(FunctionId Input) {
+    return (std::uint64_t(Input.Module) << 32) | Input.Constant;
+}
+
 struct EncodedValue {
     std::uint8_t Tag = 0;
     double Number = 0;
     std::string Text;
     std::uint32_t ObjectId = 0;
 };
+
 EncodedValue ReadValue(Reader& Input, std::uint32_t ObjectCount) {
     EncodedValue Result; Result.Tag = Input.U8();
     switch (Result.Tag) {
@@ -141,12 +189,13 @@ struct ObjectRecord {
     std::uint32_t Meta = NoObject;
     std::vector<std::pair<EncodedValue, EncodedValue>> Members;
     std::uint32_t Function = 0;
+    std::uint32_t Module = 0;
     std::string Message;
     HostSnapshotRecord Host;
     std::vector<std::pair<std::string, EncodedValue>> Visible;
 };
 struct FrameRecord {
-    std::uint32_t Function = 0, Pc = 0;
+    std::uint32_t Module = 0, Function = 0, Pc = 0;
     std::vector<EncodedValue> Locals, Stack;
 };
 
@@ -211,9 +260,29 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
     SnapshotBusy = true;
     struct ResetBusy { bool& Flag; ~ResetBusy() { Flag = false; } } Reset{SnapshotBusy};
 
-    std::unordered_map<Object*, std::uint32_t> FunctionIds;
+    std::vector<std::shared_ptr<ModuleInstance>> Ordered;
+    Ordered.reserve(LoadedModules.size());
+    for (const auto& [_, Instance] : LoadedModules) {
+        if (Instance->Initialization == ModuleInstance::State::Initializing)
+            throw std::logic_error("snapshot cannot capture an initializing module");
+        Ordered.push_back(Instance);
+    }
+    std::sort(Ordered.begin(), Ordered.end(), [](const auto& A, const auto& B) {
+        return A->Id < B->Id;
+    });
+    std::unordered_map<const Module*, std::uint32_t> ModuleIds{{Program.get(), 0}};
+    for (std::size_t I = 0; I < Ordered.size(); ++I)
+        ModuleIds.emplace(Ordered[I]->Program.get(), static_cast<std::uint32_t>(I + 1));
+
+    std::unordered_map<Object*, FunctionId> FunctionIds;
     for (std::size_t I = 0; I < Functions.size(); ++I)
-        if (Functions[I]) FunctionIds.emplace(Functions[I].get(), static_cast<std::uint32_t>(I));
+        if (Functions[I]) FunctionIds.emplace(Functions[I].get(), FunctionId{0, static_cast<std::uint32_t>(I)});
+    for (std::size_t M = 0; M < Ordered.size(); ++M)
+        for (std::size_t I = 0; I < Ordered[M]->Functions.size(); ++I)
+            if (Ordered[M]->Functions[I])
+                FunctionIds.emplace(Ordered[M]->Functions[I].get(),
+                                    FunctionId{static_cast<std::uint32_t>(M + 1),
+                                               static_cast<std::uint32_t>(I)});
     std::vector<Value> Objects;
     std::unordered_map<Object*, std::uint32_t> Ids;
     auto Add = [&](const Value& Input) {
@@ -228,6 +297,11 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
     };
     Add(Value::FromScript(RootMetaObject));
     for (const auto& [_, Input] : Globals) Add(Input);
+    for (const auto& Instance : Ordered) {
+        for (const auto& [_, Input] : Instance->Globals) Add(Input);
+        Add(Instance->InitializationError);
+        Add(Value::FromObject(Instance->Namespace));
+    }
     for (const auto& FrameValue : ActiveExecution->Frames) {
         Add(Value::FromObject(FrameValue.Function));
         for (const auto& Input : FrameValue.Locals) Add(Input);
@@ -269,7 +343,8 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
             ObjectBytes.U8(1);
             auto Found = FunctionIds.find(Native.get());
             if (Found == FunctionIds.end()) Invalid("foreign function in snapshot graph");
-            ObjectBytes.U32(Found->second); break;
+            ObjectBytes.U32(Found->second.Module);
+            ObjectBytes.U32(Found->second.Constant); break;
         }
         case ObjectType::Error: {
             ObjectBytes.U8(2);
@@ -278,6 +353,14 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
             ObjectBytes.String(ErrorValue->GetMessage()); break;
         }
         case ObjectType::Host: {
+            if (auto Namespace = std::dynamic_pointer_cast<ModuleNamespace>(Native)) {
+                auto Found = LoadedModules.find(Namespace->GetModuleId());
+                if (Found == LoadedModules.end() || Found->second->Namespace.get() != Native.get())
+                    Invalid("foreign module namespace in snapshot graph");
+                ObjectBytes.U8(4);
+                ObjectBytes.U32(ModuleIds.at(Found->second->Program.get()));
+                break;
+            }
             ObjectBytes.U8(3);
             if (!Codec) Invalid("host snapshot codec required");
             auto Record = Codec->Encode(Native);
@@ -297,11 +380,23 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
     }
 
     Writer GlobalBytes(MaxBytes);
+    GlobalBytes.U32(static_cast<std::uint32_t>(Ordered.size() + 1));
     if (Globals.size() > MaxEntries) Invalid("too many snapshot globals");
     GlobalBytes.U32(static_cast<std::uint32_t>(Globals.size()));
     for (const auto& [Name, Input] : Globals) {
         GlobalBytes.String(Name);
         WriteValue(GlobalBytes, Input, Ids);
+    }
+    for (const auto& Instance : Ordered) {
+        GlobalBytes.U8(Instance->Initialization == ModuleInstance::State::Loaded ? 0 :
+                       Instance->Initialization == ModuleInstance::State::Initialized ? 1 : 2);
+        WriteValue(GlobalBytes, Instance->InitializationError, Ids);
+        if (Instance->Globals.size() > MaxEntries) Invalid("too many snapshot globals");
+        GlobalBytes.U32(static_cast<std::uint32_t>(Instance->Globals.size()));
+        for (const auto& [Name, Input] : Instance->Globals) {
+            GlobalBytes.String(Name);
+            WriteValue(GlobalBytes, Input, Ids);
+        }
     }
 
     Writer FrameBytes(MaxBytes);
@@ -314,7 +409,8 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
         if (Current.Pc > std::numeric_limits<std::uint32_t>::max() ||
             Current.Locals.size() > MaxEntries || Current.Stack.size() > MaxEntries)
             Invalid("snapshot frame limit exceeded");
-        FrameBytes.U32(Found->second);
+        FrameBytes.U32(Found->second.Module);
+        FrameBytes.U32(Found->second.Constant);
         FrameBytes.U32(static_cast<std::uint32_t>(Current.Pc));
         FrameBytes.U32(static_cast<std::uint32_t>(Current.Locals.size()));
         for (const auto& Input : Current.Locals) WriteValue(FrameBytes, Input, Ids);
@@ -324,12 +420,13 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
 
     Writer Output(MaxBytes);
     Output.U8('F'); Output.U8('T'); Output.U8('H'); Output.U8('S');
-    Output.U16(1); Output.U16(0);
-    auto ModuleBytes = ModuleImage(*Program, MaxBytes);
+    Output.U16(3); Output.U16(0);
+    auto ModuleBytes = ModuleSetImage(*Program, Ordered, MaxBytes);
     Output.Blob(ModuleBytes);
     Output.Blob(ObjectBytes.Bytes());
     Output.Blob(GlobalBytes.Bytes());
     Output.Blob(FrameBytes.Bytes());
+    Output.U32(SnapshotChecksum(std::span<const std::uint8_t>(Output.Bytes())));
     return std::move(Output).Finish();
 }
 
@@ -339,17 +436,46 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
         !HostRoots.empty() || ScriptHeap.size() != 1 || !RootMetaObject->Members.empty())
         throw std::logic_error("snapshot restore requires a fresh idle VM");
     if (Bytes.size() > MaxBytes) Invalid("snapshot size limit exceeded");
+    if (Bytes.size() < 12) Invalid("truncated snapshot");
     SnapshotBusy = true;
     struct ResetBusy { bool& Flag; ~ResetBusy() { Flag = false; } } Reset{SnapshotBusy};
     Program->Validate();
+    std::vector<std::shared_ptr<ModuleInstance>> Ordered;
+    Ordered.reserve(LoadedModules.size());
+    for (const auto& [_, Instance] : LoadedModules) {
+        Instance->Program->Validate();
+        if (Instance->Initialization != ModuleInstance::State::Loaded)
+            throw std::logic_error("snapshot restore requires fresh loaded modules");
+        Ordered.push_back(Instance);
+    }
+    std::sort(Ordered.begin(), Ordered.end(), [](const auto& A, const auto& B) {
+        return A->Id < B->Id;
+    });
+    auto FunctionAt = [&](std::uint32_t ModuleId, std::uint32_t ConstantId)
+        -> std::shared_ptr<Object> {
+        if (ModuleId == 0)
+            return ConstantId < Functions.size() ? Functions[ConstantId] : nullptr;
+        if (ModuleId > Ordered.size()) return nullptr;
+        const auto& List = Ordered[ModuleId - 1]->Functions;
+        return ConstantId < List.size() ? List[ConstantId] : nullptr;
+    };
+    auto PrototypeAt = [&](std::uint32_t ModuleId, std::uint32_t ConstantId)
+        -> std::shared_ptr<FunctionPrototype> {
+        if (!FunctionAt(ModuleId, ConstantId)) return nullptr;
+        const auto& Owner = ModuleId == 0 ? Program : Ordered[ModuleId - 1]->Program;
+        return Owner->Constants[ConstantId].Function;
+    };
 
-    Reader Input(Bytes);
+    std::span<const std::uint8_t> Content(Bytes.data(), Bytes.size() - 4);
+    Reader Input(Content);
     if (Input.U8() != 'F' || Input.U8() != 'T' || Input.U8() != 'H' || Input.U8() != 'S')
         Invalid("invalid snapshot magic");
     auto Major = Input.U16(), Minor = Input.U16();
-    if (Major != 1 || Minor != 0) Invalid("unsupported snapshot version");
+    if (Major != 3 || Minor != 0) Invalid("unsupported snapshot version");
+    Reader ChecksumInput(std::span<const std::uint8_t>(Bytes.data() + Bytes.size() - 4, 4));
+    if (ChecksumInput.U32() != SnapshotChecksum(Content)) Invalid("snapshot checksum mismatch");
     auto SavedModule = Input.Blob();
-    auto CurrentModule = ModuleImage(*Program, MaxBytes);
+    auto CurrentModule = ModuleSetImage(*Program, Ordered, MaxBytes);
     if (SavedModule.size() != CurrentModule.size() ||
         !std::equal(SavedModule.begin(), SavedModule.end(), CurrentModule.begin()))
         Invalid("snapshot module mismatch");
@@ -361,14 +487,19 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
     Reader ObjectInput(ObjectSection);
     auto ObjectCount = ObjectInput.U32();
     if (ObjectCount == 0 || ObjectCount > MaxEntries) Invalid("invalid snapshot object count");
+    // Every object record occupies at least a kind byte and two u32 fields.
+    if (ObjectCount > (ObjectSection.size() - sizeof(std::uint32_t)) / 9)
+        Invalid("snapshot object count exceeds section size");
     std::vector<ObjectRecord> Records(ObjectCount);
-    std::unordered_set<std::uint32_t> SeenFunctions;
+    std::unordered_set<std::uint64_t> SeenFunctions;
+    std::unordered_set<std::uint32_t> SeenNamespaces;
     std::size_t ScriptCount = 0;
     for (std::uint32_t I = 0; I < ObjectCount; ++I) {
         auto& Record = Records[I];
         Record.Kind = ObjectInput.U8();
         if (Record.Kind == 0) {
             ++ScriptCount;
+            if (ScriptCount > ScriptObjectLimit) Invalid("snapshot ScriptObject limit exceeded");
             Record.Meta = ObjectInput.U32();
             auto Count = ObjectInput.U32();
             if (Count > MaxEntries) Invalid("too many snapshot script members");
@@ -380,9 +511,10 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
                 Record.Members.emplace_back(std::move(Key), ReadValue(ObjectInput, ObjectCount));
             }
         } else if (Record.Kind == 1) {
+            Record.Module = ObjectInput.U32();
             Record.Function = ObjectInput.U32();
-            if (Record.Function >= Functions.size() || !Functions[Record.Function] ||
-                !SeenFunctions.insert(Record.Function).second)
+            if (!FunctionAt(Record.Module, Record.Function) ||
+                !SeenFunctions.insert(FunctionKey({Record.Module, Record.Function})).second)
                 Invalid("invalid or duplicate snapshot function");
         } else if (Record.Kind == 2) {
             Record.Message = ObjectInput.String();
@@ -392,6 +524,11 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
             auto Payload = ObjectInput.Blob();
             Record.Host.Payload.assign(Payload.begin(), Payload.end());
             if (!Codec) Invalid("host snapshot codec required");
+        } else if (Record.Kind == 4) {
+            Record.Module = ObjectInput.U32();
+            if (Record.Module == 0 || Record.Module > Ordered.size() ||
+                !SeenNamespaces.insert(Record.Module).second)
+                Invalid("invalid or duplicate snapshot module namespace");
         } else Invalid("invalid snapshot object kind");
         if (Record.Kind != 0) {
             auto Count = ObjectInput.U32();
@@ -405,23 +542,40 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
             }
         }
     }
-    if (!ObjectInput.Done() || Records[0].Kind != 0 || Records[0].Meta != NoObject ||
-        ScriptCount > ScriptObjectLimit) Invalid("invalid snapshot root object");
+    if (!ObjectInput.Done() || Records[0].Kind != 0 || Records[0].Meta != NoObject)
+        Invalid("invalid snapshot root object");
     for (std::size_t I = 1; I < Records.size(); ++I)
         if (Records[I].Kind == 0 &&
             (Records[I].Meta >= Records.size() || Records[Records[I].Meta].Kind != 0))
             Invalid("invalid snapshot MetaObject reference");
 
     Reader GlobalInput(GlobalSection);
-    auto GlobalCount = GlobalInput.U32();
-    if (GlobalCount > MaxEntries) Invalid("too many snapshot globals");
-    std::vector<std::pair<std::string, EncodedValue>> SavedGlobals;
-    SavedGlobals.reserve(GlobalCount);
-    std::unordered_set<std::string> GlobalNames;
-    for (std::uint32_t I = 0; I < GlobalCount; ++I) {
-        auto Name = GlobalInput.String();
-        if (!GlobalNames.insert(Name).second) Invalid("duplicate snapshot global");
-        SavedGlobals.emplace_back(std::move(Name), ReadValue(GlobalInput, ObjectCount));
+    if (GlobalInput.U32() != Ordered.size() + 1)
+        Invalid("snapshot global module count mismatch");
+    std::vector<std::vector<std::pair<std::string, EncodedValue>>> SavedGlobals(Ordered.size() + 1);
+    std::vector<std::uint8_t> SavedStates(Ordered.size() + 1, 0);
+    std::vector<EncodedValue> SavedFailures(Ordered.size() + 1);
+    for (std::size_t ModuleId = 0; ModuleId < SavedGlobals.size(); ++ModuleId) {
+        if (ModuleId != 0) {
+            SavedStates[ModuleId] = GlobalInput.U8();
+            if (SavedStates[ModuleId] > 2) Invalid("invalid snapshot module state");
+            SavedFailures[ModuleId] = ReadValue(GlobalInput, ObjectCount);
+            if (SavedStates[ModuleId] == 2 &&
+                (SavedFailures[ModuleId].Tag != 5 ||
+                 Records[SavedFailures[ModuleId].ObjectId].Kind != 2))
+                Invalid("failed module needs an Error value");
+            if (SavedStates[ModuleId] != 2 && SavedFailures[ModuleId].Tag != 0)
+                Invalid("unexpected module initialization Error");
+        }
+        auto GlobalCount = GlobalInput.U32();
+        if (GlobalCount > MaxEntries) Invalid("too many snapshot globals");
+        SavedGlobals[ModuleId].reserve(GlobalCount);
+        std::unordered_set<std::string> GlobalNames;
+        for (std::uint32_t I = 0; I < GlobalCount; ++I) {
+            auto Name = GlobalInput.String();
+            if (!GlobalNames.insert(Name).second) Invalid("duplicate snapshot global");
+            SavedGlobals[ModuleId].emplace_back(std::move(Name), ReadValue(GlobalInput, ObjectCount));
+        }
     }
     if (!GlobalInput.Done()) Invalid("trailing global data");
 
@@ -430,14 +584,15 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
     if (FrameCount == 0 || FrameCount > 1024 || FrameInput.U8() != 1)
         Invalid("invalid snapshot continuation");
     std::vector<FrameRecord> SavedFrames(FrameCount);
-    std::unordered_map<std::uint32_t, std::vector<int>> DepthCache;
+    std::unordered_map<std::uint64_t, std::vector<int>> DepthCache;
     for (auto& Record : SavedFrames) {
+        Record.Module = FrameInput.U32();
         Record.Function = FrameInput.U32();
         Record.Pc = FrameInput.U32();
-        if (Record.Function >= Functions.size() || !Functions[Record.Function])
+        auto Body = PrototypeAt(Record.Module, Record.Function);
+        if (!Body)
             Invalid("invalid snapshot frame function");
-        const auto& Body = Program->Constants[Record.Function].Function;
-        auto [FoundDepths, _] = DepthCache.try_emplace(Record.Function);
+        auto [FoundDepths, _] = DepthCache.try_emplace(FunctionKey({Record.Module, Record.Function}));
         if (FoundDepths->second.empty()) FoundDepths->second = StackDepths(*Body);
         auto ExpectedDepth = Record.Pc < FoundDepths->second.size() ?
             FoundDepths->second[Record.Pc] : -1;
@@ -459,7 +614,8 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
 
     std::vector<Value> Decoded(ObjectCount);
     ExecutionState Execution;
-    std::unordered_map<std::string, Value> NewGlobals;
+    std::vector<std::unordered_map<std::string, Value>> NewGlobals(Ordered.size() + 1);
+    std::vector<Value> NewErrors(Ordered.size());
     auto PreviousNativeRegistry = NativeRegistry;
     auto PreviousGlobals = Globals;
     std::unordered_set<NativeObject*> DecodedHosts;
@@ -470,7 +626,7 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
             const auto& Record = Records[I];
             switch (Record.Kind) {
             case 0: Decoded[I] = Value::FromScript(CreateScriptObject()); break;
-            case 1: Decoded[I] = Value::FromObject(Functions[Record.Function]); break;
+            case 1: Decoded[I] = Value::FromObject(FunctionAt(Record.Module, Record.Function)); break;
             case 2: Decoded[I] = Value::FromObject(std::make_shared<ErrorObject>(Record.Message)); break;
             case 3: {
                 auto Native = Codec->Decode(*this, Record.Host);
@@ -482,6 +638,9 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
                 RegisterNativeObject(Native);
                 break;
             }
+            case 4:
+                Decoded[I] = Value::FromObject(Ordered[Record.Module - 1]->Namespace);
+                break;
             default: Invalid("invalid snapshot object kind");
             }
         }
@@ -509,12 +668,17 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
                     Native->GcVisibleMembers.emplace(Name, Materialize(Member));
             }
         }
-        for (const auto& [Name, InputValue] : SavedGlobals)
-            NewGlobals.emplace(Name, Materialize(InputValue));
+        for (std::size_t ModuleId = 0; ModuleId < SavedGlobals.size(); ++ModuleId)
+            for (const auto& [Name, InputValue] : SavedGlobals[ModuleId])
+                NewGlobals[ModuleId].emplace(Name, Materialize(InputValue));
+        for (std::size_t I = 0; I < Ordered.size(); ++I)
+            if (SavedStates[I + 1] == 2)
+                NewErrors[I] = Decoded[SavedFailures[I + 1].ObjectId];
         Execution.Frames.reserve(SavedFrames.size());
         for (const auto& Record : SavedFrames) {
             Frame Next;
-            Next.Function = std::static_pointer_cast<FunctionObject>(Functions[Record.Function]);
+            Next.Function = std::static_pointer_cast<FunctionObject>(
+                FunctionAt(Record.Module, Record.Function));
             Next.Pc = Record.Pc;
             for (const auto& InputValue : Record.Locals) Next.Locals.push_back(Materialize(InputValue));
             for (const auto& InputValue : Record.Stack) Next.Stack.push_back(Materialize(InputValue));
@@ -530,12 +694,25 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
         for (auto& Function : Functions)
             if (auto Native = std::dynamic_pointer_cast<NativeObject>(Function))
                 Native->GcVisibleMembers.clear();
+        for (const auto& Instance : Ordered)
+            for (auto& Function : Instance->Functions)
+                if (auto Native = std::dynamic_pointer_cast<NativeObject>(Function))
+                    Native->GcVisibleMembers.clear();
         Globals = std::move(PreviousGlobals);
         NativeRegistry = std::move(PreviousNativeRegistry);
         ScriptHeap.resize(1);
         throw;
     }
-    Globals.swap(NewGlobals);
+    Globals.swap(NewGlobals[0]);
+    for (std::size_t I = 0; I < Ordered.size(); ++I) {
+        auto& Instance = *Ordered[I];
+        Instance.Globals.swap(NewGlobals[I + 1]);
+        if (SavedStates[I + 1] == 2) {
+            Instance.InitializationError = std::move(NewErrors[I]);
+            Instance.Initialization = ModuleInstance::State::Failed;
+        } else Instance.Initialization = SavedStates[I + 1] == 1 ?
+            ModuleInstance::State::Initialized : ModuleInstance::State::Loaded;
+    }
     SnapshotBusy = false;
     return Execute(Execution);
 }

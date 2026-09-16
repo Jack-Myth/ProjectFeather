@@ -23,25 +23,65 @@ test('cli-quick-requires-host', FeatherCli,
   expected_fail : true)
 
 ArtifactTests = executable('artifact-tests', 'Artifact.cpp', dependencies : FeatherDependency)
-test('artifact', ArtifactTests,
-  args : [meson.current_source_dir() / 'fixtures/compat-v2.fbc'])
-test('cli-compat-v2', FeatherVmCli,
-  args : [meson.current_source_dir() / 'fixtures/compat-v2.fbc'])
+test('artifact', ArtifactTests)
 
 ImportTests = executable('import-tests', 'Import.cpp', dependencies : FeatherDependency)
 test('import', ImportTests)
-test('cli-import-requires-host', FeatherCli,
+test('cli-import-missing-module', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-import.fe'],
   expected_fail : true)
+test('cli-multifile-source', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/multi-root.fe'])
+test('cli-multifile-caller-relative', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/nested-root.fe'])
+test('cli-multifile-cycle', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/cycle-root.fe'],
+  expected_fail : true)
 
-StdIoTests = executable('stdio-tests', 'StdIo.cpp',
-  dependencies : FeatherStdIoDependency)
+MultiRootFbc = custom_target('multi-root-fbc',
+  input : 'fixtures/multi-root.fe', output : 'multi-root.fbc',
+  command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
+  build_by_default : true)
+MathFbc = custom_target('math-fbc',
+  input : 'fixtures/math.fe', output : 'math.fbc',
+  command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
+  build_by_default : true)
+UtilFbc = custom_target('util-fbc',
+  input : 'fixtures/util.fe', output : 'util.fbc',
+  command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
+  build_by_default : true)
+test('cli-multifile-bytecode', FeatherVmCli,
+  args : [MultiRootFbc], depends : [MathFbc, UtilFbc])
+
+StdIoTests = executable('stdio-tests', 'StdIo.cpp', '../stdlib/StdIo.cpp',
+  dependencies : FeatherDependency)
 test('stdio', StdIoTests)
 test('cli-stdio', FeatherCli,
-  args : ['run', meson.current_source_dir() / 'fixtures/cli-stdio.fe'])
+  args : ['run', meson.current_source_dir() / 'fixtures/cli-stdio.fe'],
+  depends : StdioNativeModule)
+StdioBytecode = custom_target('stdio-bytecode',
+  input : 'fixtures/cli-stdio.fe', output : 'cli-stdio.fbc',
+  command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
+  build_by_default : true)
+test('cli-stdio-bytecode', FeatherVmCli,
+  args : [StdioBytecode], depends : StdioNativeModule)
+test('cli-bare-source', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/cli-bare.fe'])
+BareBytecode = custom_target('bare-bytecode',
+  input : 'fixtures/cli-bare.fe', output : 'cli-bare.fbc',
+  command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
+  build_by_default : true)
+test('cli-bare-bytecode', FeatherVmCli,
+  args : [BareBytecode], depends : HelperBytecode)
 test('cli-stdio-direct-requires-import', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-stdio-direct.fe'],
   expected_fail : true)
 
 BudgetTests = executable('budget-tests', 'Budget.cpp', dependencies : FeatherDependency)
 test('budget', BudgetTests)
+
+DiagnosticsTests = executable('diagnostics-tests', 'Diagnostics.cpp', dependencies : FeatherDependency)
+test('runtime-diagnostics', DiagnosticsTests)
+
+MultimoduleTests = executable('multimodule-tests', 'Multimodule.cpp', dependencies : FeatherDependency)
+test('multimodule', MultimoduleTests)

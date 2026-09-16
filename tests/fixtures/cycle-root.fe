@@ -1,0 +1,2 @@
+var a = import("./cycle-a");
+def main() { return a.value; }

@@ -1,10 +1,13 @@
 #pragma once
+#include <Feather/Export.hpp>
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <limits>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -18,6 +21,7 @@ class Module;
 class Vm;
 class ScriptObject;
 struct ExecutionState;
+struct ModuleInstance;
 class SnapshotHostCodec;
 
 struct HostSnapshotRecord {
@@ -28,7 +32,7 @@ struct HostSnapshotRecord {
 enum class ValueType { Null, Bool, Number, String, Object };
 enum class ObjectType { Script, Function, Error, Host };
 
-class Value {
+class FEATHER_API Value {
 public:
     Value();
     Value(const Value& Other);
@@ -72,13 +76,13 @@ private:
     } Data;
 };
 
-class Object {
+class FEATHER_API Object {
 public:
     virtual ~Object() = default;
     virtual ObjectType GetObjectType() const = 0;
 };
 
-class NativeObject : public Object {
+class FEATHER_API NativeObject : public Object {
 public:
     virtual bool IsCallable() const { return false; }
     virtual Value Call(const std::vector<Value>& Arguments);
@@ -91,14 +95,14 @@ private:
     std::unordered_map<std::string, Value> GcVisibleMembers;
 };
 
-class SnapshotHostCodec {
+class FEATHER_API SnapshotHostCodec {
 public:
     virtual ~SnapshotHostCodec() = default;
     virtual HostSnapshotRecord Encode(const std::shared_ptr<NativeObject>& Input) = 0;
     virtual std::shared_ptr<NativeObject> Decode(Vm& Machine, const HostSnapshotRecord& Input) = 0;
 };
 
-class ScriptObject final : public Object {
+class FEATHER_API ScriptObject final : public Object {
 public:
     ObjectType GetObjectType() const override { return ObjectType::Script; }
     std::optional<Value> GetRaw(const Value& Key) const;
@@ -121,7 +125,7 @@ private:
     std::unordered_map<Key, Value, KeyHash> Members;
 };
 
-class RootHandle final {
+class FEATHER_API RootHandle final {
 public:
     RootHandle() = default;
     RootHandle(const RootHandle&) = delete;
@@ -145,7 +149,20 @@ struct GcStatistics {
     std::size_t EstimatedScriptBytes = 0;
 };
 
-class ErrorObject final : public NativeObject {
+struct SourceLocation {
+    std::size_t ByteOffset = 0;
+    std::size_t Line = 0;
+    std::size_t Column = 0;
+    // Empty for the primary module; host-assigned logical ID for a loaded module.
+    std::string ModuleId;
+};
+
+struct InstructionLocation {
+    std::size_t Pc = 0;
+    SourceLocation Source;
+};
+
+class FEATHER_API ErrorObject final : public NativeObject {
 public:
     explicit ErrorObject(std::string Message) : Message(std::move(Message)) {}
     ObjectType GetObjectType() const override { return ObjectType::Error; }
@@ -163,12 +180,14 @@ enum class Op : std::uint8_t {
 
 struct FunctionPrototype {
     std::vector<std::uint8_t> Code;
+    // Optional debug data; .fbc omits it and a matching .fbs may supply it.
+    std::vector<InstructionLocation> Locations;
     std::uint32_t ParameterCount = 0;
     std::uint32_t LocalCount = 0;
     std::vector<std::optional<Value>> Defaults;
 };
 
-struct Constant {
+struct FEATHER_API Constant {
     enum class Kind { Number, String, Function } Type;
     double Numeric = 0;
     std::string Text;
@@ -178,7 +197,7 @@ struct Constant {
     static Constant FunctionRef(std::shared_ptr<FunctionPrototype> Input);
 };
 
-class Module final {
+class FEATHER_API Module final {
 public:
     std::vector<Constant> Constants;
     std::uint32_t AddNumber(double Input);
@@ -189,7 +208,7 @@ private:
     friend class Vm;
 };
 
-class Builder final {
+class FEATHER_API Builder final {
 public:
     void Emit(Op Instruction);
     void EmitU16(Op Instruction, std::uint16_t Operand);
@@ -202,12 +221,29 @@ private:
     std::vector<std::uint8_t> Code;
 };
 
-class Vm final {
+class FEATHER_API Vm final {
 public:
     explicit Vm(std::shared_ptr<Module> Program,
                 std::size_t MaxScriptObjects = std::numeric_limits<std::size_t>::max(),
                 std::size_t MaxInstructionsPerInvocation = std::numeric_limits<std::size_t>::max());
+    ~Vm();
+    Vm(const Vm&) = delete;
+    Vm& operator=(const Vm&) = delete;
+    Vm(Vm&&) = delete;
+    Vm& operator=(Vm&&) = delete;
     Value Run(std::uint32_t FunctionConstant, const std::vector<Value>& Arguments = {});
+    void LoadModule(std::string Id, std::shared_ptr<Module> Source,
+                    std::vector<std::string> Exports = {},
+                    std::span<const std::uint8_t> Identity = {});
+    bool IsModuleBuiltFrom(std::string_view Id, const std::shared_ptr<Module>& Source,
+                           std::span<const std::uint8_t> Identity = {}) const;
+    Value RunModule(std::string_view Id, std::uint32_t FunctionConstant,
+                    const std::vector<Value>& Arguments = {});
+    Value InitializeModule(std::string_view Id, std::uint32_t Initializer);
+    Value GetModuleGlobal(std::string_view Id, const std::string& Name) const;
+    void SetModuleGlobal(std::string_view Id, std::string Name, Value Input);
+    Value GetModuleNamespace(std::string_view Id) const;
+    std::string GetActiveModuleId() const;
     std::vector<std::uint8_t> CaptureSnapshot(SnapshotHostCodec* Codec = nullptr,
                                               std::size_t MaxBytes = 64 * 1024 * 1024) const;
     Value ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
@@ -219,6 +255,9 @@ public:
     ScriptObject* CreateMetaObject();
     void SetMetaObject(ScriptObject* Target, ScriptObject* MetaObject);
     Value GetGlobal(const std::string& Name) const;
+    std::optional<SourceLocation> GetErrorLocation(const Value& Input) const;
+    // Position of the most recent uncaught execution fault; reset on a new outer run.
+    std::optional<SourceLocation> GetFaultLocation() const { return FaultLocation; }
     void SetGlobal(std::string Name, Value Input);
     void RegisterNativeFunction(std::string Name, std::shared_ptr<NativeObject> Input);
     RootHandle AddToRoot(Value Input);
@@ -240,6 +279,16 @@ private:
     ScriptObject* RootMetaObject = nullptr;
     std::vector<std::unique_ptr<ScriptObject>> ScriptHeap;
     std::unordered_map<std::string, Value> Globals;
+    std::unordered_map<std::string, std::shared_ptr<ModuleInstance>> LoadedModules;
+    std::unordered_map<const Module*, std::shared_ptr<ModuleInstance>> ModuleByProgram;
+    struct ErrorOrigin {
+        std::weak_ptr<Object> Lifetime;
+        SourceLocation Source;
+    };
+    std::unordered_map<const ErrorObject*, ErrorOrigin> ErrorLocations;
+    std::optional<SourceLocation> FaultLocation;
+    std::exception_ptr FaultException;
+    const std::exception* FaultObject = nullptr;
     std::unordered_map<std::uint64_t, Value> HostRoots;
     std::vector<std::weak_ptr<NativeObject>> NativeRegistry;
     std::shared_ptr<int> Lifetime = std::make_shared<int>(0);

@@ -1,6 +1,5 @@
 #include <Feather/Compiler.hpp>
 
-#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -37,25 +36,12 @@ private:
 
 } // namespace
 
-int main(int ArgCount, char** Arguments) {
+int main() {
     try {
-        Check(ArgCount == 2, "missing v2 compatibility fixture path");
-        std::ifstream Fixture(Arguments[1], std::ios::binary);
-        Check(static_cast<bool>(Fixture), "cannot open v2 compatibility fixture");
-        std::vector<std::uint8_t> Golden((std::istreambuf_iterator<char>(Fixture)),
-                                         std::istreambuf_iterator<char>());
-        Check(Golden.size() > 16 && Golden[8] == 2 && Golden[9] == 0,
-              "unexpected compatibility fixture version");
-        auto Historical = DeserializeProgram(Golden);
-        Check(SerializeProgram(Historical) == Golden,
-              "v2 fixture changed on decode/encode");
-        Vm HistoricalVm(Historical.Program);
-        Check(!Historical.Initialize(HistoricalVm).IsError() &&
-              HistoricalVm.Run(Historical.Functions.at("score")).AsNumber() == 5,
-              "v2 fixture no longer executes correctly");
-
         auto Source = Compile("var base = 2; def score(x = 3) { return base + x; }");
         auto Bytes = SerializeProgram(Source);
+        Check(Bytes.size() > 16 && Bytes[8] == 3 && Bytes[9] == 0,
+              "unexpected current bytecode version");
         Check(Bytes == SerializeProgram(Source), "artifact is not deterministic");
         auto Loaded = DeserializeProgram(Bytes);
         Check(!Loaded.UsesQuickOperators && Loaded.Functions.contains("score"),
@@ -66,6 +52,13 @@ int main(int ArgCount, char** Arguments) {
               "loaded defaults or global binding changed");
         Check(Machine.Run(Loaded.Functions.at("score"), {Value::Number(8)}).AsNumber() == 10,
               "loaded function invocation changed");
+
+        auto Exported = Compile("export var base = 2; export def score(x = 3) { return base + x; }");
+        auto ExportBytes = SerializeProgram(Exported);
+        auto ExportLoad = DeserializeProgram(ExportBytes);
+        Check(ExportLoad.Exports.size() == 2 && ExportLoad.Exports[0] == "base" &&
+              ExportLoad.Exports[1] == "score" && SerializeProgram(ExportLoad) == ExportBytes,
+              "v3 export metadata did not round-trip deterministically");
 
         auto Quick = DeserializeProgram(SerializeProgram(Compile(">hello")));
         Check(Quick.UsesQuickOperators, "quick operator requirement was lost");
@@ -87,7 +80,7 @@ int main(int ArgCount, char** Arguments) {
         Reject([&] { (void)DeserializeProgram(Corrupt); }, "bad length accepted");
         Corrupt = Bytes; Corrupt.pop_back();
         Reject([&] { (void)DeserializeProgram(Corrupt); }, "truncated artifact accepted");
-        Corrupt = Bytes; Corrupt.back() = 2;
+        Corrupt = Bytes; Corrupt[Corrupt.size() - 5] = 2;
         Reject([&] { (void)DeserializeProgram(Corrupt); }, "invalid flags accepted");
         Corrupt = Bytes; Corrupt[20] = 255;
         Reject([&] { (void)DeserializeProgram(Corrupt); }, "invalid constant accepted");

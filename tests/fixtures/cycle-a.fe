@@ -1,0 +1,2 @@
+var b = import("./cycle-b");
+export var value = 1;

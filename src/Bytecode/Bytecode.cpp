@@ -87,6 +87,16 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
         Instructions.push_back(Current);
         Pc = Current.End;
     }
+    if (!Function.Locations.empty()) {
+        if (Function.Locations.size() != Instructions.size())
+            Invalid("debug location count does not match instructions");
+        for (std::size_t I = 0; I < Instructions.size(); ++I) {
+            const auto& Location = Function.Locations[I];
+            if (Location.Pc != Instructions[I].Start ||
+                Location.Source.Line == 0 || Location.Source.Column == 0)
+                Invalid("invalid debug instruction location");
+        }
+    }
     std::vector<int> Heights(Instructions.size(), -1);
     std::queue<std::size_t> Pending;
     Heights[0] = 0;

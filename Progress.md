@@ -1,11 +1,11 @@
 # 脚本语言工程进度
 
-更新日期：2026-09-15  
-设计依据：`SPEC-runtime-design.md`、`SPEC-syntax.md`、`SPEC-snapshot.md`、`SPEC-bytecode-format.md`、`SPEC-import.md`、`SPEC-stdio.md`；后续单 VM 多文件目标见 `ROADMAP-multimodule.md`，工程结构见 `ENGINEERING.md`。本文件只跟踪进度和待决事项；语义以设计规范为准。未决事项不得由实现时顺手决定。
+更新日期：2026-09-16
+设计依据：`SPEC-runtime-design.md`、`SPEC-syntax.md`、`SPEC-snapshot.md`、`SPEC-bytecode-format.md`、`SPEC-symbol-format.md`、`SPEC-multimodule.md`、`SPEC-import.md`、`SPEC-native-modules.md`、`SPEC-stdio.md`；实施记录见 `ROADMAP-multimodule.md` 和 `ROADMAP-runtime-diagnostics.md`，工程结构见 `ENGINEERING.md`。本文件只跟踪进度和待决事项；语义以设计规范为准。
 
 ## 当前状态
 
-**M1 至 M5 首版可运行，`var`/`def` 关键字和三种独立命令行程序已加入。** ScriptObject 使用 VM 非移动堆，显式 GC、RootHandle、NativeObject 登记、近似内存统计和分配故障通道可运行。宿主可注册 native 函数、读写全局值。`SPEC-syntax.md` 定义源码语法及四种快捷行；`Compile(source)` 生成模块、初始化函数和命名函数映射。`SPEC-snapshot.md` 的版本化快照已实现保存与恢复。`SPEC-bytecode-format.md` 的实验版 `.fbc` 支持独立编译和加载，并有固定 v2 兼容样例。`SPEC-import.md` 定义宿主导入契约并提供注册适配器及跨 VM NativeObject 代理样例。`SPEC-stdio.md` 定义可选标准输入输出库。独立程序补充文件名诊断与执行预算；M5 测试覆盖宿主编码失败后的重新保存。Meson 下十八组测试通过。公开 C++ API、字节码和快照格式仍处实验阶段。
+**M1 至 M5 首版及单 VM 多文件模块可运行；`var`、`def`、`export` 和三种独立命令行程序已加入。** ScriptObject 使用 VM 非移动堆，显式 GC、RootHandle、NativeObject 登记、近似内存统计和分配故障通道可运行。宿主可注册 native 函数、读写模块全局值。`Compile(source)` 生成模块、初始化函数、命名函数映射和导出表。实验版 v3 `.fbc` 支持独立编译和加载；可选 `.fbs` 单独保存源码位置。v3 快照已能保存/恢复模块集合、跨模块函数和对象。`SPEC-import.md` 定义旧跨 VM 代理适配器与新增的同 VM 模块感知适配器。`SPEC-stdio.md` 定义可选标准输入输出库。独立程序补充文件名诊断与执行预算；直接运行源码或显式加载符号时，Error 可显示来源位置。公开 C++ API 和磁盘格式仍处实验阶段。
 
 ### 已确定的主要方向
 
@@ -19,7 +19,7 @@
 
 `feather run <source.fe>`、`featherc <source.fe> -o <program.fbc>` 和 `feathervm <program.fbc>` 均已加入。运行入口先执行顶层语句，再调用可选的无参数 `main`；独立程序未注册快捷函数，会明确拒绝快捷行。嵌入式宿主可在初始化前用 `RegisterNativeFunction` 注入 `__QuickOperator…`，用 `SetGlobal` 注入一般宿主对象；编译器保留快捷行标记供加载后使用。
 
-`RegisterImport` 只校验并转发普通全局调用；宿主自行解析来源、创建子 VM、代理导出值并管理缓存。独立的 `FeatherStdIo` 库已实现 Console/IO、二进制 ByteBuffer 与宿主解析接口；CLI 可解析 `std:console` 和 `std:io`，不直接注入 Console/IO 全局名。跨 VM ScriptObject/Function 不通过此适配器返回。
+`RegisterImport` 只校验并转发普通全局调用；宿主自行解析来源、创建子 VM、代理导出值并管理缓存。CLI 宿主从可执行文件旁的 `modules/` 搜索裸名，Native 动态库优先于同名 Feather 文件；`stdio.felib` 是可运行的独立模块，返回含 Console/IO 的单一对象，不直接注入全局名。共享 `FeatherCore` 供解释器和 Native 库共同链接。跨 VM ScriptObject/Function 不通过旧适配器返回。
 
 ## 阶段 0 已讨论的事项与实施前检查
 
@@ -43,11 +43,12 @@
 
 ## 后置但不可遗忘
 
-- **单 VM 多文件模块**：模块实例持有私有全局表；函数/帧携带模块身份，宿主提供各文件字节码，GC 和快照覆盖全部实例。导出表、重复/循环导入语义须先定稿；实施范围和验收见 `ROADMAP-multimodule.md`。
+- **单 VM 多文件模块**：第一版已完成；模块实例的私有全局表、函数/帧身份、显式导出、重复/循环初始化、GC 和 v3 快照见 `SPEC-multimodule.md`。CLI 宿主层已能按调用方目录解析相对 `.fe`/`.fbc` 导入并缓存文件模块。
+- **运行时源码位置诊断**：内存指令位置表、普通 Error 查询、独立 `.fbs` 与 VM 故障位置已完成；需要时的快照 Error 来源再按版本演进，v3 `.fbc` 可单独加载并使用无位置回退。
 - 快照保存/恢复的返回值、代码身份、RootMetaObject 身份和宿主恢复失败语义。
 - NativeObject 的 GC 追踪与释放钩子；脚本主动构造 Error、错误字段和调试钩子形式。
 - 字节码/快照格式版本校验、恶意或损坏输入的验证策略。
 
 ## 下一个具体动作
 
-下一步收紧 M5 的损坏输入与资源限制路径，并设计运行时源码位置诊断。`Compile`、内存模块、字节码及快照字节格式仍处实验阶段；单 VM 多文件模块按独立路线图推进。
+单 VM 多模块执行、跨模块快照、CLI 相对文件导入和 Native 动态库首版已完成。`stdio.felib` 可从源码或字节码程序用 `import("stdio")` 装载；同名 Native 优先、裸名 Feather 文件回退与初始化缓存见 `SPEC-native-modules.md`。下一步可增加模块目录列表的宿主/命令行修改接口，或扩展 Native 上下文服务；VM 不承担文件 IO，`.fbc` 也不打包依赖。快照有 v3 CRC32 往返和意外损坏检测；后续不扩展细碎的畸形输入组合。`Compile`、内存模块、字节码、符号及快照字节格式仍处实验阶段。

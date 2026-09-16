@@ -1,6 +1,6 @@
 def main() {
-    console.PrintLine("Feather stdio ready");
-    console.PrintLine("import ready");
+    stdio.Console.PrintLine("Feather stdio ready");
+    stdio.Console.PrintLine("import ready");
 }
 
-var console = import("std:console");
+var stdio = import("stdio");

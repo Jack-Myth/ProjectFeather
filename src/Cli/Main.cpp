@@ -18,7 +18,8 @@ int main(int ArgCount, char** Arguments) {
     auto SourcePath = std::filesystem::path(Arguments[2]);
     try {
         return Feather::Cli::RunProgram(
-            Feather::Compile(Feather::Cli::ReadSource(SourcePath)));
+            Feather::Compile(Feather::Cli::ReadSource(SourcePath)), SourcePath,
+            Feather::Cli::ModuleFileKind::Source);
     } catch (const std::exception& Failure) {
         std::cerr << "feather: " << Feather::Cli::PathText(SourcePath) << ": "
                   << Failure.what() << '\n';

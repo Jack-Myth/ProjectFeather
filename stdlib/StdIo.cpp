@@ -41,6 +41,9 @@ public:
     void Add(std::string Name, Method Body) {
         Members.emplace(std::move(Name), Value::FromObject(std::make_shared<Function>(std::move(Body))));
     }
+    void AddValue(std::string Name, Value Input) {
+        Members.emplace(std::move(Name), std::move(Input));
+    }
     Value GetMember(const Value& Key) override {
         if (Key.GetType() != ValueType::String) return Error("member name must be a string");
         auto Found = Members.find(Key.AsString());
@@ -278,13 +281,13 @@ StdIoLibrary::StdIoLibrary(std::istream& Input, std::ostream& Output)
         return Value::Number(static_cast<double>(Written));
     });
     IOObject = IONamespace;
+    auto ModuleNamespace = std::make_shared<Namespace>();
+    ModuleNamespace->AddValue("Console", Value::FromObject(ConsoleObject));
+    ModuleNamespace->AddValue("IO", Value::FromObject(IOObject));
+    ModuleObject = std::move(ModuleNamespace);
 }
 
 StdIoLibrary::~StdIoLibrary() = default;
-Value StdIoLibrary::Resolve(std::string_view Specifier) const {
-    if (Specifier == "std:console") return Value::FromObject(ConsoleObject);
-    if (Specifier == "std:io") return Value::FromObject(IOObject);
-    return {};
-}
+Value StdIoLibrary::GetModule() const { return Value::FromObject(ModuleObject); }
 
 } // namespace Feather

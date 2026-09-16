@@ -3,6 +3,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <stdexcept>
 
 using namespace Feather;
@@ -19,7 +20,8 @@ template<class Action> void RejectWith(Action Run, const char* Expected) {
     try { Run(); }
     catch (const std::exception& Failure) {
         Check(std::string(Failure.what()).find(Expected) != std::string::npos,
-              "snapshot rejected for the wrong reason");
+              (std::string("snapshot rejected for the wrong reason: expected ") + Expected +
+               ", got " + Failure.what()).c_str());
         return;
     }
     throw std::runtime_error("invalid snapshot accepted");
@@ -70,6 +72,20 @@ std::uint32_t ReadU32(const std::vector<std::uint8_t>& Bytes, std::size_t At) {
     return std::uint32_t(Bytes[At]) | (std::uint32_t(Bytes[At + 1]) << 8) |
            (std::uint32_t(Bytes[At + 2]) << 16) | (std::uint32_t(Bytes[At + 3]) << 24);
 }
+std::uint32_t TestChecksum(std::span<const std::uint8_t> Bytes) {
+    std::uint32_t Crc = 0xffffffffu;
+    for (auto Byte : Bytes) {
+        Crc ^= Byte;
+        for (int Bit = 0; Bit < 8; ++Bit)
+            Crc = (Crc >> 1) ^ ((Crc & 1) ? 0xedb88320u : 0u);
+    }
+    return ~Crc;
+}
+void SealSnapshot(std::vector<std::uint8_t>& Bytes) {
+    auto Crc = TestChecksum(std::span<const std::uint8_t>(Bytes.data(), Bytes.size() - 4));
+    for (unsigned I = 0; I < 4; ++I)
+        Bytes[Bytes.size() - 4 + I] = static_cast<std::uint8_t>(Crc >> (8 * I));
+}
 class BridgeNative final : public NativeObject {
 public:
     BridgeNative(Vm& Machine, std::uint32_t Target) : Machine(Machine), Target(Target) {}
@@ -116,6 +132,10 @@ int main() {
         Check(Original.Run(Compiled.Functions.at("outer")).AsNumber() == 0,
               "save path should return false");
         Check(!Saved.empty(), "snapshot bytes missing");
+        Check(Saved[4] == 3 &&
+              ReadU32(Saved, Saved.size() - 4) ==
+                  TestChecksum(std::span<const std::uint8_t>(Saved.data(), Saved.size() - 4)),
+              "snapshot v3 checksum was not written correctly");
 
         auto BeforeFailedEncode = Saved;
         HostCodec.FailEncode = true;
@@ -158,6 +178,11 @@ int main() {
         Check(NoCodec.GetScriptObjectCount() == 1, "parse failure mutated heap");
         Vm TooSmall(Compiled.Program);
         RejectWith([&] { TooSmall.ResumeSnapshot(Saved, &HostCodec, 10); }, "size limit");
+        Vm TooFewObjects(Compiled.Program, 2);
+        RejectWith([&] { TooFewObjects.ResumeSnapshot(Saved, &HostCodec); },
+                   "ScriptObject limit exceeded");
+        Check(TooFewObjects.GetScriptObjectCount() == 1,
+              "object limit rejection allocated ScriptObjects");
 
         Vm Failed(Compiled.Program);
         HostCodec.FailDecode = true;
@@ -176,25 +201,49 @@ int main() {
         Vm BadMagic(Compiled.Program);
         Reject([&] { BadMagic.ResumeSnapshot(Corrupt, &HostCodec); }, "bad magic accepted");
         Corrupt = Saved;
-        Corrupt[4] = 2;
+        Corrupt[4] = 1;
         Vm BadVersion(Compiled.Program);
         Reject([&] { BadVersion.ResumeSnapshot(Corrupt, &HostCodec); }, "bad version accepted");
+        Corrupt = Saved;
+        Corrupt[20] ^= 1;
+        Vm BadChecksum(Compiled.Program);
+        RejectWith([&] { BadChecksum.ResumeSnapshot(Corrupt, &HostCodec); },
+                   "checksum mismatch");
+        Check(BadChecksum.GetScriptObjectCount() == 1,
+              "checksum rejection changed VM state");
         Corrupt = Saved;
         Corrupt.pop_back();
         Vm Truncated(Compiled.Program);
         Reject([&] { Truncated.ResumeSnapshot(Corrupt, &HostCodec); }, "truncated data accepted");
         Corrupt = Saved;
+        std::size_t ObjectStart = 8;
+        ObjectStart += 4 + ReadU32(Corrupt, ObjectStart); // Skip the module image.
+        ObjectStart += 4;
+        Corrupt[ObjectStart] = 0xff;
+        Corrupt[ObjectStart + 1] = 0xff;
+        Corrupt[ObjectStart + 2] = 0;
+        Corrupt[ObjectStart + 3] = 0;
+        SealSnapshot(Corrupt);
+        Vm ImpossibleCount(Compiled.Program);
+        RejectWith([&] { ImpossibleCount.ResumeSnapshot(Corrupt, &HostCodec); },
+                   "object count exceeds section size");
+        Check(ImpossibleCount.GetScriptObjectCount() == 1,
+              "impossible object count mutated VM");
+        Corrupt = Saved;
+        Corrupt = Saved;
         std::size_t At = 8;
         for (int I = 0; I < 3; ++I) At += 4 + ReadU32(Corrupt, At);
         At += 4 + 4 + 1; // frame section length, count, pending-result marker
         for (int I = 0; I < 4; ++I) Corrupt[At + I] = 0xff;
+        SealSnapshot(Corrupt);
         Vm BadFrame(Compiled.Program);
         Reject([&] { BadFrame.ResumeSnapshot(Corrupt, &HostCodec); }, "invalid frame index accepted");
         Corrupt = Saved;
         At = 8;
         for (int I = 0; I < 3; ++I) At += 4 + ReadU32(Corrupt, At);
-        At += 4 + 4 + 1 + 4 + 4 + 4; // first frame stack count; outer has no locals
+        At += 4 + 4 + 1 + 4 + 4 + 4 + 4; // first frame stack count; outer has no locals
         Corrupt[At] = 1;
+        SealSnapshot(Corrupt);
         Vm BadStack(Compiled.Program);
         RejectWith([&] { BadStack.ResumeSnapshot(Corrupt, &HostCodec); }, "stack count");
 

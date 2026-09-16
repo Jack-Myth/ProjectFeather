@@ -1,0 +1,12 @@
+var math = import("./math");
+var mathAgain = import("./math.fe");
+var util = import("./util");
+
+def main() {
+    if (math == mathAgain) {
+        if (math.sum(7) == 13) {
+            if (util.answer == 6) { return 0; }
+        }
+    }
+    return 1 + "wrong module result";
+}
