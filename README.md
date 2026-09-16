@@ -1,6 +1,6 @@
 # ProjectFeather
 
-ProjectFeather 是一个使用 C++20 编写、面向宿主嵌入的小型脚本语言。当前有栈式字节码 VM、单 VM 多文件模块、对象与 MetaObject、显式 GC、源码编译器、状态快照，以及源码运行、独立编译和字节码执行命令行程序。公开接口和磁盘字节格式仍处实验阶段。变量用 `var` 声明，函数用 `def` 声明，顶层导出用 `export` 修饰声明。
+ProjectFeather 是一个使用 C++20 编写、面向宿主嵌入的小型脚本语言。当前有栈式字节码 VM、单 VM 多文件模块、对象与 MetaObject、自动非移动标记清除 GC、源码编译器、状态快照，以及源码运行、独立编译和字节码执行命令行程序。公开接口和磁盘字节格式仍处实验阶段。变量用 `var` 声明，函数用 `def` 声明，顶层导出用 `export` 修饰声明。
 
 当前快照使用带 CRC32 校验和的 v3 格式，可保存模块身份、私有全局与跨模块调用帧，并检测意外损坏；旧版快照不再加载。快照边界见 [快照契约](SPEC-snapshot.md)。
 
@@ -28,7 +28,7 @@ build\feathervm.exe hello.fbc --symbols hello.fbs
 
 `featherc` 只生成文件，不执行源码；`feather` 和 `feathervm` 先执行顶层语句，然后调用存在时的无参数 `def main()`。不要求定义 `main`，返回的非 Error 值不打印。用法错误的退出码为 2，编译、文件读取、VM 故障以及初始化或 `main` 返回 Error 的退出码为 1。独立运行程序没有注入快捷行所需的四个全局函数，因此它们会明确拒绝含快捷行的程序。一般表达式语句丢弃 Error 的语言语义仍然适用。`.fbc` 文件格式见 [字节码格式](SPEC-bytecode-format.md)。
 
-独立程序的错误会标出输入文件；`feather run` 的初始化或 `main` 返回 Error 时还会显示可用的源码字节偏移与行列。当前 v3 `.fbc` 不保存位置表；需要同样的诊断时可另存独立 `.fbs`，并在 `feathervm` 运行时显式指定。普通运行只读 `.fbc`，不会自动加载符号。VM 故障也会在有位置时标出当前指令。`featherc` 写入失败会标出输出文件。符号格式见 [符号文件格式](SPEC-symbol-format.md)。`feather` 和 `feathervm` 每次最外层执行最多运行 10,000,000 条指令，并限制 100,000 个 ScriptObject（含 RootMetaObject）；超出指令预算时以 VM 故障退出。嵌入式宿主可在 `Vm` 构造时自行设置这两项限额，默认不限制指令数。
+独立程序的错误会标出输入文件；`feather run` 的初始化或 `main` 返回 Error 时还会显示可用的源码字节偏移与行列。当前 v3 `.fbc` 不保存位置表；需要同样的诊断时可另存独立 `.fbs`，并在 `feathervm` 运行时显式指定。普通运行只读 `.fbc`，不会自动加载符号。VM 故障也会在有位置时标出当前指令。`featherc` 写入失败会标出输出文件。符号格式见 [符号文件格式](SPEC-symbol-format.md)。`feather` 和 `feathervm` 每次最外层执行最多运行 10,000,000 条指令，并限制 100,000 个同时存活的 ScriptObject（含 RootMetaObject）；VM 在安全的指令边界自动回收不可达对象，并在达到硬上限前强制尝试一次完整收集。超出指令预算或收集后仍达到对象上限时以 VM 故障退出。嵌入式宿主可在 `Vm` 构造时自行设置这两项限额，默认不限制指令数；仍可在 VM 空闲时显式调用 `CollectGarbage()`。
 
 `import("name")` 是宿主注册的普通全局函数。编译器和 VM 不加载依赖，也不跨 VM 传递脚本对象；宿主可用 `RegisterModuleImport` 把其他 Feather 文件装入同一 VM，也可用旧 `RegisterImport` 和 `NativeObject` 代理子 VM。接口与代理边界见 [import 契约](SPEC-import.md)。独立运行程序的宿主解析器支持 `import("stdio")`、模块目录中的裸名 Feather 文件，以及 `import("./math")`、`import("../shared/util.fe")` 这样的相对文件标识。裸名从可执行文件旁的 `modules/` 搜索，Native 动态库优先；相对标识由真正的调用方文件目录解析。`feather run` 读取相应 `.fe`，`feathervm` 读取同名 `.fbc`；先用 `featherc` 分别编译各文件，产物按相同目录关系放置。含 `.fe` 后缀的相对标识在字节码运行时映射到 `.fbc`。Native 库约定见 [Native 模块规范](SPEC-native-modules.md)。
 

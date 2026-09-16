@@ -700,7 +700,11 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
                     Native->GcVisibleMembers.clear();
         Globals = std::move(PreviousGlobals);
         NativeRegistry = std::move(PreviousNativeRegistry);
+        for (std::size_t I = 1; I < ScriptHeap.size(); ++I)
+            ScriptObjects.erase(ScriptHeap[I].get());
         ScriptHeap.resize(1);
+        CollectionPending = false;
+        UpdateCollectionThreshold();
         throw;
     }
     Globals.swap(NewGlobals[0]);

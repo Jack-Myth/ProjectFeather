@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Feather {
@@ -147,6 +148,10 @@ struct GcStatistics {
     std::size_t ScriptObjectCount = 0;
     std::size_t ScriptMemberCount = 0;
     std::size_t EstimatedScriptBytes = 0;
+    std::size_t CollectionCount = 0;
+    std::size_t TotalAllocatedScriptObjects = 0;
+    std::size_t TotalCollectedScriptObjects = 0;
+    std::size_t NextCollectionObjectCount = 0;
 };
 
 struct SourceLocation {
@@ -262,6 +267,8 @@ public:
     void RegisterNativeFunction(std::string Name, std::shared_ptr<NativeObject> Input);
     RootHandle AddToRoot(Value Input);
     void RegisterNativeObject(const std::shared_ptr<NativeObject>& Input);
+    // Force a full collection while the VM is idle. Execution also collects
+    // automatically at safe instruction boundaries when its threshold is reached.
     std::size_t CollectGarbage();
     GcStatistics GetGcStatistics() const;
     std::size_t GetScriptObjectCount() const { return ScriptHeap.size(); }
@@ -269,6 +276,10 @@ public:
 private:
     friend class RootHandle;
     friend class ScriptObject;
+    ScriptObject* AllocateScriptObject(ScriptObject* MetaObject);
+    void MaybeCollectGarbage();
+    std::size_t CollectGarbageImpl();
+    void UpdateCollectionThreshold();
     void RemoveFromRoot(std::uint64_t Token);
     bool OwnsScript(ScriptObject* Input) const;
     void ValidateOwnedValue(const Value& Input) const;
@@ -278,6 +289,7 @@ private:
     std::vector<std::shared_ptr<Object>> Functions;
     ScriptObject* RootMetaObject = nullptr;
     std::vector<std::unique_ptr<ScriptObject>> ScriptHeap;
+    std::unordered_set<ScriptObject*> ScriptObjects;
     std::unordered_map<std::string, Value> Globals;
     std::unordered_map<std::string, std::shared_ptr<ModuleInstance>> LoadedModules;
     std::unordered_map<const Module*, std::shared_ptr<ModuleInstance>> ModuleByProgram;
@@ -299,6 +311,11 @@ private:
     bool HasRun = false;
     mutable bool SnapshotBusy = false;
     std::size_t ScriptObjectLimit;
+    std::size_t NextCollectionObjectCount = 0;
+    std::size_t CollectionCount = 0;
+    std::size_t TotalAllocatedScriptObjects = 0;
+    std::size_t TotalCollectedScriptObjects = 0;
+    bool CollectionPending = false;
     std::size_t InstructionLimit;
     std::size_t InstructionsRemaining = 0;
 };

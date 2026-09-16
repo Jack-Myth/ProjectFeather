@@ -11,6 +11,8 @@
 
 namespace Feather {
 namespace {
+constexpr std::size_t MinimumCollectionGrowth = 1024;
+
 Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Value>& Args) {
     const auto& Body = Function->GetBody();
     Frame Next;
@@ -102,8 +104,8 @@ Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
     if (InstructionLimit == 0) throw std::invalid_argument("instruction limit must be positive");
     Input->Validate();
     SourceProgram = Input;
-    ScriptHeap.emplace_back(new ScriptObject(this));
-    RootMetaObject = ScriptHeap.back().get();
+    RootMetaObject = AllocateScriptObject(nullptr);
+    UpdateCollectionThreshold();
     // Freeze the mutable builder's module before any execution.
     Program = std::make_shared<Module>(*Input);
     for (auto& Item : Program->Constants) {
@@ -201,15 +203,23 @@ std::string Vm::GetActiveModuleId() const {
     return Found->second->Id;
 }
 
-ScriptObject* Vm::CreateScriptObject() {
+ScriptObject* Vm::AllocateScriptObject(ScriptObject* MetaObject) {
+    MaybeCollectGarbage();
     if (ScriptHeap.size() >= ScriptObjectLimit) throw std::bad_alloc();
-    ScriptHeap.emplace_back(new ScriptObject(this, RootMetaObject));
-    return ScriptHeap.back().get();
+    auto NewObject = std::unique_ptr<ScriptObject>(new ScriptObject(this, MetaObject));
+    auto* Result = NewObject.get();
+    ScriptHeap.push_back(std::move(NewObject));
+    try { ScriptObjects.insert(Result); }
+    catch (...) { ScriptHeap.pop_back(); throw; }
+    ++TotalAllocatedScriptObjects;
+    if (ActiveRuns != 0 && ScriptHeap.size() >= NextCollectionObjectCount)
+        CollectionPending = true;
+    return Result;
 }
+ScriptObject* Vm::CreateScriptObject() { return AllocateScriptObject(RootMetaObject); }
 ScriptObject* Vm::CreateMetaObject() { return CreateScriptObject(); }
 bool Vm::OwnsScript(ScriptObject* Input) const {
-    return std::any_of(ScriptHeap.begin(), ScriptHeap.end(),
-                       [Input](const auto& Entry) { return Entry.get() == Input; });
+    return ScriptObjects.contains(Input);
 }
 void Vm::SetMetaObject(ScriptObject* Target, ScriptObject* MetaObject) {
     if (!Target || !MetaObject || Target == RootMetaObject ||
@@ -287,20 +297,39 @@ void Vm::RegisterNativeObject(const std::shared_ptr<NativeObject>& Input) {
     if (!Input) throw std::invalid_argument("null NativeObject");
     NativeRegistry.push_back(Input);
 }
+void Vm::UpdateCollectionThreshold() {
+    auto Live = ScriptHeap.size();
+    auto Growth = std::max(MinimumCollectionGrowth, Live);
+    auto Maximum = std::numeric_limits<std::size_t>::max();
+    auto Candidate = Live > Maximum - Growth ? Maximum : Live + Growth;
+    NextCollectionObjectCount = std::min(Candidate, ScriptObjectLimit);
+}
+
+void Vm::MaybeCollectGarbage() {
+    if (ActiveRuns != 1 || ActiveNativeCalls != 0 || !ActiveExecution || SnapshotBusy)
+        return;
+    if (!CollectionPending && ScriptHeap.size() < NextCollectionObjectCount)
+        return;
+    (void)CollectGarbageImpl();
+}
+
 std::size_t Vm::CollectGarbage() {
     if (ActiveRuns != 0 || ActiveNativeCalls != 0)
         throw std::logic_error("GC requires an idle VM");
+    return CollectGarbageImpl();
+}
+
+std::size_t Vm::CollectGarbageImpl() {
     struct MarkReset {
         std::vector<std::unique_ptr<ScriptObject>>& Heap;
         ~MarkReset() { for (auto& Entry : Heap) Entry->Marked = false; }
     } Reset{ScriptHeap};
-    std::unordered_set<ScriptObject*> HeapPointers;
-    for (const auto& Entry : ScriptHeap) HeapPointers.insert(Entry.get());
     std::vector<ScriptObject*> ScriptWork;
     std::vector<std::shared_ptr<NativeObject>> NativeWork;
     std::unordered_set<NativeObject*> SeenNative;
     auto MarkScript = [&](ScriptObject* Input) {
-        if (!HeapPointers.contains(Input)) throw std::invalid_argument("foreign or stale ScriptObject in GC graph");
+        if (!ScriptObjects.contains(Input))
+            throw std::invalid_argument("foreign or stale ScriptObject in GC graph");
         if (!Input->Marked) { Input->Marked = true; ScriptWork.push_back(Input); }
     };
     auto MarkValue = [&](const Value& Input) {
@@ -312,13 +341,22 @@ std::size_t Vm::CollectGarbage() {
         }
     };
     MarkScript(RootMetaObject);
+    for (const auto& Function : Functions)
+        if (Function) MarkValue(Value::FromObject(Function));
     for (const auto& [_, Entry] : Globals) MarkValue(Entry);
     for (const auto& [_, Instance] : LoadedModules) {
+        for (const auto& Function : Instance->Functions)
+            if (Function) MarkValue(Value::FromObject(Function));
         for (const auto& [__, Entry] : Instance->Globals) MarkValue(Entry);
         MarkValue(Instance->InitializationError);
         MarkValue(Value::FromObject(Instance->Namespace));
     }
     for (const auto& [_, Entry] : HostRoots) MarkValue(Entry);
+    if (ActiveExecution)
+        for (const auto& Current : ActiveExecution->Frames) {
+            for (const auto& Entry : Current.Locals) MarkValue(Entry);
+            for (const auto& Entry : Current.Stack) MarkValue(Entry);
+        }
     for (auto It = NativeRegistry.begin(); It != NativeRegistry.end();) {
         if (auto Native = It->lock()) {
             if (SeenNative.insert(Native.get()).second) NativeWork.push_back(std::move(Native));
@@ -337,9 +375,18 @@ std::size_t Vm::CollectGarbage() {
         }
     }
     auto Before = ScriptHeap.size();
-    std::erase_if(ScriptHeap, [](const auto& Entry) { return !Entry->Marked; });
+    std::erase_if(ScriptHeap, [&](const auto& Entry) {
+        if (Entry->Marked) return false;
+        ScriptObjects.erase(Entry.get());
+        return true;
+    });
     for (auto& Entry : ScriptHeap) Entry->Marked = false;
-    return Before - ScriptHeap.size();
+    auto Collected = Before - ScriptHeap.size();
+    ++CollectionCount;
+    TotalCollectedScriptObjects += Collected;
+    CollectionPending = false;
+    UpdateCollectionThreshold();
+    return Collected;
 }
 GcStatistics Vm::GetGcStatistics() const {
     GcStatistics Result;
@@ -351,6 +398,10 @@ GcStatistics Vm::GetGcStatistics() const {
         for (const auto& [Key, _] : Script->Members)
             Result.EstimatedScriptBytes += sizeof(Key) + sizeof(Value) + 2 * sizeof(void*) + Key.Text.capacity();
     }
+    Result.CollectionCount = CollectionCount;
+    Result.TotalAllocatedScriptObjects = TotalAllocatedScriptObjects;
+    Result.TotalCollectedScriptObjects = TotalCollectedScriptObjects;
+    Result.NextCollectionObjectCount = NextCollectionObjectCount;
     return Result;
 }
 
@@ -448,6 +499,7 @@ Value Vm::Execute(ExecutionState& Execution) {
     std::string FaultModuleId;
     try {
     while (!Frames.empty()) {
+        MaybeCollectGarbage();
         Frame& Next = Frames.back();
         FaultBody = &Next.Function->GetBody();
         FaultPc = Next.Pc;

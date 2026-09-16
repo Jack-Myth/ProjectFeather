@@ -1,4 +1,4 @@
-#include <Feather/Runtime.hpp>
+#include <Feather/Compiler.hpp>
 
 #include <iostream>
 #include <memory>
@@ -36,6 +36,20 @@ public:
         try { Owner.CollectGarbage(); }
         catch (const std::logic_error&) { return Value::Bool(true); }
         return Value::Bool(false);
+    }
+private:
+    Vm& Owner;
+};
+class AllocateDuringCall final : public NativeObject {
+public:
+    explicit AllocateDuringCall(Vm& Owner) : Owner(Owner) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>&) override {
+        Value Last;
+        for (int I = 0; I < 7; ++I)
+            Last = Value::FromScript(Owner.CreateScriptObject());
+        return Last;
     }
 private:
     Vm& Owner;
@@ -132,6 +146,53 @@ void GlobalRoots() {
     Machine.Run(ClearId);
     Check(Machine.CollectGarbage() == 1, "cleared global should release ScriptObject");
 }
+void AutomaticCollection() {
+    auto Source = Compile(R"(
+        def churn(n) {
+            var i = 0;
+            while (i < n) { object(); i = i + 1; }
+        }
+        def keepLocal(n) {
+            var kept = object();
+            kept.answer = 42;
+            churn(n);
+            return kept.answer;
+        }
+        def first(a, b) { return a; }
+        def keepOnStack(n) { return first(object(), churn(n)); }
+    )");
+    Vm Machine(Source.Program, 8);
+    Source.Initialize(Machine);
+    Check(Machine.Run(Source.Functions.at("keepLocal"), {Value::Number(100)}).AsNumber() == 42,
+          "automatic GC lost a local root");
+    auto Stacked = Machine.Run(Source.Functions.at("keepOnStack"), {Value::Number(100)});
+    Check(Stacked.IsScriptObject(), "automatic GC lost an expression stack root");
+    auto Root = Machine.AddToRoot(Stacked);
+    (void)Machine.CollectGarbage();
+    Check(Root.Get().AsScriptObject() == Stacked.AsScriptObject(),
+          "automatic GC result could not be rooted");
+    auto Statistics = Machine.GetGcStatistics();
+    Check(Statistics.CollectionCount > 1 && Statistics.TotalCollectedScriptObjects >= 200 &&
+          Statistics.TotalAllocatedScriptObjects > Statistics.ScriptObjectCount &&
+          Statistics.NextCollectionObjectCount <= 8,
+          "automatic GC statistics are incomplete");
+}
+void NativeCollectionDeferral() {
+    auto ModuleValue = std::make_shared<Module>();
+    auto Body = std::make_shared<FunctionPrototype>();
+    Builder Code;
+    Code.EmitU32(Op::GetLocal, 0); Code.EmitU16(Op::Call, 0); Code.Emit(Op::Return);
+    Body->Code = std::move(Code).Finish(); Body->ParameterCount = 1; Body->LocalCount = 1;
+    Body->Defaults.resize(1);
+    auto Id = ModuleValue->AddFunction(Body);
+    Vm Machine(ModuleValue, 8);
+    auto Result = Machine.Run(Id, {Value::FromObject(std::make_shared<AllocateDuringCall>(Machine))});
+    Check(Result.IsScriptObject(), "deferred GC lost the native result");
+    auto Statistics = Machine.GetGcStatistics();
+    Check(Statistics.CollectionCount == 1 && Statistics.TotalCollectedScriptObjects == 6 &&
+          Statistics.ScriptObjectCount == 2,
+          "native allocations were not collected at the next safe point");
+}
 void FatalAllocationPath() {
     auto ModuleValue = std::make_shared<Module>();
     auto Body = std::make_shared<FunctionPrototype>();
@@ -147,7 +208,8 @@ void FatalAllocationPath() {
 
 int main() {
     try {
-        CyclesAndRoots(); NativeVisibilityAndBoundaries(); GlobalRoots(); FatalAllocationPath();
+        CyclesAndRoots(); NativeVisibilityAndBoundaries(); GlobalRoots();
+        AutomaticCollection(); NativeCollectionDeferral(); FatalAllocationPath();
         std::cout << "M3 tests passed\n";
         return 0;
     } catch (const std::exception& Failure) {
