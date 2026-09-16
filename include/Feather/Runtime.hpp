@@ -93,6 +93,7 @@ public:
     void RemoveGcVisibleMember(const std::string& Name);
 private:
     friend class Vm;
+    friend class VmDebugContext;
     std::unordered_map<std::string, Value> GcVisibleMembers;
 };
 
@@ -111,6 +112,7 @@ public:
     ScriptObject* GetMetaObject() const { return MetaObject; }
 private:
     friend class Vm;
+    friend class VmDebugContext;
     explicit ScriptObject(Vm* Owner, ScriptObject* MetaObject = {});
     struct Key {
         ValueType Type;
@@ -165,6 +167,48 @@ struct SourceLocation {
 struct InstructionLocation {
     std::size_t Pc = 0;
     SourceLocation Source;
+};
+
+struct DebugFrameView {
+    std::size_t FrameId = 0;
+    std::uint32_t FunctionId = 0;
+    std::size_t Pc = 0;
+    std::optional<SourceLocation> Source;
+    std::span<const Value> Locals;
+    std::span<const Value> Stack;
+};
+
+struct DebugNamedValue {
+    std::string Name;
+    Value Data;
+};
+
+struct DebugProperty {
+    Value Key;
+    Value Data;
+};
+
+// A read-only view valid only during VmDebugController::OnSafePoint.
+class FEATHER_API VmDebugContext final {
+public:
+    std::size_t GetFrameCount() const;
+    DebugFrameView GetFrame(std::size_t FrameId) const;
+    std::vector<DebugNamedValue> GetGlobals(std::size_t FrameId) const;
+    std::vector<DebugProperty> GetProperties(const Value& Input) const;
+private:
+    friend class Vm;
+    VmDebugContext(const Vm* Machine, const ExecutionState* Execution)
+        : Machine(Machine), Execution(Execution) {}
+    const Vm* Machine;
+    const ExecutionState* Execution;
+};
+
+// Optional low-level hook implemented by embeddable debugger components.
+class FEATHER_API VmDebugController {
+public:
+    virtual ~VmDebugController() = default;
+    virtual void OnSafePoint(const VmDebugContext& Context) = 0;
+    virtual void OnExecutionFinished(bool Faulted) = 0;
 };
 
 class FEATHER_API ErrorObject final : public NativeObject {
@@ -263,6 +307,9 @@ public:
     std::optional<SourceLocation> GetErrorLocation(const Value& Input) const;
     // Position of the most recent uncaught execution fault; reset on a new outer run.
     std::optional<SourceLocation> GetFaultLocation() const { return FaultLocation; }
+    // The controller runs on the VM execution thread. Replace it only while idle.
+    void SetDebugController(std::shared_ptr<VmDebugController> Input);
+    std::shared_ptr<VmDebugController> GetDebugController() const { return DebugController; }
     void SetGlobal(std::string Name, Value Input);
     void RegisterNativeFunction(std::string Name, std::shared_ptr<NativeObject> Input);
     RootHandle AddToRoot(Value Input);
@@ -276,6 +323,7 @@ public:
 private:
     friend class RootHandle;
     friend class ScriptObject;
+    friend class VmDebugContext;
     ScriptObject* AllocateScriptObject(ScriptObject* MetaObject);
     void MaybeCollectGarbage();
     std::size_t CollectGarbageImpl();
@@ -284,6 +332,8 @@ private:
     bool OwnsScript(ScriptObject* Input) const;
     void ValidateOwnedValue(const Value& Input) const;
     Value Execute(ExecutionState& Execution);
+    void ReachDebugSafePoint(ExecutionState& Execution);
+    void NotifyDebugExecutionFinished(bool Faulted);
     std::shared_ptr<Module> Program;
     std::shared_ptr<Module> SourceProgram;
     std::vector<std::shared_ptr<Object>> Functions;
@@ -301,6 +351,7 @@ private:
     std::optional<SourceLocation> FaultLocation;
     std::exception_ptr FaultException;
     const std::exception* FaultObject = nullptr;
+    std::shared_ptr<VmDebugController> DebugController;
     std::unordered_map<std::uint64_t, Value> HostRoots;
     std::vector<std::weak_ptr<NativeObject>> NativeRegistry;
     std::shared_ptr<int> Lifetime = std::make_shared<int>(0);

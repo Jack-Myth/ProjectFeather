@@ -1,6 +1,6 @@
 # 工程结构与开工顺序
 
-状态：M1 至 M5、单 VM 多文件模块和 Native 动态库首版可运行，源码与独立字节码命令行程序已接入；`stdio.felib` 是首个独立 Native 模块。公开 API 和字节格式仍处实验阶段。运行时语义以 `SPEC-runtime-design.md` 为准，源码语法以 `SPEC-syntax.md` 为准，多模块以 `SPEC-multimodule.md` 为准，快照行为以 `SPEC-snapshot.md` 为准，磁盘编译产物以 `SPEC-bytecode-format.md` 为准，导入以 `SPEC-import.md`、`SPEC-native-modules.md` 为准，标准输入输出以 `SPEC-stdio.md` 为准。
+状态：M1 至 M5、单 VM 多文件模块、Native 动态库和嵌入式调试协议端首版可运行，源码与独立字节码命令行程序已接入；`stdio.felib` 是首个独立 Native 模块。公开 API 和字节格式仍处实验阶段。运行时语义以 `SPEC-runtime-design.md` 为准，源码语法以 `SPEC-syntax.md` 为准，多模块以 `SPEC-multimodule.md` 为准，快照行为以 `SPEC-snapshot.md` 为准，磁盘编译产物以 `SPEC-bytecode-format.md` 为准，导入以 `SPEC-import.md`、`SPEC-native-modules.md` 为准，标准输入输出以 `SPEC-stdio.md` 为准，调试嵌入边界以 `SPEC-debug-protocol.md` 为准。
 
 ## 目录
 
@@ -16,6 +16,7 @@ ProjectFeather/
 ├─ SPEC-import.md                # 宿主导入与跨 VM 代理边界
 ├─ SPEC-native-modules.md        # Native 搜索目录、入口与对象生命周期
 ├─ SPEC-stdio.md                 # 可选标准输入输出库契约
+├─ SPEC-debug-protocol.md        # 调试目标、宿主传输和 JSON 消息契约
 ├─ ROADMAP-multimodule.md        # 单 VM 多文件模块实施记录与验收
 ├─ ROADMAP-runtime-diagnostics.md # 后续运行时源码位置诊断目标
 ├─ Progress.md                   # 里程碑与待决项
@@ -29,7 +30,8 @@ ProjectFeather/
 │  ├─ Compiler/                  # 词法、语法、AST、代码生成
 │  ├─ Embed/                     # 宿主便捷适配接口
 │  ├─ Cli/                       # 源码运行、独立编译和字节码执行入口
-│  └─ Snapshot/                  # 版本化序列化与恢复
+│  ├─ Snapshot/                  # 版本化序列化与恢复
+│  └─ Debug/                     # 可选、可剥离的调试协议端
 ├─ stdlib/                       # 独立于核心库的 Console/IO 实现
 ├─ modules/                      # Native 模块构建目标；输出到 build/modules/
 └─ tests/
@@ -45,6 +47,7 @@ ProjectFeather/
    ├─ StdIo.cpp                 # 控制台和二进制文件端到端测试
    ├─ Budget.cpp                # 指令预算及 native 重入测试
    ├─ Diagnostics.cpp           # Error 来源和独立符号文件
+   ├─ Debug.cpp                 # 调试协议、跨线程暂停和检查
    ├─ Multimodule.cpp           # 模块隔离、导出、导入和跨模块快照
    └─ fixtures/                 # 命令行集成样例
 ```
@@ -58,6 +61,8 @@ ProjectFeather/
 `Value` 不依赖 VM；`Bytecode` 可依赖 Value 类型定义；`Vm` 依赖 Value 与 Bytecode。`Object`、`Memory` 与 `Embed` 通过窄接口接入 VM，避免 Value 反向依赖解释器。`Compiler` 只生成 Bytecode 模块，不直接调用解释循环。`Snapshot` 读取 VM 的显式帧和对象图，不依赖 C++ 调用栈。`include/Feather/Runtime.hpp` 暂时公开手写字节码所需构建器与原型，是实验性接口；稳定嵌入接口完成时再收窄公开头文件。ScriptObject 现由 VM 非移动堆持有，宿主跨 GC 使用它须持 RootHandle。
 
 `stdio.felib` 只依赖共享 `FeatherCore` 的公开嵌入接口，核心库不反向依赖标准输入输出。`feather` 和 `feathervm` 运行时从旁边的 `modules/` 装载它；`featherc` 不装载。`StdIoLibrary::GetModule()` 也允许嵌入式宿主自行装配；库不注入标准输入输出全局名。Native 库入口见 `include/Feather/NativeModule.hpp`，动态库加载与缓存位于 `src/Cli/NativeModules.cpp`。
+
+`feather-debug` 依赖 `feather-core`，核心不反向依赖调试协议库。核心仅公开 `VmDebugController` 和回调期内有效的 `VmDebugContext`；`DebugTarget`、JSON 解析、命令队列与暂停循环均在独立调试库中。宿主实现 `DebugChannel` 传输完整消息。IDE/DAP adapter、Socket 和鉴权不属于解释器或调试库。
 
 ## 里程碑
 

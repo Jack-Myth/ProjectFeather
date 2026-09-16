@@ -83,5 +83,8 @@ test('budget', BudgetTests)
 DiagnosticsTests = executable('diagnostics-tests', 'Diagnostics.cpp', dependencies : FeatherDependency)
 test('runtime-diagnostics', DiagnosticsTests)
 
+DebugTests = executable('debug-tests', 'Debug.cpp', dependencies : FeatherDebugDependency)
+test('debug-protocol', DebugTests)
+
 MultimoduleTests = executable('multimodule-tests', 'Multimodule.cpp', dependencies : FeatherDependency)
 test('multimodule', MultimoduleTests)

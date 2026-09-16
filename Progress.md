@@ -1,11 +1,11 @@
 # 脚本语言工程进度
 
 更新日期：2026-09-16
-设计依据：`SPEC-runtime-design.md`、`SPEC-syntax.md`、`SPEC-snapshot.md`、`SPEC-bytecode-format.md`、`SPEC-symbol-format.md`、`SPEC-multimodule.md`、`SPEC-import.md`、`SPEC-native-modules.md`、`SPEC-stdio.md`；实施记录见 `ROADMAP-multimodule.md` 和 `ROADMAP-runtime-diagnostics.md`，工程结构见 `ENGINEERING.md`。本文件只跟踪进度和待决事项；语义以设计规范为准。
+设计依据：`SPEC-runtime-design.md`、`SPEC-syntax.md`、`SPEC-snapshot.md`、`SPEC-bytecode-format.md`、`SPEC-symbol-format.md`、`SPEC-multimodule.md`、`SPEC-import.md`、`SPEC-native-modules.md`、`SPEC-stdio.md`、`SPEC-debug-protocol.md`；实施记录见 `ROADMAP-multimodule.md` 和 `ROADMAP-runtime-diagnostics.md`，工程结构见 `ENGINEERING.md`。本文件只跟踪进度和待决事项；语义以设计规范为准。
 
 ## 当前状态
 
-**M1 至 M5 首版及单 VM 多文件模块可运行；`var`、`def`、`export` 和三种独立命令行程序已加入。** ScriptObject 使用 VM 非移动堆；VM 可在指令安全点自动执行完整标记清除，也保留空闲时显式 GC、RootHandle、NativeObject 登记、内存与收集统计和分配故障通道。宿主可注册 native 函数、读写模块全局值。`Compile(source)` 生成模块、初始化函数、命名函数映射和导出表。实验版 v3 `.fbc` 支持独立编译和加载；可选 `.fbs` 单独保存源码位置。v3 快照已能保存/恢复模块集合、跨模块函数和对象。`SPEC-import.md` 定义旧跨 VM 代理适配器与新增的同 VM 模块感知适配器。`SPEC-stdio.md` 定义可选标准输入输出库。独立程序补充文件名诊断与执行预算；直接运行源码或显式加载符号时，Error 可显示来源位置。公开 C++ API 和磁盘格式仍处实验阶段。
+**M1 至 M5 首版、单 VM 多文件模块和嵌入式调试协议端可运行；`var`、`def`、`export` 和三种独立命令行程序已加入。** ScriptObject 使用 VM 非移动堆；VM 可在指令安全点自动执行完整标记清除，也保留空闲时显式 GC、RootHandle、NativeObject 登记、内存与收集统计和分配故障通道。宿主可注册 native 函数、读写模块全局值。`Compile(source)` 生成模块、初始化函数、命名函数映射和导出表。实验版 v3 `.fbc` 支持独立编译和加载；可选 `.fbs` 单独保存源码位置。v3 快照已能保存/恢复模块集合、跨模块函数和对象。可选 `feather-debug` 库接收宿主传输的完整 JSON 消息，并提供断点、暂停、单步、调用栈、变量和对象属性；核心只保留传输无关的安全点接口。公开 C++ API、调试协议和磁盘格式仍处实验阶段。
 
 ### 已确定的主要方向
 
@@ -15,7 +15,7 @@
 - ScriptObject 的 key 可为 string 或 number；NaN 读取和写入均返回 Error，写入不创建成员；`+0` 和 `-0` 是同一个 key。普通比较中 NaN 不等于自身。
 - 位置参数、单返回值；缺失参数采用声明的默认值，否则补 null；多余实参求值后丢弃。赋值成功留下写入值，语言层失败留下 Error。
 - 栈式 VM 已确定；第 3 节定义初版内存模块 ISA、调用帧与校验规则。`JUMP_IF` 为真时跳转并弹出条件值，NaN 条件为 true。语言层错误是普通 Error 值，不自动传播；VM/宿主致命故障不包装成 Error。
-- GC 由宿主决定触发；根集由 VM 私有维护，宿主以 AddToRoot/RemoveFromRoot 持有 GC 对象。NativeObject 本体不由 GC 回收，但其 GC 可见成员表由 VM 遍历；未登记的 C++ 成员由 NativeObject 自行管理。VM 快照只保证 VM 内部一致，宿主状态由宿主接口负责。
+- GC 在执行中的安全指令边界按动态阈值自动触发，VM 空闲时宿主也可显式触发；根集由 VM 私有维护，宿主以 AddToRoot/RemoveFromRoot 持有 GC 对象。NativeObject 本体不由 GC 回收，但其 GC 可见成员表由 VM 遍历；未登记的 C++ 成员由 NativeObject 自行管理。VM 快照只保证 VM 内部一致，宿主状态由宿主接口负责。
 
 `feather run <source.fe>`、`featherc <source.fe> -o <program.fbc>` 和 `feathervm <program.fbc>` 均已加入。运行入口先执行顶层语句，再调用可选的无参数 `main`；独立程序未注册快捷函数，会明确拒绝快捷行。嵌入式宿主可在初始化前用 `RegisterNativeFunction` 注入 `__QuickOperator…`，用 `SetGlobal` 注入一般宿主对象；编译器保留快捷行标记供加载后使用。
 
@@ -45,10 +45,11 @@
 
 - **单 VM 多文件模块**：第一版已完成；模块实例的私有全局表、函数/帧身份、显式导出、重复/循环初始化、GC 和 v3 快照见 `SPEC-multimodule.md`。CLI 宿主层已能按调用方目录解析相对 `.fe`/`.fbc` 导入并缓存文件模块。
 - **运行时源码位置诊断**：内存指令位置表、普通 Error 查询、独立 `.fbs` 与 VM 故障位置已完成；需要时的快照 Error 来源再按版本演进，v3 `.fbc` 可单独加载并使用无位置回退。
+- **嵌入式调试**：v1 Feather 调试协议、可剥离 `feather-debug`、宿主 channel、跨线程命令队列和 VM 线程内暂停检查已完成。后续以独立 adapter 实现 DAP；函数名和局部变量名需由新版 `.fbs` 提供。
 - 快照保存/恢复的返回值、代码身份、RootMetaObject 身份和宿主恢复失败语义。
 - NativeObject 的 GC 追踪与释放钩子；脚本主动构造 Error、错误字段和调试钩子形式。
 - 字节码/快照格式版本校验、恶意或损坏输入的验证策略。
 
 ## 下一个具体动作
 
-单 VM 多模块执行、跨模块快照、CLI 相对文件导入和 Native 动态库首版已完成。`stdio.felib` 可从源码或字节码程序用 `import("stdio")` 装载；同名 Native 优先、裸名 Feather 文件回退与初始化缓存见 `SPEC-native-modules.md`。下一步可增加模块目录列表的宿主/命令行修改接口，或扩展 Native 上下文服务；VM 不承担文件 IO，`.fbc` 也不打包依赖。快照有 v3 CRC32 往返和意外损坏检测；后续不扩展细碎的畸形输入组合。`Compile`、内存模块、字节码、符号及快照字节格式仍处实验阶段。
+嵌入式调试目标首版已完成；下一步优先扩展 `.fbs` 的函数名、参数名和局部槽位名，再以独立进程实现 Feather 协议到 DAP 的 adapter。具体消息传输仍由宿主负责，VM 和 `feather-debug` 不监听网络。模块目录配置和 Native 上下文服务可在调试链路稳定后继续；`Compile`、内存模块、调试协议、字节码、符号及快照字节格式仍处实验阶段。

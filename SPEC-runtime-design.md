@@ -365,6 +365,8 @@
 
 源码诊断另见 `ROADMAP-runtime-diagnostics.md`：编译器生成可选的内存指令位置表，也可写入独立 `.fbs`；VM 为首次观察到的 Error 记录每 VM 独立来源，宿主通过 `Vm::GetErrorLocation(value)` 查询。执行预算、分配和宿主回调等未捕获故障继续抛原有 C++ 异常，宿主可在捕获后通过 `Vm::GetFaultLocation()` 查询位置。最外层新执行会清除上次故障位置；继承 `std::exception` 的同一异常穿过宿主重入时保留内层位置，宿主改抛的新异常标在当前调用点。这些位置不进入 Error 值本身，也不改变 Error 的普通值语义。上述查询与尚未实现的逐次 Error 调试事件钩子是独立功能。
 
+通用嵌入式调试见 `SPEC-debug-protocol.md`。核心仅在指令前安全点调用可选 `VmDebugController`，并提供回调期间有效的只读帧、全局和对象属性视图；JSON 命令、暂停等待和宿主 channel 位于可剥离的 `feather-debug`。暂停时执行帧仍在 `ExecutionState` 中，继续作为 GC 根；协议线程不得直接访问该上下文。v1 的断点和单步不等同于上文尚未实现的“每次生成 Error”事件。
+
 ### 5.3 条件真值与数值边界
 
 > 条件不要求 bool；编译器无须做静态类型推断。`JUMP_IF` 在运行时按以下

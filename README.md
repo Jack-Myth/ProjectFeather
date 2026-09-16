@@ -1,6 +1,6 @@
 # ProjectFeather
 
-ProjectFeather 是一个使用 C++20 编写、面向宿主嵌入的小型脚本语言。当前有栈式字节码 VM、单 VM 多文件模块、对象与 MetaObject、自动非移动标记清除 GC、源码编译器、状态快照，以及源码运行、独立编译和字节码执行命令行程序。公开接口和磁盘字节格式仍处实验阶段。变量用 `var` 声明，函数用 `def` 声明，顶层导出用 `export` 修饰声明。
+ProjectFeather 是一个使用 C++20 编写、面向宿主嵌入的小型脚本语言。当前有栈式字节码 VM、单 VM 多文件模块、对象与 MetaObject、自动非移动标记清除 GC、源码编译器、状态快照、可选的嵌入式调试协议端，以及源码运行、独立编译和字节码执行命令行程序。公开接口和磁盘字节格式仍处实验阶段。变量用 `var` 声明，函数用 `def` 声明，顶层导出用 `export` 修饰声明。
 
 当前快照使用带 CRC32 校验和的 v3 格式，可保存模块身份、私有全局与跨模块调用帧，并检测意外损坏；旧版快照不再加载。快照边界见 [快照契约](SPEC-snapshot.md)。
 
@@ -15,6 +15,8 @@ meson test -C build --print-errorlogs
 ```
 
 Meson 同时生成共享核心库和 `build/modules/stdio.felib.dll`（Linux 为 `.so`）。运行 `feather`、`feathervm` 时应保留核心库与 `modules/` 相对可执行文件的目录关系。
+
+Meson 还生成可选的 `feather-debug` 共享库。`feather-core` 只含传输无关的 VM 安全点和只读暂停上下文；不链接 `feather-debug` 的宿主不包含 JSON 协议实现。链接调试库后，宿主实现 `DebugChannel`，把每条完整 JSON 消息送入 `DebugTarget::DispatchProtocolMessage()`，并把 channel 回调桥接到自己的管道、Socket、WebSocket 或 IDE adapter，即可取得断点、暂停、单步、调用栈、变量和对象属性能力。协议、线程边界与消息格式见 [调试协议](SPEC-debug-protocol.md)。
 
 直接运行 UTF-8 源文件：
 
@@ -90,3 +92,20 @@ auto Result = Machine.Run(Compiled.Functions.at("answer"));
 ```
 
 `MyDoubleFunction`、`MyHashFunction` 和 `MyHostObject` 是宿主实现的 `NativeObject` 子类。`RegisterNativeFunction` 把可调用对象绑定为全局函数；`SetGlobal` 可注入一般宿主对象。`Compiled.Initialize(Machine)` 会绑定顶层函数并执行顶层语句一次，顶层代码因此能立即调用已注册的函数。宿主跨 GC 持有脚本对象时需使用 `RootHandle`。快照由脚本调用宿主注册的 native 保存入口，在该入口中调用 `CaptureSnapshot`；恢复到新 VM 时调用 `ResumeSnapshot`。具体限制见 [源码语法](SPEC-syntax.md)、[运行时设计](SPEC-runtime-design.md) 和 [快照契约](SPEC-snapshot.md)。工程状态见 [Progress.md](Progress.md)；完整注入样例见 [快捷行测试](tests/Quick.cpp)。
+
+调试端的最小接入形态如下；`MyChannel` 只负责消息传输，不需要了解 VM 帧或对象布局：
+
+```cpp
+#include <Feather/Debug.hpp>
+
+auto Channel = std::make_shared<MyChannel>();
+auto Target = std::make_shared<Feather::DebugTarget>(Channel);
+Machine.SetDebugController(Target);
+
+// 收到一条完整的协议消息时：
+Target->DispatchProtocolMessage(
+    R"({"id":1,"method":"Debugger.enable"})");
+```
+
+`DebugChannel::SendProtocolMessage` 可能由传输分发线程或 VM 线程调用，宿主实现必须线程安全且不得抛异常。传输线程不会直接读取 VM；暂停后的检查命令由 VM 线程处理。
+传输断开时应调用 `Target->Close()` 解除可能存在的暂停；VM 空闲后再调用 `Machine.SetDebugController({})`。

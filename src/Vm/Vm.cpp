@@ -96,6 +96,90 @@ std::string ModuleNamespace::GetModuleId() const {
 
 Vm::~Vm() = default;
 
+void Vm::SetDebugController(std::shared_ptr<VmDebugController> Input) {
+    if (ActiveRuns != 0 || ActiveNativeCalls != 0 || SnapshotBusy)
+        throw std::logic_error("debug controller can only be replaced while the VM is idle");
+    DebugController = std::move(Input);
+}
+
+std::size_t VmDebugContext::GetFrameCount() const {
+    return Execution->Frames.size();
+}
+
+DebugFrameView VmDebugContext::GetFrame(std::size_t FrameId) const {
+    if (FrameId >= Execution->Frames.size()) throw std::out_of_range("debug frame ID out of range");
+    const auto& Item = Execution->Frames[Execution->Frames.size() - 1 - FrameId];
+    const auto& Owner = Item.Function->GetOwner();
+    std::string ModuleId;
+    if (Owner != Machine->Program) {
+        auto Instance = Machine->ModuleByProgram.find(Owner.get());
+        if (Instance == Machine->ModuleByProgram.end())
+            throw std::logic_error("debug frame has no module instance");
+        ModuleId = Instance->second->Id;
+    }
+    std::uint32_t FunctionId = 0;
+    bool FoundFunction = false;
+    for (std::size_t I = 0; I < Owner->Constants.size(); ++I) {
+        const auto& Constant = Owner->Constants[I];
+        if (Constant.Type == Constant::Kind::Function &&
+            Constant.Function.get() == &Item.Function->GetBody()) {
+            FunctionId = static_cast<std::uint32_t>(I);
+            FoundFunction = true;
+            break;
+        }
+    }
+    if (!FoundFunction) throw std::logic_error("debug frame function is not in its module");
+    auto Source = LocationAt(Item.Function->GetBody(), Item.Pc);
+    if (Source) Source->ModuleId = std::move(ModuleId);
+    return {FrameId, FunctionId, Item.Pc, std::move(Source), Item.Locals, Item.Stack};
+}
+
+std::vector<DebugNamedValue> VmDebugContext::GetGlobals(std::size_t FrameId) const {
+    (void)GetFrame(FrameId);
+    const auto& Internal = Execution->Frames[Execution->Frames.size() - 1 - FrameId];
+    const auto& Owner = Internal.Function->GetOwner();
+    const auto* Values = &Machine->Globals;
+    if (Owner != Machine->Program) {
+        auto Instance = Machine->ModuleByProgram.find(Owner.get());
+        if (Instance == Machine->ModuleByProgram.end())
+            throw std::logic_error("debug frame has no module instance");
+        Values = &Instance->second->Globals;
+    }
+    std::vector<DebugNamedValue> Result;
+    Result.reserve(Values->size());
+    for (const auto& [Name, Data] : *Values) Result.push_back({Name, Data});
+    std::sort(Result.begin(), Result.end(),
+              [](const auto& A, const auto& B) { return A.Name < B.Name; });
+    return Result;
+}
+
+std::vector<DebugProperty> VmDebugContext::GetProperties(const Value& Input) const {
+    Machine->ValidateOwnedValue(Input);
+    if (Input.GetType() != ValueType::Object)
+        throw std::invalid_argument("debug properties require an object");
+    std::vector<DebugProperty> Result;
+    if (auto* Script = dynamic_cast<ScriptObject*>(Input.AsObject())) {
+        Result.reserve(Script->Members.size() + (Script->MetaObject ? 1 : 0));
+        for (const auto& [Key, Data] : Script->Members) {
+            auto PublicKey = Key.Type == ValueType::String ? Value::String(Key.Text) : Value::Number(Key.Number);
+            Result.push_back({std::move(PublicKey), Data});
+        }
+        if (Script->MetaObject)
+            Result.push_back({Value::String("[[MetaObject]]"), Value::FromScript(Script->MetaObject)});
+        return Result;
+    }
+    auto Native = std::dynamic_pointer_cast<NativeObject>(Input.AsNativeObject());
+    if (!Native) return Result;
+    if (auto Error = std::dynamic_pointer_cast<ErrorObject>(Native))
+        Result.push_back({Value::String("message"), Value::String(Error->GetMessage())});
+    for (const auto& [Name, Data] : Native->GcVisibleMembers)
+        Result.push_back({Value::String(Name), Data});
+    std::sort(Result.begin(), Result.end(), [](const auto& A, const auto& B) {
+        return A.Key.AsString() < B.Key.AsString();
+    });
+    return Result;
+}
+
 Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
        std::size_t MaxInstructionsPerInvocation)
     : ScriptObjectLimit(MaxScriptObjects), InstructionLimit(MaxInstructionsPerInvocation) {
@@ -500,6 +584,7 @@ Value Vm::Execute(ExecutionState& Execution) {
     try {
     while (!Frames.empty()) {
         MaybeCollectGarbage();
+        ReachDebugSafePoint(Execution);
         Frame& Next = Frames.back();
         FaultBody = &Next.Function->GetBody();
         FaultPc = Next.Pc;
@@ -657,6 +742,7 @@ Value Vm::Execute(ExecutionState& Execution) {
             if (Frames.empty()) {
                 if (ActiveRuns == 1) {
                     FaultLocation.reset(); FaultException = {}; FaultObject = nullptr;
+                    NotifyDebugExecutionFinished(false);
                 }
                 return Result;
             }
@@ -709,6 +795,7 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         FaultObject = &Fault;
         FaultException = std::move(Thrown);
+        if (ActiveRuns == 1) NotifyDebugExecutionFinished(true);
         throw;
     } catch (...) {
         auto Thrown = std::current_exception();
@@ -718,7 +805,28 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         FaultObject = nullptr;
         FaultException = std::move(Thrown);
+        if (ActiveRuns == 1) NotifyDebugExecutionFinished(true);
         throw;
+    }
+}
+
+void Vm::ReachDebugSafePoint(ExecutionState& Execution) {
+    auto Controller = DebugController;
+    if (!Controller) return;
+    try {
+        VmDebugContext Context(this, &Execution);
+        Controller->OnSafePoint(Context);
+    } catch (...) {
+        if (DebugController == Controller) DebugController.reset();
+    }
+}
+
+void Vm::NotifyDebugExecutionFinished(bool Faulted) {
+    auto Controller = DebugController;
+    if (!Controller) return;
+    try { Controller->OnExecutionFinished(Faulted); }
+    catch (...) {
+        if (DebugController == Controller) DebugController.reset();
     }
 }
 } // namespace Feather

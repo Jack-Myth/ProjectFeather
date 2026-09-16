@@ -2,7 +2,7 @@ project(
   'project-feather',
   'cpp',
   meson_version : '>=1.11.0',
-  version : '0.1.0',
+  version : '0.2.0',
   default_options : [
     'cpp_std=c++20',
     'warning_level=2',
@@ -33,6 +33,23 @@ FeatherDependency = declare_dependency(
   link_with : FeatherCore,
   include_directories : include_directories('include'),
   compile_args : ['-DFEATHER_CORE_SHARED'],
+)
+
+# Optional transport-independent debug protocol endpoint. feather-core only knows
+# the low-level VmDebugController hook and remains usable without this library.
+FeatherDebug = shared_library(
+  'feather-debug',
+  'src/Debug/Debug.cpp',
+  dependencies : FeatherDependency,
+  include_directories : include_directories('include'),
+  cpp_args : ['-DFEATHER_DEBUG_SHARED', '-DFEATHER_DEBUG_BUILD'],
+  install : true,
+)
+FeatherDebugDependency = declare_dependency(
+  link_with : FeatherDebug,
+  dependencies : FeatherDependency,
+  include_directories : include_directories('include'),
+  compile_args : ['-DFEATHER_DEBUG_SHARED'],
 )
 install_subdir('include/Feather', install_dir : get_option('includedir'))
 
