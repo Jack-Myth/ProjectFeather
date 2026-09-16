@@ -8,7 +8,7 @@ namespace Feather {
 namespace {
 
 constexpr std::uint8_t Magic[8] = {'F', 'T', 'H', 'R', 'S', 'Y', 0, 0};
-constexpr std::uint16_t FormatVersion = 1;
+constexpr std::uint16_t FormatVersion = 3;
 constexpr std::uint16_t InstructionVersion = 1;
 constexpr std::uint32_t MaxFunctions = 65'536;
 
@@ -40,6 +40,12 @@ public:
     void U16(std::uint16_t Value) { for (unsigned I = 0; I < 2; ++I) U8(static_cast<std::uint8_t>(Value >> (8 * I))); }
     void U32(std::uint32_t Value) { for (unsigned I = 0; I < 4; ++I) U8(static_cast<std::uint8_t>(Value >> (8 * I))); }
     void U64(std::uint64_t Value) { for (unsigned I = 0; I < 8; ++I) U8(static_cast<std::uint8_t>(Value >> (8 * I))); }
+    void String(std::string_view Value) {
+        if (Value.size() > std::numeric_limits<std::uint32_t>::max())
+            Invalid("symbol string too large");
+        U32(static_cast<std::uint32_t>(Value.size()));
+        for (unsigned char Byte : Value) U8(Byte);
+    }
     void MagicBytes() { for (auto Byte : Magic) U8(Byte); }
     void PatchU32(std::size_t At, std::uint32_t Value) {
         for (unsigned I = 0; I < 4; ++I) Data[At + I] = Value >> (8 * I);
@@ -69,6 +75,14 @@ public:
     std::uint64_t U64() {
         std::uint64_t Result = 0;
         for (unsigned I = 0; I < 8; ++I) Result |= std::uint64_t(U8()) << (8 * I);
+        return Result;
+    }
+    std::string String() {
+        auto Count = U32();
+        Require(Count);
+        std::string Result(reinterpret_cast<const char*>(Bytes.data() + Position), Count);
+        Position += Count;
+        (void)Value::String(Result);
         return Result;
     }
     bool Done() const { return Position == Bytes.size(); }
@@ -109,14 +123,23 @@ std::vector<std::uint8_t> SerializeSymbols(const CompiledProgram& Input,
     Output.U64(Fingerprint(ProgramBytes));
     Output.U32(Narrow(Functions.size()));
     for (auto Index : Functions) {
-        const auto& Locations = Input.Program->Constants[Index].Function->Locations;
+        const auto& Function = *Input.Program->Constants[Index].Function;
         Output.U32(Index);
-        Output.U32(Narrow(Locations.size()));
-        for (const auto& Entry : Locations) {
+        Output.String(Function.DebugName);
+        Output.U32(Narrow(Function.Locations.size()));
+        for (const auto& Entry : Function.Locations) {
             Output.U32(Narrow(Entry.Pc));
             Output.U32(Narrow(Entry.Source.ByteOffset));
             Output.U32(Narrow(Entry.Source.Line));
             Output.U32(Narrow(Entry.Source.Column));
+            Output.U8(Entry.Breakable ? 1 : 0);
+        }
+        Output.U32(Narrow(Function.LocalVariables.size()));
+        for (const auto& Variable : Function.LocalVariables) {
+            Output.U32(Variable.Slot);
+            Output.U32(Narrow(Variable.StartPc));
+            Output.U32(Narrow(Variable.EndPc));
+            Output.String(Variable.Name);
         }
     }
     auto PayloadSize = Narrow(Output.Size() - 16 + 4);
@@ -142,22 +165,43 @@ void AttachSymbols(CompiledProgram& Input, std::span<const std::uint8_t> Bytes,
         Invalid("symbols do not match bytecode");
     auto Indices = FunctionIndices(*Input.Program);
     if (Source.U32() != Indices.size()) Invalid("symbol function count mismatch");
-    std::vector<std::vector<InstructionLocation>> Pending;
+    struct FunctionSymbols {
+        std::string Name;
+        std::vector<InstructionLocation> Locations;
+        std::vector<LocalVariableInfo> Locals;
+    };
+    std::vector<FunctionSymbols> Pending;
     Pending.reserve(Indices.size());
     for (auto Index : Indices) {
         if (Source.U32() != Index) Invalid("invalid symbol function index");
+        auto& Symbols = Pending.emplace_back();
+        Symbols.Name = Source.String();
         auto Count = Source.U32();
         if (Count > Input.Program->Constants[Index].Function->Code.size())
             Invalid("symbol location count exceeds code size");
-        auto& Locations = Pending.emplace_back();
-        Locations.reserve(Count);
+        Symbols.Locations.reserve(Count);
         for (std::uint32_t I = 0; I < Count; ++I) {
             InstructionLocation Entry;
             Entry.Pc = Source.U32();
             Entry.Source.ByteOffset = Source.U32();
             Entry.Source.Line = Source.U32();
             Entry.Source.Column = Source.U32();
-            Locations.push_back(Entry);
+            auto Breakable = Source.U8();
+            if (Breakable > 1) Invalid("invalid symbol breakable flag");
+            Entry.Breakable = Breakable != 0;
+            Symbols.Locations.push_back(Entry);
+        }
+        auto LocalCount = Source.U32();
+        if (LocalCount > Input.Program->Constants[Index].Function->LocalCount)
+            Invalid("symbol local variable count exceeds local slots");
+        Symbols.Locals.reserve(LocalCount);
+        for (std::uint32_t I = 0; I < LocalCount; ++I) {
+            LocalVariableInfo Variable;
+            Variable.Slot = Source.U32();
+            Variable.StartPc = Source.U32();
+            Variable.EndPc = Source.U32();
+            Variable.Name = Source.String();
+            Symbols.Locals.push_back(std::move(Variable));
         }
     }
     if (!Source.Done()) Invalid("trailing symbol data");
@@ -167,7 +211,9 @@ void AttachSymbols(CompiledProgram& Input, std::span<const std::uint8_t> Bytes,
     for (std::size_t I = 0; I < Indices.size(); ++I) {
         auto Index = Indices[I];
         auto Prototype = std::make_shared<FunctionPrototype>(*Trial.Constants[Index].Function);
-        Prototype->Locations = Pending[I];
+        Prototype->DebugName = std::move(Pending[I].Name);
+        Prototype->Locations = std::move(Pending[I].Locations);
+        Prototype->LocalVariables = std::move(Pending[I].Locals);
         Trial.Constants[Index].Function = std::move(Prototype);
     }
     Trial.Validate();

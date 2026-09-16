@@ -1,292 +1,30 @@
 #include <Feather/Debug.hpp>
 
+#include "../Protocol/Json.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
-#include <limits>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
-#include <variant>
 #include <vector>
 
 namespace Feather {
 namespace {
 
-class Json final {
-public:
-    using Object = std::map<std::string, Json>;
-    using Array = std::vector<Json>;
-    using Storage = std::variant<std::nullptr_t, bool, double, std::string, Object, Array>;
+using Protocol::Find;
+using Protocol::Integer;
+using Protocol::Json;
 
-    Json() : Data(nullptr) {}
-    Json(std::nullptr_t) : Data(nullptr) {}
-    Json(bool Input) : Data(Input) {}
-    Json(double Input) : Data(Input) {}
-    Json(std::uint64_t Input) : Data(static_cast<double>(Input)) {}
-    Json(std::string Input) : Data(std::move(Input)) {}
-    Json(const char* Input) : Data(std::string(Input)) {}
-    Json(Object Input) : Data(std::move(Input)) {}
-    Json(Array Input) : Data(std::move(Input)) {}
-
-    bool IsNumber() const { return std::holds_alternative<double>(Data); }
-    bool IsString() const { return std::holds_alternative<std::string>(Data); }
-    bool IsObject() const { return std::holds_alternative<Object>(Data); }
-    double Number() const { return std::get<double>(Data); }
-    const std::string& String() const { return std::get<std::string>(Data); }
-    const Object& Members() const { return std::get<Object>(Data); }
-    const Storage& Get() const { return Data; }
-private:
-    Storage Data;
-};
-
-void AppendUtf8(std::string& Output, std::uint32_t Point) {
-    if (Point <= 0x7f) Output.push_back(static_cast<char>(Point));
-    else if (Point <= 0x7ff) {
-        Output.push_back(static_cast<char>(0xc0 | (Point >> 6)));
-        Output.push_back(static_cast<char>(0x80 | (Point & 0x3f)));
-    } else if (Point <= 0xffff) {
-        Output.push_back(static_cast<char>(0xe0 | (Point >> 12)));
-        Output.push_back(static_cast<char>(0x80 | ((Point >> 6) & 0x3f)));
-        Output.push_back(static_cast<char>(0x80 | (Point & 0x3f)));
-    } else {
-        Output.push_back(static_cast<char>(0xf0 | (Point >> 18)));
-        Output.push_back(static_cast<char>(0x80 | ((Point >> 12) & 0x3f)));
-        Output.push_back(static_cast<char>(0x80 | ((Point >> 6) & 0x3f)));
-        Output.push_back(static_cast<char>(0x80 | (Point & 0x3f)));
-    }
-}
-
-class JsonParser final {
-public:
-    explicit JsonParser(std::string_view Input) : Input(Input) {}
-    Json Parse() {
-        auto Result = ParseValue(0);
-        Space();
-        if (Position != Input.size()) Fail();
-        return Result;
-    }
-private:
-    [[noreturn]] void Fail() const { throw std::invalid_argument("invalid JSON protocol message"); }
-    void Space() {
-        while (Position < Input.size() &&
-               (Input[Position] == ' ' || Input[Position] == '\t' ||
-                Input[Position] == '\r' || Input[Position] == '\n')) ++Position;
-    }
-    bool Take(char Expected) {
-        Space();
-        if (Position == Input.size() || Input[Position] != Expected) return false;
-        ++Position;
-        return true;
-    }
-    Json ParseValue(unsigned Depth) {
-        if (Depth >= 64) Fail();
-        Space();
-        if (Position == Input.size()) Fail();
-        switch (Input[Position]) {
-        case '{': return ParseObject(Depth + 1);
-        case '[': return ParseArray(Depth + 1);
-        case '"': return Json(ParseString());
-        case 't': Literal("true"); return Json(true);
-        case 'f': Literal("false"); return Json(false);
-        case 'n': Literal("null"); return Json();
-        default: return ParseNumber();
-        }
-    }
-    void Literal(std::string_view Text) {
-        if (Input.substr(Position, Text.size()) != Text) Fail();
-        Position += Text.size();
-    }
-    Json ParseObject(unsigned Depth) {
-        ++Position;
-        Json::Object Result;
-        if (Take('}')) return Result;
-        while (true) {
-            Space();
-            if (Position == Input.size() || Input[Position] != '"') Fail();
-            auto Name = ParseString();
-            if (!Take(':')) Fail();
-            if (!Result.emplace(std::move(Name), ParseValue(Depth)).second) Fail();
-            if (Take('}')) return Result;
-            if (!Take(',')) Fail();
-        }
-    }
-    Json ParseArray(unsigned Depth) {
-        ++Position;
-        Json::Array Result;
-        if (Take(']')) return Result;
-        while (true) {
-            Result.push_back(ParseValue(Depth));
-            if (Take(']')) return Result;
-            if (!Take(',')) Fail();
-        }
-    }
-    std::uint32_t Hex4() {
-        if (Position + 4 > Input.size()) Fail();
-        std::uint32_t Result = 0;
-        for (unsigned I = 0; I < 4; ++I) {
-            char C = Input[Position++];
-            unsigned Digit = C >= '0' && C <= '9' ? C - '0' :
-                C >= 'a' && C <= 'f' ? C - 'a' + 10 :
-                C >= 'A' && C <= 'F' ? C - 'A' + 10 : 16;
-            if (Digit == 16) Fail();
-            Result = Result * 16 + Digit;
-        }
-        return Result;
-    }
-    std::string ParseString() {
-        if (Input[Position++] != '"') Fail();
-        std::string Result;
-        while (Position < Input.size()) {
-            unsigned char C = static_cast<unsigned char>(Input[Position++]);
-            if (C == '"') {
-                (void)Value::String(Result);
-                return Result;
-            }
-            if (C < 0x20) Fail();
-            if (C != '\\') { Result.push_back(static_cast<char>(C)); continue; }
-            if (Position == Input.size()) Fail();
-            switch (Input[Position++]) {
-            case '"': Result.push_back('"'); break;
-            case '\\': Result.push_back('\\'); break;
-            case '/': Result.push_back('/'); break;
-            case 'b': Result.push_back('\b'); break;
-            case 'f': Result.push_back('\f'); break;
-            case 'n': Result.push_back('\n'); break;
-            case 'r': Result.push_back('\r'); break;
-            case 't': Result.push_back('\t'); break;
-            case 'u': {
-                auto Point = Hex4();
-                if (Point >= 0xd800 && Point <= 0xdbff) {
-                    if (Position + 2 > Input.size() || Input[Position] != '\\' ||
-                        Input[Position + 1] != 'u') Fail();
-                    Position += 2;
-                    auto Low = Hex4();
-                    if (Low < 0xdc00 || Low > 0xdfff) Fail();
-                    Point = 0x10000 + ((Point - 0xd800) << 10) + (Low - 0xdc00);
-                } else if (Point >= 0xdc00 && Point <= 0xdfff) Fail();
-                AppendUtf8(Result, Point);
-                break;
-            }
-            default: Fail();
-            }
-        }
-        Fail();
-    }
-    Json ParseNumber() {
-        auto Start = Position;
-        if (Input[Position] == '-') ++Position;
-        if (Position == Input.size()) Fail();
-        if (Input[Position] == '0') ++Position;
-        else {
-            if (Input[Position] < '1' || Input[Position] > '9') Fail();
-            while (Position < Input.size() && Input[Position] >= '0' && Input[Position] <= '9') ++Position;
-        }
-        if (Position < Input.size() && Input[Position] == '.') {
-            ++Position;
-            auto Fraction = Position;
-            while (Position < Input.size() && Input[Position] >= '0' && Input[Position] <= '9') ++Position;
-            if (Fraction == Position) Fail();
-        }
-        if (Position < Input.size() && (Input[Position] == 'e' || Input[Position] == 'E')) {
-            ++Position;
-            if (Position < Input.size() && (Input[Position] == '+' || Input[Position] == '-')) ++Position;
-            auto Exponent = Position;
-            while (Position < Input.size() && Input[Position] >= '0' && Input[Position] <= '9') ++Position;
-            if (Exponent == Position) Fail();
-        }
-        double Result = 0;
-        auto Text = Input.substr(Start, Position - Start);
-        auto Parsed = std::from_chars(Text.data(), Text.data() + Text.size(), Result);
-        if (Parsed.ec != std::errc{} || Parsed.ptr != Text.data() + Text.size() || !std::isfinite(Result)) Fail();
-        return Json(Result);
-    }
-    std::string_view Input;
-    std::size_t Position = 0;
-};
-
-void WriteJson(std::string& Output, const Json& Input);
-
-void WriteString(std::string& Output, std::string_view Input) {
-    constexpr char Hex[] = "0123456789abcdef";
-    Output.push_back('"');
-    for (unsigned char C : Input) {
-        switch (C) {
-        case '"': Output += "\\\""; break;
-        case '\\': Output += "\\\\"; break;
-        case '\b': Output += "\\b"; break;
-        case '\f': Output += "\\f"; break;
-        case '\n': Output += "\\n"; break;
-        case '\r': Output += "\\r"; break;
-        case '\t': Output += "\\t"; break;
-        default:
-            if (C < 0x20) {
-                Output += "\\u00";
-                Output.push_back(Hex[C >> 4]);
-                Output.push_back(Hex[C & 15]);
-            } else Output.push_back(static_cast<char>(C));
-        }
-    }
-    Output.push_back('"');
-}
-
-void WriteJson(std::string& Output, const Json& Input) {
-    const auto& Data = Input.Get();
-    if (std::holds_alternative<std::nullptr_t>(Data)) { Output += "null"; return; }
-    if (auto Value = std::get_if<bool>(&Data)) { Output += *Value ? "true" : "false"; return; }
-    if (auto Value = std::get_if<double>(&Data)) {
-        char Buffer[64];
-        auto Result = std::to_chars(Buffer, Buffer + sizeof(Buffer), *Value,
-                                    std::chars_format::general);
-        if (Result.ec != std::errc{}) throw std::runtime_error("cannot encode JSON number");
-        Output.append(Buffer, Result.ptr);
-        return;
-    }
-    if (auto Value = std::get_if<std::string>(&Data)) { WriteString(Output, *Value); return; }
-    if (auto Value = std::get_if<Json::Object>(&Data)) {
-        Output.push_back('{');
-        bool First = true;
-        for (const auto& [Name, Item] : *Value) {
-            if (!First) Output.push_back(',');
-            First = false;
-            WriteString(Output, Name); Output.push_back(':'); WriteJson(Output, Item);
-        }
-        Output.push_back('}');
-        return;
-    }
-    const auto& Value = std::get<Json::Array>(Data);
-    Output.push_back('[');
-    for (std::size_t I = 0; I < Value.size(); ++I) {
-        if (I) Output.push_back(',');
-        WriteJson(Output, Value[I]);
-    }
-    Output.push_back(']');
-}
-
-std::string Encode(const Json& Input) {
-    std::string Result;
-    WriteJson(Result, Input);
-    return Result;
-}
-
-const Json* Find(const Json::Object& Object, std::string_view Name) {
-    auto Found = Object.find(std::string(Name));
-    return Found == Object.end() ? nullptr : &Found->second;
-}
-
-std::uint64_t Integer(const Json& Input, std::string_view Name) {
-    if (!Input.IsNumber() || Input.Number() < 0 || std::floor(Input.Number()) != Input.Number() ||
-        Input.Number() > 9'007'199'254'740'991.0)
-        throw std::invalid_argument(std::string(Name) + " must be a nonnegative integer");
-    return static_cast<std::uint64_t>(Input.Number());
-}
+std::string Encode(const Json& Input) { return Protocol::EncodeJson(Input); }
 
 const Json::Object& Parameters(const Json::Object& Request) {
     auto Input = Find(Request, "params");
@@ -330,8 +68,10 @@ struct DebugTarget::Impl final {
         Json::Object Params;
     };
 
-    Impl(std::shared_ptr<DebugChannel> Input, std::size_t InputMaxMessageBytes)
-        : Channel(std::move(Input)), MaxMessageBytes(InputMaxMessageBytes) {
+    Impl(std::shared_ptr<DebugChannel> Input, DebugTargetOptions Options)
+        : Channel(std::move(Input)), MaxMessageBytes(Options.MaxMessageBytes),
+          WaitingForDebugger(Options.WaitForDebugger),
+          ReportEachExecution(Options.ReportEachExecution) {
         if (!Channel) throw std::invalid_argument("null debug channel");
         if (MaxMessageBytes == 0) throw std::invalid_argument("debug message limit must be positive");
     }
@@ -361,8 +101,11 @@ struct DebugTarget::Impl final {
     }
 
     static Json::Object SourceFields(const DebugFrameView& Frame) {
+        auto FunctionName = Frame.FunctionName.empty() ?
+            "<function #" + std::to_string(Frame.FunctionId) + ">" : std::string(Frame.FunctionName);
         Json::Object Result{{"frameId", Json(static_cast<std::uint64_t>(Frame.FrameId))},
                             {"functionId", Json(static_cast<std::uint64_t>(Frame.FunctionId))},
+                            {"functionName", Json(std::move(FunctionName))},
                             {"pc", Json(static_cast<std::uint64_t>(Frame.Pc))}};
         if (Frame.Source) {
             Result.emplace("byteOffset", Json(static_cast<std::uint64_t>(Frame.Source->ByteOffset)));
@@ -439,11 +182,30 @@ struct DebugTarget::Impl final {
         auto FrameId = Integer(*FrameValue, "frameId");
         auto Frame = Context.GetFrame(static_cast<std::size_t>(FrameId));
         Json::Array Variables;
-        if (ScopeValue->String() == "locals" || ScopeValue->String() == "stack") {
-            auto Values = ScopeValue->String() == "locals" ? Frame.Locals : Frame.Stack;
-            Variables.reserve(Values.size());
-            for (std::size_t I = 0; I < Values.size(); ++I) {
-                auto Summary = ValueSummary(Values[I]);
+        if (ScopeValue->String() == "locals") {
+            if (Frame.LocalVariables.empty()) {
+                Variables.reserve(Frame.Locals.size());
+                for (std::size_t I = 0; I < Frame.Locals.size(); ++I) {
+                    auto Summary = ValueSummary(Frame.Locals[I]);
+                    Summary.emplace("name", Json("$" + std::to_string(I)));
+                    Variables.emplace_back(std::move(Summary));
+                }
+            } else {
+                std::unordered_set<std::string> SeenNames;
+                for (auto It = Frame.LocalVariables.rbegin(); It != Frame.LocalVariables.rend(); ++It) {
+                    const auto& Variable = *It;
+                    if (Frame.Pc < Variable.StartPc || Frame.Pc >= Variable.EndPc) continue;
+                    if (!SeenNames.insert(Variable.Name).second) continue;
+                    auto Summary = ValueSummary(Frame.Locals[Variable.Slot]);
+                    Summary.emplace("name", Json(Variable.Name));
+                    Variables.emplace_back(std::move(Summary));
+                }
+                std::reverse(Variables.begin(), Variables.end());
+            }
+        } else if (ScopeValue->String() == "stack") {
+            Variables.reserve(Frame.Stack.size());
+            for (std::size_t I = 0; I < Frame.Stack.size(); ++I) {
+                auto Summary = ValueSummary(Frame.Stack[I]);
                 Summary.emplace("name", Json("$" + std::to_string(I)));
                 Variables.emplace_back(std::move(Summary));
             }
@@ -480,7 +242,7 @@ struct DebugTarget::Impl final {
         try {
             if (Message.size() > MaxMessageBytes)
                 throw std::invalid_argument("debug protocol message exceeds its size limit");
-            auto Root = JsonParser(Message).Parse();
+            auto Root = Protocol::ParseJson(Message);
             if (!Root.IsObject()) throw std::invalid_argument("request must be an object");
             const auto& Request = Root.Members();
             auto IdValue = Find(Request, "id");
@@ -513,7 +275,8 @@ struct DebugTarget::Impl final {
                 std::deque<PendingCommand> Cancelled;
                 {
                     std::lock_guard Lock(Mutex);
-                    Enabled = false; PauseRequested = false; CurrentStep = Step::None;
+                    Enabled = false; PauseRequested = false; PauseOnErrors = false;
+                    CurrentStep = Step::None;
                     WasPaused = Paused; OldStop = StopId; Paused = false;
                     Cancelled.swap(Pending);
                 }
@@ -528,6 +291,15 @@ struct DebugTarget::Impl final {
             bool IsEnabled;
             { std::lock_guard Lock(Mutex); IsEnabled = Enabled; }
             if (!IsEnabled) { Error(RequestId, "NotEnabled", "Debugger.enable is required"); return; }
+            if (Method == "Runtime.runIfWaitingForDebugger") {
+                {
+                    std::lock_guard Lock(Mutex);
+                    WaitingForDebugger = false;
+                }
+                Result(*RequestId);
+                Wake.notify_all();
+                return;
+            }
             if (Method == "Debugger.setBreakpoint") {
                 auto Module = Find(Params, "moduleId");
                 auto Line = Find(Params, "line");
@@ -565,6 +337,17 @@ struct DebugTarget::Impl final {
                 }
                 if (!Removed) Error(RequestId, "UnknownBreakpoint", "breakpointId was not found");
                 else Result(*RequestId);
+                return;
+            }
+            if (Method == "Debugger.setPauseOnErrors") {
+                auto EnabledValue = Find(Params, "enabled");
+                if (!EnabledValue || !EnabledValue->IsBool())
+                    throw std::invalid_argument("enabled must be a boolean");
+                {
+                    std::lock_guard Lock(Mutex);
+                    PauseOnErrors = EnabledValue->Bool();
+                }
+                Result(*RequestId);
                 return;
             }
             if (Method == "Debugger.pause") {
@@ -635,6 +418,30 @@ struct DebugTarget::Impl final {
         }
     }
 
+    void WaitWhilePaused(const VmDebugContext& Context) {
+        while (true) {
+            PendingCommand Command;
+            {
+                std::unique_lock Lock(Mutex);
+                Wake.wait(Lock, [&] { return !Paused || !Enabled || !Pending.empty(); });
+                if (!Paused || !Enabled) {
+                    Objects.clear();
+                    ObjectIds.clear();
+                    return;
+                }
+                Command = std::move(Pending.front());
+                Pending.pop_front();
+            }
+            ProcessPaused(Context, std::move(Command));
+            std::lock_guard Lock(Mutex);
+            if (!Paused) {
+                Objects.clear();
+                ObjectIds.clear();
+                return;
+            }
+        }
+    }
+
     void SafePoint(const VmDebugContext& Context) {
         auto Frame = Context.GetFrame(0);
         auto Current = Key(Frame);
@@ -654,7 +461,7 @@ struct DebugTarget::Impl final {
                     Context.GetFrameCount() < StepDepth;
                 if (Stop) { Reason = "step"; CurrentStep = Step::None; }
             }
-            if (Frame.Source) {
+            if (Frame.Source && Frame.Breakable) {
                 for (auto& Breakpoint : Breakpoints) {
                     bool Match = Breakpoint.Resolved ? *Breakpoint.Resolved == Current :
                         Breakpoint.ModuleId == Frame.Source->ModuleId &&
@@ -683,27 +490,30 @@ struct DebugTarget::Impl final {
         PausedFields.emplace("stopId", Json(StopId));
         Notify("Debugger.paused", std::move(PausedFields));
 
-        while (true) {
-            PendingCommand Command;
-            {
-                std::unique_lock Lock(Mutex);
-                Wake.wait(Lock, [&] { return !Paused || !Enabled || !Pending.empty(); });
-                if (!Paused || !Enabled) {
-                    Objects.clear();
-                    ObjectIds.clear();
-                    return;
-                }
-                Command = std::move(Pending.front());
-                Pending.pop_front();
-            }
-            ProcessPaused(Context, std::move(Command));
+        WaitWhilePaused(Context);
+    }
+
+    void ErrorPoint(const VmDebugContext& Context, const Value& ErrorValue,
+                    DebugErrorOrigin Origin) {
+        auto Frame = Context.GetFrame(0);
+        Json::Object ErrorSummary;
+        std::uint64_t CurrentStop;
+        {
             std::lock_guard Lock(Mutex);
-            if (!Paused) {
-                Objects.clear();
-                ObjectIds.clear();
-                return;
-            }
+            if (!Enabled || !PauseOnErrors) return;
+            Paused = true;
+            CurrentStop = ++StopId;
+            Objects.clear(); ObjectIds.clear();
+            ErrorSummary = ValueSummary(ErrorValue);
         }
+        auto Fields = SourceFields(Frame);
+        Fields.emplace("error", Json(std::move(ErrorSummary)));
+        Fields.emplace("origin", Json(Origin == DebugErrorOrigin::Operation
+            ? "operation" : "functionReturn"));
+        Fields.emplace("reason", Json("error"));
+        Fields.emplace("stopId", Json(CurrentStop));
+        Notify("Debugger.paused", std::move(Fields));
+        WaitWhilePaused(Context);
     }
 
     void Finished(bool Faulted) {
@@ -729,6 +539,7 @@ struct DebugTarget::Impl final {
             Paused = false;
             PauseRequested = false;
             CurrentStep = Step::None;
+            WaitingForDebugger = false;
             Pending.clear();
         }
         Wake.notify_all();
@@ -742,6 +553,9 @@ struct DebugTarget::Impl final {
     bool Closed = false;
     bool Paused = false;
     bool PauseRequested = false;
+    bool PauseOnErrors = false;
+    bool WaitingForDebugger = false;
+    bool ReportEachExecution = true;
     std::uint64_t StopId = 0;
     std::uint64_t NextBreakpointId = 1;
     std::vector<Breakpoint> Breakpoints;
@@ -753,12 +567,23 @@ struct DebugTarget::Impl final {
     std::vector<Value> Objects;
 };
 
-DebugTarget::DebugTarget(std::shared_ptr<DebugChannel> Channel, std::size_t MaxMessageBytes)
-    : State(std::make_unique<Impl>(std::move(Channel), MaxMessageBytes)) {}
+DebugTarget::DebugTarget(std::shared_ptr<DebugChannel> Channel, DebugTargetOptions Options)
+    : State(std::make_unique<Impl>(std::move(Channel), Options)) {}
 DebugTarget::~DebugTarget() { State->Close(); }
 
 void DebugTarget::DispatchProtocolMessage(std::string_view Message) noexcept {
     State->Dispatch(Message);
+}
+
+bool DebugTarget::WaitForExecutionPermission() noexcept {
+    std::unique_lock Lock(State->Mutex);
+    State->Wake.wait(Lock, [&] { return !State->WaitingForDebugger || State->Closed; });
+    return !State->Closed;
+}
+
+void DebugTarget::NotifyExecutionFinished(bool Faulted) noexcept {
+    try { State->Finished(Faulted); }
+    catch (...) {}
 }
 
 void DebugTarget::Close() noexcept {
@@ -775,8 +600,19 @@ void DebugTarget::OnSafePoint(const VmDebugContext& Context) {
     }
 }
 
+void DebugTarget::OnError(const VmDebugContext& Context, const Value& Error,
+                          DebugErrorOrigin Origin) {
+    try { State->ErrorPoint(Context, Error, Origin); }
+    catch (...) {
+        std::lock_guard Lock(State->Mutex);
+        State->Enabled = false;
+        State->Paused = false;
+        State->Wake.notify_all();
+    }
+}
+
 void DebugTarget::OnExecutionFinished(bool Faulted) {
-    try { State->Finished(Faulted); }
+    try { if (State->ReportEachExecution) State->Finished(Faulted); }
     catch (...) {}
 }
 

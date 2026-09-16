@@ -54,11 +54,14 @@ Value ConstantValue(const Constant& Item, const std::shared_ptr<Object>& Functio
     }
     throw std::logic_error("invalid constant kind");
 }
-std::optional<SourceLocation> LocationAt(const FunctionPrototype& Body, std::size_t Pc) {
+const InstructionLocation* LocationEntryAt(const FunctionPrototype& Body, std::size_t Pc) {
     auto Found = std::lower_bound(Body.Locations.begin(), Body.Locations.end(), Pc,
         [](const InstructionLocation& Location, std::size_t Target) { return Location.Pc < Target; });
-    if (Found == Body.Locations.end() || Found->Pc != Pc) return std::nullopt;
-    return Found->Source;
+    return Found == Body.Locations.end() || Found->Pc != Pc ? nullptr : &*Found;
+}
+std::optional<SourceLocation> LocationAt(const FunctionPrototype& Body, std::size_t Pc) {
+    auto* Found = LocationEntryAt(Body, Pc);
+    return Found ? std::optional<SourceLocation>(Found->Source) : std::nullopt;
 }
 
 bool IsIdentifier(std::string_view Name) {
@@ -109,6 +112,7 @@ std::size_t VmDebugContext::GetFrameCount() const {
 DebugFrameView VmDebugContext::GetFrame(std::size_t FrameId) const {
     if (FrameId >= Execution->Frames.size()) throw std::out_of_range("debug frame ID out of range");
     const auto& Item = Execution->Frames[Execution->Frames.size() - 1 - FrameId];
+    auto Pc = FrameId == 0 && TopFramePc ? *TopFramePc : Item.Pc;
     const auto& Owner = Item.Function->GetOwner();
     std::string ModuleId;
     if (Owner != Machine->Program) {
@@ -129,9 +133,12 @@ DebugFrameView VmDebugContext::GetFrame(std::size_t FrameId) const {
         }
     }
     if (!FoundFunction) throw std::logic_error("debug frame function is not in its module");
-    auto Source = LocationAt(Item.Function->GetBody(), Item.Pc);
+    auto* Location = LocationEntryAt(Item.Function->GetBody(), Pc);
+    auto Source = Location ? std::optional<SourceLocation>(Location->Source) : std::nullopt;
     if (Source) Source->ModuleId = std::move(ModuleId);
-    return {FrameId, FunctionId, Item.Pc, std::move(Source), Item.Locals, Item.Stack};
+    const auto& Body = Item.Function->GetBody();
+    return {FrameId, FunctionId, Body.DebugName, Pc, std::move(Source),
+            !Location || Location->Breakable, Item.Locals, Item.Stack, Body.LocalVariables};
 }
 
 std::vector<DebugNamedValue> VmDebugContext::GetGlobals(std::size_t FrameId) const {
@@ -613,7 +620,8 @@ Value Vm::Execute(ExecutionState& Execution) {
             Current.Stack.pop_back();
             return Result;
         };
-        auto Push = [&](Value Input) {
+        auto Push = [&](Value Input,
+                        std::optional<DebugErrorOrigin> DebugOrigin = std::nullopt) {
             ValidateOwnedValue(Input);
             if (Current.Stack.size() >= 65'536) throw std::runtime_error("VM stack limit exceeded");
             if (Input.IsError()) {
@@ -629,25 +637,31 @@ Value Vm::Execute(ExecutionState& Execution) {
                 }
             }
             Current.Stack.push_back(std::move(Input));
+            if (DebugOrigin && Current.Stack.back().IsError())
+                ReachDebugError(Execution, Current.Stack.back(), *DebugOrigin, InstructionStart);
         };
         std::function<void(Value, std::vector<Value>, unsigned, bool)> DispatchCall;
         DispatchCall = [&](Value Target, std::vector<Value> Args, unsigned Depth, bool MetaCall) {
-            if (Depth >= 64) { Push(Error("MetaObject call cycle")); return; }
+            if (Depth >= 64) {
+                Push(Error("MetaObject call cycle"), DebugErrorOrigin::Operation); return;
+            }
             if (Target.GetType() != ValueType::Object) {
-                Push(Error(MetaCall ? "metafunction is not callable" : "value is not callable")); return;
+                Push(Error(MetaCall ? "metafunction is not callable" : "value is not callable"),
+                     DebugErrorOrigin::Operation); return;
             }
             auto ObjectValue = Target.AsObject();
             if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue)) {
                 auto Meta = Script->GetMetaObject();
                 auto Method = Meta ? Meta->GetRaw(Value::String("__call")) : std::nullopt;
-                if (!Method) { Push(Error("__call is missing")); return; }
+                if (!Method) { Push(Error("__call is missing"), DebugErrorOrigin::Operation); return; }
                 Args.insert(Args.begin(), Target);
                 DispatchCall(*Method, std::move(Args), Depth + 1, true);
                 return;
             }
             auto Native = dynamic_cast<NativeObject*>(ObjectValue);
             if (!Native || !Native->IsCallable()) {
-                Push(Error(MetaCall ? "metafunction is not callable" : "value is not callable")); return;
+                Push(Error(MetaCall ? "metafunction is not callable" : "value is not callable"),
+                     DebugErrorOrigin::Operation); return;
             }
             if (Native->GetObjectType() == ObjectType::Function) {
                 auto Function = std::static_pointer_cast<FunctionObject>(Target.AsNativeObject());
@@ -657,7 +671,7 @@ Value Vm::Execute(ExecutionState& Execution) {
                 PushFrame(Function, Args);
             } else {
                 ActiveRunGuard NativeGuard(ActiveNativeCalls);
-                Push(Native->Call(Args));
+                Push(Native->Call(Args), DebugErrorOrigin::FunctionReturn);
             }
         };
         switch (Instruction) {
@@ -677,7 +691,10 @@ Value Vm::Execute(ExecutionState& Execution) {
         case Op::GetGlobal: {
             auto Id = ReadU32(Code, Current.Pc);
             auto Found = FrameGlobals.find(FrameOwner->Constants[Id].Text);
-            Push(Found == FrameGlobals.end() ? Error("undefined global") : Found->second); break;
+            if (Found == FrameGlobals.end())
+                Push(Error("undefined global"), DebugErrorOrigin::Operation);
+            else Push(Found->second);
+            break;
         }
         case Op::SetGlobal: {
             auto Id = ReadU32(Code, Current.Pc);
@@ -692,7 +709,7 @@ Value Vm::Execute(ExecutionState& Execution) {
                 Push(Value::String(Left.AsString() + Right.AsString())); break;
             }
             if (Left.GetType() != ValueType::Number || Right.GetType() != ValueType::Number) {
-                Push(Error("invalid operands")); break;
+                Push(Error("invalid operands"), DebugErrorOrigin::Operation); break;
             }
             double A = Left.AsNumber(), B = Right.AsNumber();
             switch (Instruction) {
@@ -714,7 +731,8 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         case Op::Negate: {
             auto Input = Pop();
-            Push(Input.GetType() == ValueType::Number ? Value::Number(-Input.AsNumber()) : Error("invalid operand"));
+            if (Input.GetType() == ValueType::Number) Push(Value::Number(-Input.AsNumber()));
+            else Push(Error("invalid operand"), DebugErrorOrigin::Operation);
             break;
         }
         case Op::Jump: case Op::JumpIf: {
@@ -738,6 +756,8 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         case Op::Return: {
             auto Result = Pop();
+            if (Result.IsError())
+                ReachDebugError(Execution, Result, DebugErrorOrigin::FunctionReturn, InstructionStart);
             Frames.pop_back();
             if (Frames.empty()) {
                 if (ActiveRuns == 1) {
@@ -754,33 +774,39 @@ Value Vm::Execute(ExecutionState& Execution) {
             break;
         case Op::GetMember: {
             auto Key = Pop(); auto Target = Pop();
-            if (Target.GetType() != ValueType::Object) { Push(Error("value has no members")); break; }
+            if (Target.GetType() != ValueType::Object) {
+                Push(Error("value has no members"), DebugErrorOrigin::Operation); break;
+            }
             auto ObjectValue = Target.AsObject();
             if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue)) {
                 if ((Key.GetType() != ValueType::String && Key.GetType() != ValueType::Number) ||
                     (Key.GetType() == ValueType::Number && std::isnan(Key.AsNumber()))) {
-                    Push(Error("invalid ScriptObject key")); break;
+                    Push(Error("invalid ScriptObject key"), DebugErrorOrigin::Operation); break;
                 }
                 auto Found = Script->GetRaw(Key);
-                if (Found) { Push(*Found); break; }
+                if (Found) { Push(*Found, DebugErrorOrigin::Operation); break; }
                 auto Meta = Script->GetMetaObject();
                 auto Method = Meta ? Meta->GetRaw(Value::String("__index")) : std::nullopt;
-                if (!Method) { Push(Error("member does not exist")); break; }
+                if (!Method) {
+                    Push(Error("member does not exist"), DebugErrorOrigin::Operation); break;
+                }
                 DispatchCall(*Method, {Target, Key}, 0, true);
             } else if (auto Native = dynamic_cast<NativeObject*>(ObjectValue))
-                Push(Native->GetMember(Key));
-            else Push(Error("value has no members"));
+                Push(Native->GetMember(Key), DebugErrorOrigin::Operation);
+            else Push(Error("value has no members"), DebugErrorOrigin::Operation);
             break;
         }
         case Op::SetMember: {
             auto Input = Pop(); auto Key = Pop(); auto Target = Pop();
-            if (Target.GetType() != ValueType::Object) { Push(Error("value has no members")); break; }
+            if (Target.GetType() != ValueType::Object) {
+                Push(Error("value has no members"), DebugErrorOrigin::Operation); break;
+            }
             auto ObjectValue = Target.AsObject();
             if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue))
-                Push(Script->SetRaw(Key, Input));
+                Push(Script->SetRaw(Key, Input), DebugErrorOrigin::Operation);
             else if (auto Native = dynamic_cast<NativeObject*>(ObjectValue))
-                Push(Native->SetMember(Key, Input));
-            else Push(Error("value has no members"));
+                Push(Native->SetMember(Key, Input), DebugErrorOrigin::Operation);
+            else Push(Error("value has no members"), DebugErrorOrigin::Operation);
             break;
         }
         default: throw std::logic_error("invalid opcode");
@@ -816,6 +842,18 @@ void Vm::ReachDebugSafePoint(ExecutionState& Execution) {
     try {
         VmDebugContext Context(this, &Execution);
         Controller->OnSafePoint(Context);
+    } catch (...) {
+        if (DebugController == Controller) DebugController.reset();
+    }
+}
+
+void Vm::ReachDebugError(ExecutionState& Execution, const Value& Error,
+                         DebugErrorOrigin Origin, std::size_t InstructionPc) {
+    auto Controller = DebugController;
+    if (!Controller) return;
+    try {
+        VmDebugContext Context(this, &Execution, InstructionPc);
+        Controller->OnError(Context, Error, Origin);
     } catch (...) {
         if (DebugController == Controller) DebugController.reset();
     }

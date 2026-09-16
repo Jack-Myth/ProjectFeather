@@ -352,20 +352,23 @@
         保持 Error 作为轻量普通 Value，不因调试需求增加正常路径的开销
 - [ ] 是否允许脚本主动构造 Error（如 `Error("自定义消息")`）：
 - [x] **调试钩子（与正常执行路径解耦）**：
-  - 调试模式下，运行时在每一次生成新 Error 的时刻，无条件通知调试器（不做任何
-        "是否值得上报"的价值判断，运行时只负责如实上报）
-  - 上报的 Error 需标记**来源**：由 VM 内部（未定义操作）产生 / 由脚本代码主动
-        构造产生 —— 调试器据此自行决定过滤 / 忽略哪些来源的 Error，运行时不参与
-        此过滤逻辑
-  - 非调试模式下不产生逐次事件上报开销；普通源码来源查询的成本另按下文约定
+  - 安装 `VmDebugController` 后，VM 在操作结果为 Error 或函数返回 Error 的结果边界
+        调用 `OnError`。这是结果事件而不是对象创建事件：同一个 Error 经过多个函数
+        返回边界可以报告多次，成员操作取得已有 Error 也会报告。
+  - 来源分为 `Operation` 与 `FunctionReturn`。前者覆盖非法运算/调用、未定义全局、
+        取成员和写成员等操作；后者覆盖 Native 与 Feather 函数返回 Error。
+  - 普通局部读取及读取已存在的 Error 全局不报告。Error 的普通值语义、控制流和
+        `GetErrorLocation` 首次来源记录均不受调试事件影响。
+  - `DebugTarget` 默认忽略该回调；前端通过 `Debugger.setPauseOnErrors` 选择是否暂停，
+        暂停事件仍带来源与 Error 摘要。未安装控制器时不发生协议事件或暂停。
 - [ ] 错误信息如何传递给宿主：宿主每次调用脚本函数后，通过 `get_type` 检查
       返回值是否为 Error 类型，由宿主决定后续处理（详见第 7 节）
 - [x] Error 仅表示语言层操作错误。OOM、VM 内部故障及宿主故障不进入语言的
       Error 体系；由宿主自行处理，或走 VM 的致命故障路径。
 
-源码诊断另见 `ROADMAP-runtime-diagnostics.md`：编译器生成可选的内存指令位置表，也可写入独立 `.fbs`；VM 为首次观察到的 Error 记录每 VM 独立来源，宿主通过 `Vm::GetErrorLocation(value)` 查询。执行预算、分配和宿主回调等未捕获故障继续抛原有 C++ 异常，宿主可在捕获后通过 `Vm::GetFaultLocation()` 查询位置。最外层新执行会清除上次故障位置；继承 `std::exception` 的同一异常穿过宿主重入时保留内层位置，宿主改抛的新异常标在当前调用点。这些位置不进入 Error 值本身，也不改变 Error 的普通值语义。上述查询与尚未实现的逐次 Error 调试事件钩子是独立功能。
+源码诊断另见 `ROADMAP-runtime-diagnostics.md`：编译器生成可选的内存指令位置表，也可写入独立 `.fbs`；VM 为首次观察到的 Error 记录每 VM 独立来源，宿主通过 `Vm::GetErrorLocation(value)` 查询。执行预算、分配和宿主回调等未捕获故障继续抛原有 C++ 异常，宿主可在捕获后通过 `Vm::GetFaultLocation()` 查询位置。最外层新执行会清除上次故障位置；继承 `std::exception` 的同一异常穿过宿主重入时保留内层位置，宿主改抛的新异常标在当前调用点。这些位置不进入 Error 值本身，也不改变 Error 的普通值语义。普通来源查询记录对象的首次位置；Error 调试事件观察每个结果边界，两者相互独立。
 
-通用嵌入式调试见 `SPEC-debug-protocol.md`。核心仅在指令前安全点调用可选 `VmDebugController`，并提供回调期间有效的只读帧、全局和对象属性视图；JSON 命令、暂停等待和宿主 channel 位于可剥离的 `feather-debug`。暂停时执行帧仍在 `ExecutionState` 中，继续作为 GC 根；协议线程不得直接访问该上下文。v1 的断点和单步不等同于上文尚未实现的“每次生成 Error”事件。
+通用嵌入式调试见 `SPEC-debug-protocol.md`。核心在指令前安全点及 Error 结果边界调用可选 `VmDebugController`，并提供回调期间有效的只读帧、全局和对象属性视图；JSON 命令、暂停等待和宿主 channel 位于可剥离的 `feather-debug`。暂停时执行帧仍在 `ExecutionState` 中，继续作为 GC 根；协议线程不得直接访问该上下文。
 
 ### 5.3 条件真值与数值边界
 

@@ -1,0 +1,6 @@
+option(
+  'debugger',
+  type : 'boolean',
+  value : true,
+  description : 'Bundle debug support and build the TCP console debugger',
+)

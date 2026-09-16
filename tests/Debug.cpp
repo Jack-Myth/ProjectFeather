@@ -20,6 +20,13 @@ void Check(bool Good, const char* Message) {
     if (!Good) throw std::runtime_error(Message);
 }
 
+std::size_t Count(std::string_view Text, std::string_view Fragment) {
+    std::size_t Result = 0;
+    for (std::size_t At = 0; (At = Text.find(Fragment, At)) != std::string_view::npos;
+         At += Fragment.size()) ++Result;
+    return Result;
+}
+
 class RecordingChannel final : public DebugChannel {
 public:
     void SendProtocolMessage(std::string_view Message) noexcept override {
@@ -58,7 +65,13 @@ private:
 class ThrowingController final : public VmDebugController {
 public:
     void OnSafePoint(const VmDebugContext&) override { throw std::runtime_error("debug failure"); }
+    void OnError(const VmDebugContext&, const Value&, DebugErrorOrigin) override {}
     void OnExecutionFinished(bool) override {}
+};
+
+struct TargetCloser {
+    std::shared_ptr<DebugTarget> Target;
+    ~TargetCloser() { if (Target) Target->Close(); }
 };
 
 std::uint32_t AddFunction(const std::shared_ptr<Module>& Program, Builder Code,
@@ -77,12 +90,16 @@ void ProtocolRoundTrip() {
         "  var result = value.answer + 2;\n"
         "  return result;\n"
         "}\n";
-    auto Program = Compile(SourceText);
+    auto SourceProgram = Compile(SourceText);
+    auto Symbols = SerializeSymbols(SourceProgram);
+    auto Program = DeserializeProgram(SerializeProgram(SourceProgram));
+    AttachSymbols(Program, Symbols);
     Vm Machine(Program.Program);
     Check(!Program.Initialize(Machine).IsError(), "debug fixture initializer failed");
 
     auto Channel = std::make_shared<RecordingChannel>();
     auto Target = std::make_shared<DebugTarget>(Channel);
+    TargetCloser Close{Target};
     Machine.SetDebugController(Target);
     Target->DispatchProtocolMessage(R"({"id":1,"method":"Debugger.enable"})");
     Check(Channel->WaitFor(R"("id":1)").find(R"("protocolVersion":"1.0")") != std::string::npos,
@@ -106,13 +123,14 @@ void ProtocolRoundTrip() {
     Target->DispatchProtocolMessage(R"({"id":3,"method":"Debugger.getStackTrace"})");
     auto Stack = Channel->WaitFor(R"("id":3)");
     Check(Stack.find(R"("frames":[)") != std::string::npos &&
-          Stack.find(R"("functionId":)") != std::string::npos,
+          Stack.find(R"("functionName":"main")") != std::string::npos,
           "stack trace response is incomplete");
 
     Target->DispatchProtocolMessage(
         R"({"id":4,"method":"Debugger.getVariables","params":{"frameId":0,"scope":"locals"}})");
     auto Variables = Channel->WaitFor(R"("id":4)");
-    Check(Variables.find(R"("name":"$0")") != std::string::npos &&
+    Check(Variables.find(R"("name":"value")") != std::string::npos &&
+          Variables.find(R"("name":"result")") == std::string::npos &&
           Variables.find(R"("objectId":1)") != std::string::npos,
           "local object was not exposed through a stop-scoped handle");
 
@@ -175,6 +193,7 @@ void SteppingAcrossCalls() {
     Vm Machine(Program);
     auto Channel = std::make_shared<RecordingChannel>();
     auto Target = std::make_shared<DebugTarget>(Channel);
+    TargetCloser Close{Target};
     Machine.SetDebugController(Target);
     Target->DispatchProtocolMessage(R"({"id":20,"method":"Debugger.enable"})");
     Channel->WaitFor(R"("id":20)");
@@ -213,6 +232,7 @@ void ExternalPauseAndDisable() {
     Program.Initialize(Machine);
     auto Channel = std::make_shared<RecordingChannel>();
     auto Target = std::make_shared<DebugTarget>(Channel);
+    TargetCloser Close{Target};
     Machine.SetDebugController(Target);
     Target->DispatchProtocolMessage(R"({"id":30,"method":"Debugger.enable"})");
     Channel->WaitFor(R"("id":30)");
@@ -246,6 +266,155 @@ void ExternalPauseAndDisable() {
     Check(Channel->WaitFor(R"("id":35)").find(R"("code":"Closed")") != std::string::npos,
           "closed target was enabled again");
 }
+
+void ShadowedLocals() {
+    auto Source = Compile(
+        "def main(x) {\n"
+        "  {\n"
+        "    var x = 2;\n"
+        "    x = x + 1;\n"
+        "  }\n"
+        "  return x;\n"
+        "}\n");
+    Vm Machine(Source.Program);
+    Source.Initialize(Machine);
+    auto Channel = std::make_shared<RecordingChannel>();
+    auto Target = std::make_shared<DebugTarget>(Channel);
+    TargetCloser Close{Target};
+    Machine.SetDebugController(Target);
+    Target->DispatchProtocolMessage(R"({"id":40,"method":"Debugger.enable"})");
+    Channel->WaitFor(R"("id":40)");
+    Target->DispatchProtocolMessage(
+        R"({"id":41,"method":"Debugger.setBreakpoint","params":{"moduleId":"","line":4}})");
+    Channel->WaitFor(R"("id":41)");
+    auto Result = std::async(std::launch::async, [&] {
+        return Machine.Run(Source.Functions.at("main"), {Value::Number(1)});
+    });
+    Channel->WaitFor(R"("method":"Debugger.paused")");
+    Target->DispatchProtocolMessage(
+        R"({"id":42,"method":"Debugger.getVariables","params":{"frameId":0,"scope":"locals"}})");
+    auto Variables = Channel->WaitFor(R"("id":42)");
+    Check(Count(Variables, R"("name":"x")") == 1 &&
+          Variables.find(R"("value":2)") != std::string::npos,
+          "shadowed outer local was not hidden");
+    Target->DispatchProtocolMessage(R"({"id":43,"method":"Debugger.resume"})");
+    Check(Result.wait_for(5s) == std::future_status::ready && Result.get().AsNumber() == 1,
+          "shadowed-local inspection changed execution");
+}
+
+void StartupGate() {
+    auto Channel = std::make_shared<RecordingChannel>();
+    auto Target = std::make_shared<DebugTarget>(Channel, DebugTargetOptions{
+        .WaitForDebugger = true,
+    });
+    TargetCloser Close{Target};
+    auto Waiting = std::async(std::launch::async, [&] {
+        return Target->WaitForExecutionPermission();
+    });
+    Check(Waiting.wait_for(50ms) == std::future_status::timeout,
+          "debug startup gate did not wait");
+    Target->DispatchProtocolMessage(R"({"id":50,"method":"Debugger.enable"})");
+    Channel->WaitFor(R"("id":50)");
+    Target->DispatchProtocolMessage(
+        R"({"id":51,"method":"Runtime.runIfWaitingForDebugger"})");
+    Check(Channel->WaitFor(R"("id":51)").find(R"("result":{})") != std::string::npos,
+          "startup release response missing");
+    Check(Waiting.wait_for(5s) == std::future_status::ready && Waiting.get(),
+          "startup release did not wake its host");
+
+    auto ClosedTarget = std::make_shared<DebugTarget>(Channel, DebugTargetOptions{
+        .WaitForDebugger = true,
+    });
+    auto ClosedWait = std::async(std::launch::async, [&] {
+        return ClosedTarget->WaitForExecutionPermission();
+    });
+    ClosedTarget->Close();
+    Check(ClosedWait.wait_for(5s) == std::future_status::ready && !ClosedWait.get(),
+          "closing the target did not cancel startup wait");
+}
+
+void SyntheticInitializerDoesNotCaptureLineBreakpoint() {
+    auto SourceProgram = Compile("def main() { return 7; }\n");
+    auto Symbols = SerializeSymbols(SourceProgram);
+    auto Program = DeserializeProgram(SerializeProgram(SourceProgram));
+    AttachSymbols(Program, Symbols);
+    Vm Machine(Program.Program);
+    auto Channel = std::make_shared<RecordingChannel>();
+    auto Target = std::make_shared<DebugTarget>(Channel);
+    TargetCloser Close{Target};
+    Machine.SetDebugController(Target);
+    Target->DispatchProtocolMessage(R"({"id":60,"method":"Debugger.enable"})");
+    Channel->WaitFor(R"("id":60)");
+    Target->DispatchProtocolMessage(
+        R"({"id":61,"method":"Debugger.setBreakpoint","params":{"moduleId":"","line":1}})");
+    Channel->WaitFor(R"("id":61)");
+
+    auto Initializer = std::async(std::launch::async, [&] { return Program.Initialize(Machine); });
+    Check(Initializer.wait_for(5s) == std::future_status::ready && !Initializer.get().IsError(),
+          "function binding captured a source breakpoint");
+
+    auto Result = std::async(std::launch::async, [&] {
+        return Machine.Run(Program.Functions.at("main"));
+    });
+    auto Paused = Channel->WaitFor(R"("method":"Debugger.paused")");
+    Check(Paused.find(R"("functionName":"main")") != std::string::npos,
+          "same-line breakpoint did not resolve in the function body");
+    Target->DispatchProtocolMessage(R"({"id":62,"method":"Debugger.resume"})");
+    Check(Result.wait_for(5s) == std::future_status::ready && Result.get().AsNumber() == 7,
+          "same-line breakpoint changed execution");
+}
+
+void ErrorBreakpoints() {
+    auto Program = Compile(
+        "def pass(value) { return value; }\n"
+        "def main() { return pass(1 + \"bad\"); }\n");
+    Vm Machine(Program.Program);
+    Program.Initialize(Machine);
+    auto Channel = std::make_shared<RecordingChannel>();
+    auto Target = std::make_shared<DebugTarget>(Channel);
+    TargetCloser Close{Target};
+    Machine.SetDebugController(Target);
+    Target->DispatchProtocolMessage(R"({"id":70,"method":"Debugger.enable"})");
+    Channel->WaitFor(R"("id":70)");
+    auto Unobserved = std::async(std::launch::async, [&] {
+        return Machine.Run(Program.Functions.at("main"));
+    });
+    Check(Unobserved.wait_for(5s) == std::future_status::ready && Unobserved.get().IsError(),
+          "Error breakpoints were not disabled by default");
+    Target->DispatchProtocolMessage(
+        R"({"id":71,"method":"Debugger.setPauseOnErrors","params":{"enabled":true}})");
+    Check(Channel->WaitFor(R"("id":71)").find(R"("result":{})") != std::string::npos,
+          "Error breakpoint enable response missing");
+
+    auto Result = std::async(std::launch::async, [&] {
+        return Machine.Run(Program.Functions.at("main"));
+    });
+    auto Operation = Channel->WaitFor(R"("method":"Debugger.paused")");
+    Check(Operation.find(R"("reason":"error")") != std::string::npos &&
+          Operation.find(R"("origin":"operation")") != std::string::npos &&
+          Operation.find("Error: invalid operands") != std::string::npos &&
+          Operation.find(R"("objectId":1)") != std::string::npos &&
+          Operation.find(R"("line":2)") != std::string::npos,
+          "operator Error did not create a typed stop at its source");
+    Target->DispatchProtocolMessage(
+        R"({"id":72,"method":"Debugger.getProperties","params":{"objectId":1}})");
+    Check(Channel->WaitFor(R"("id":72)").find("invalid operands") != std::string::npos,
+          "paused Error could not be inspected through its object ID");
+
+    auto Start = Channel->Count();
+    Target->DispatchProtocolMessage(R"({"id":73,"method":"Debugger.resume"})");
+    auto Returned = Channel->WaitFor(R"("method":"Debugger.paused")", Start);
+    Check(Returned.find(R"("origin":"functionReturn")") != std::string::npos &&
+          Returned.find(R"("functionName":"pass")") != std::string::npos,
+          "function Error return did not create a typed stop");
+
+    Target->DispatchProtocolMessage(
+        R"({"id":74,"method":"Debugger.setPauseOnErrors","params":{"enabled":false}})");
+    Channel->WaitFor(R"("id":74)");
+    Target->DispatchProtocolMessage(R"({"id":75,"method":"Debugger.resume"})");
+    Check(Result.wait_for(5s) == std::future_status::ready && Result.get().IsError(),
+          "Error breakpoints changed the function result");
+}
 }
 
 int main() {
@@ -253,6 +422,10 @@ int main() {
         ProtocolRoundTrip();
         SteppingAcrossCalls();
         ExternalPauseAndDisable();
+        ShadowedLocals();
+        StartupGate();
+        SyntheticInitializerDoesNotCaptureLineBreakpoint();
+        ErrorBreakpoints();
         ControllerIsolation();
         std::cout << "Debug protocol tests passed\n";
         return 0;

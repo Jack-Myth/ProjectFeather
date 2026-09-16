@@ -167,15 +167,28 @@ struct SourceLocation {
 struct InstructionLocation {
     std::size_t Pc = 0;
     SourceLocation Source;
+    // Synthetic instructions retain a diagnostic location but are skipped by
+    // source breakpoints. Stepping may still observe them.
+    bool Breakable = true;
+};
+
+struct LocalVariableInfo {
+    std::string Name;
+    std::uint32_t Slot = 0;
+    std::size_t StartPc = 0;
+    std::size_t EndPc = 0;
 };
 
 struct DebugFrameView {
     std::size_t FrameId = 0;
     std::uint32_t FunctionId = 0;
+    std::string_view FunctionName;
     std::size_t Pc = 0;
     std::optional<SourceLocation> Source;
+    bool Breakable = true;
     std::span<const Value> Locals;
     std::span<const Value> Stack;
+    std::span<const LocalVariableInfo> LocalVariables;
 };
 
 struct DebugNamedValue {
@@ -188,7 +201,12 @@ struct DebugProperty {
     Value Data;
 };
 
-// A read-only view valid only during VmDebugController::OnSafePoint.
+// Describes the result boundary at which an Error became observable. Error is
+// still an ordinary language value; this classification only exists for the
+// optional debugger hook.
+enum class DebugErrorOrigin { Operation, FunctionReturn };
+
+// A read-only view valid only during the active VmDebugController callback.
 class FEATHER_API VmDebugContext final {
 public:
     std::size_t GetFrameCount() const;
@@ -197,10 +215,12 @@ public:
     std::vector<DebugProperty> GetProperties(const Value& Input) const;
 private:
     friend class Vm;
-    VmDebugContext(const Vm* Machine, const ExecutionState* Execution)
-        : Machine(Machine), Execution(Execution) {}
+    VmDebugContext(const Vm* Machine, const ExecutionState* Execution,
+                   std::optional<std::size_t> TopFramePc = std::nullopt)
+        : Machine(Machine), Execution(Execution), TopFramePc(TopFramePc) {}
     const Vm* Machine;
     const ExecutionState* Execution;
+    std::optional<std::size_t> TopFramePc;
 };
 
 // Optional low-level hook implemented by embeddable debugger components.
@@ -208,6 +228,8 @@ class FEATHER_API VmDebugController {
 public:
     virtual ~VmDebugController() = default;
     virtual void OnSafePoint(const VmDebugContext& Context) = 0;
+    virtual void OnError(const VmDebugContext& Context, const Value& Error,
+                         DebugErrorOrigin Origin) = 0;
     virtual void OnExecutionFinished(bool Faulted) = 0;
 };
 
@@ -231,6 +253,8 @@ struct FunctionPrototype {
     std::vector<std::uint8_t> Code;
     // Optional debug data; .fbc omits it and a matching .fbs may supply it.
     std::vector<InstructionLocation> Locations;
+    std::string DebugName;
+    std::vector<LocalVariableInfo> LocalVariables;
     std::uint32_t ParameterCount = 0;
     std::uint32_t LocalCount = 0;
     std::vector<std::optional<Value>> Defaults;
@@ -333,6 +357,8 @@ private:
     void ValidateOwnedValue(const Value& Input) const;
     Value Execute(ExecutionState& Execution);
     void ReachDebugSafePoint(ExecutionState& Execution);
+    void ReachDebugError(ExecutionState& Execution, const Value& Error,
+                         DebugErrorOrigin Origin, std::size_t InstructionPc);
     void NotifyDebugExecutionFinished(bool Faulted);
     std::shared_ptr<Module> Program;
     std::shared_ptr<Module> SourceProgram;

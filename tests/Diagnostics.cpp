@@ -86,6 +86,28 @@ int main() {
         Check(SymbolOrigin && SymbolOrigin->ByteOffset == Origin->ByteOffset &&
               SymbolOrigin->Line == Origin->Line && SymbolOrigin->Column == Origin->Column,
               "symbol artifact did not restore cross-function location");
+        Check(WithSymbols.Program->Constants.at(WithSymbols.Functions.at("main"))
+                  .Function->DebugName == "main",
+              "symbol artifact did not restore function names");
+
+        auto Named = Compile("def inspect(arg) { var local = arg; return local; }");
+        auto NamedBytes = SerializeProgram(Named);
+        auto NamedLoaded = DeserializeProgram(NamedBytes);
+        Check(SerializeProgram(NamedLoaded) == NamedBytes,
+              "debug names changed the bytecode artifact");
+        Check(NamedLoaded.Program->Constants.at(NamedLoaded.Functions.at("inspect"))
+                  .Function->LocalVariables.empty(),
+              "bytecode unexpectedly retained debug locals");
+        AttachSymbols(NamedLoaded, SerializeSymbols(Named));
+        const auto& NamedBody = *NamedLoaded.Program->Constants.at(
+            NamedLoaded.Functions.at("inspect")).Function;
+        Check(NamedBody.DebugName == "inspect" && NamedBody.LocalVariables.size() == 2 &&
+              NamedBody.LocalVariables[0].Name == "arg" &&
+              NamedBody.LocalVariables[0].StartPc == 0 &&
+              NamedBody.LocalVariables[0].EndPc == NamedBody.Code.size() &&
+              NamedBody.LocalVariables[1].Name == "local" &&
+              NamedBody.LocalVariables[1].StartPc < NamedBody.LocalVariables[1].EndPc,
+              "symbol artifact did not restore local variable scopes");
 
         auto Wrong = DeserializeProgram(SerializeProgram(Compile("def main() { return 2; }")));
         try { AttachSymbols(Wrong, Symbols); throw std::runtime_error("mismatched symbols accepted"); }
@@ -179,6 +201,14 @@ int main() {
         auto& Body = *Source.Program->Constants.at(Source.Functions.at("helper")).Function;
         Body.Locations.front().Pc += 1;
         try { Source.Program->Validate(); throw std::runtime_error("bad debug PC accepted"); }
+        catch (const std::invalid_argument&) {}
+
+        auto InvalidLocals = Compile("def bad(arg) { return arg; }");
+        auto& BadBody = *InvalidLocals.Program->Constants.at(
+            InvalidLocals.Functions.at("bad")).Function;
+        BadBody.LocalVariables.front().EndPc = 0;
+        try { InvalidLocals.Program->Validate();
+              throw std::runtime_error("bad debug local range accepted"); }
         catch (const std::invalid_argument&) {}
 
         std::cout << "Runtime diagnostics tests passed\n";

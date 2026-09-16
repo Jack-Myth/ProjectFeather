@@ -449,28 +449,45 @@ private:
 
 class Emitter {
 public:
-    Emitter(Module& Program, const Token& At) : Program(Program), At(At), CurrentAt(&this->At) { Scopes.emplace_back(); }
+    Emitter(Module& Program, const Token& At) : Program(Program), At(At), CurrentAt(&this->At) {
+        Scopes.emplace_back();
+        ScopeSymbols.emplace_back();
+    }
     void AddParameters(const FunctionAst& Function) {
         if (Function.Parameters.size() > 65'536) Fail(Function.At, "too many parameters");
-        for (const auto& Name : Function.Parameters) Scopes.back()[Name] = LocalCount++;
+        for (const auto& Name : Function.Parameters) {
+            auto Slot = LocalCount++;
+            Scopes.back()[Name] = Slot;
+            ScopeSymbols.back().push_back(LocalVariables.size());
+            LocalVariables.push_back({Name, Slot, 0, std::numeric_limits<std::size_t>::max()});
+        }
     }
     void EmitFunctionBody(const FunctionAst& Function) {
         for (const auto& Statement : Function.Body->Children) EmitStatement(*Statement, false);
+        BreakableGuard Synthetic(CurrentBreakable, false);
         Emit(Op::Null); Emit(Op::Return);
     }
     void EmitInitializer(const ProgramAst& Ast,
                          const std::unordered_map<std::string, std::uint32_t>& Functions) {
         for (const auto& Function : Ast.Functions) {
             SourceGuard Source(CurrentAt, Function.At);
+            BreakableGuard Synthetic(CurrentBreakable, false);
             EmitU32(Op::Const, Functions.at(Function.Name));
             EmitU32(Op::SetGlobal, StringConstant(Function.Name));
             Emit(Op::Pop);
         }
         for (const auto& Statement : Ast.Statements) EmitStatement(*Statement, true);
+        BreakableGuard Synthetic(CurrentBreakable, false);
         Emit(Op::Null); Emit(Op::Return);
     }
     std::vector<std::uint8_t> Finish() { return std::move(Code).Finish(); }
     std::vector<InstructionLocation> FinishLocations() { return std::move(Locations); }
+    std::vector<LocalVariableInfo> FinishLocalVariables() {
+        auto End = Code.Offset();
+        for (auto& Variable : LocalVariables)
+            if (Variable.EndPc == std::numeric_limits<std::size_t>::max()) Variable.EndPc = End;
+        return std::move(LocalVariables);
+    }
     std::uint32_t GetLocalCount() const { return LocalCount; }
 private:
     struct SourceGuard {
@@ -479,8 +496,17 @@ private:
         const Token*& Current;
         const Token* Previous;
     };
+    struct BreakableGuard {
+        BreakableGuard(bool& Current, bool Value) : Current(Current), Previous(Current) {
+            Current = Value;
+        }
+        ~BreakableGuard() { Current = Previous; }
+        bool& Current;
+        bool Previous;
+    };
     void RecordLocation() {
-        Locations.push_back({Code.Offset(), {CurrentAt->Offset, CurrentAt->Line, CurrentAt->Column}});
+        Locations.push_back({Code.Offset(),
+            {CurrentAt->Offset, CurrentAt->Line, CurrentAt->Column}, CurrentBreakable});
     }
     std::uint32_t ConstantFor(const Value& Input, const Token& At) {
         if (Program.Constants.size() >= 65'536) Fail(At, "too many constants");
@@ -505,9 +531,16 @@ private:
     std::size_t EmitJump(Op Instruction) { RecordLocation(); return Code.EmitJump(Instruction); }
     void EmitBlock(const Node& Block, bool NewScope) {
         DepthGuard Guard(Depth, Block.At);
-        if (NewScope) Scopes.emplace_back();
+        if (NewScope) {
+            Scopes.emplace_back();
+            ScopeSymbols.emplace_back();
+        }
         for (const auto& Statement : Block.Children) EmitStatement(*Statement, false);
-        if (NewScope) Scopes.pop_back();
+        if (NewScope) {
+            for (auto Index : ScopeSymbols.back()) LocalVariables[Index].EndPc = Code.Offset();
+            ScopeSymbols.pop_back();
+            Scopes.pop_back();
+        }
     }
     void EmitStatement(const Node& Statement, bool TopLevel) {
         DepthGuard Guard(Depth, Statement.At);
@@ -524,6 +557,9 @@ private:
                 auto Slot = LocalCount++;
                 Scopes.back()[Statement.Name] = Slot;
                 EmitU32(Op::SetLocal, Slot);
+                ScopeSymbols.back().push_back(LocalVariables.size());
+                LocalVariables.push_back({Statement.Name, Slot, Code.Offset(),
+                    std::numeric_limits<std::size_t>::max()});
             }
             Emit(Op::Pop); break;
         }
@@ -631,11 +667,14 @@ private:
     Module& Program;
     Token At;
     const Token* CurrentAt;
+    bool CurrentBreakable = true;
     Builder Code;
     std::vector<InstructionLocation> Locations;
     std::uint32_t LocalCount = 0;
     std::size_t Depth = 0;
     std::vector<std::unordered_map<std::string, std::uint32_t>> Scopes;
+    std::vector<std::vector<std::size_t>> ScopeSymbols;
+    std::vector<LocalVariableInfo> LocalVariables;
 };
 
 } // namespace
@@ -665,14 +704,18 @@ CompiledProgram Compile(std::string_view Source) {
         Output.AddParameters(Function);
         Output.EmitFunctionBody(Function);
         auto& Prototype = *Result.Program->Constants[Result.Functions.at(Function.Name)].Function;
+        Prototype.DebugName = Function.Name;
         Prototype.LocalCount = Output.GetLocalCount();
+        Prototype.LocalVariables = Output.FinishLocalVariables();
         Prototype.Code = Output.Finish();
         Prototype.Locations = Output.FinishLocations();
     }
     Token Start{TokenKind::End, {}, 0, 1, 1};
     Emitter Output(*Result.Program, Start);
     Output.EmitInitializer(Ast, Result.Functions);
+    Initializer->DebugName = "<initializer>";
     Initializer->LocalCount = Output.GetLocalCount();
+    Initializer->LocalVariables = Output.FinishLocalVariables();
     Initializer->Code = Output.Finish();
     Initializer->Locations = Output.FinishLocations();
     try { Result.Program->Validate(); }

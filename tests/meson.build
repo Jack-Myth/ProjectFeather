@@ -83,8 +83,18 @@ test('budget', BudgetTests)
 DiagnosticsTests = executable('diagnostics-tests', 'Diagnostics.cpp', dependencies : FeatherDependency)
 test('runtime-diagnostics', DiagnosticsTests)
 
-DebugTests = executable('debug-tests', 'Debug.cpp', dependencies : FeatherDebugDependency)
-test('debug-protocol', DebugTests)
+if get_option('debugger')
+  DebugTests = executable('debug-tests', 'Debug.cpp', dependencies : FeatherDependency)
+  test('debug-protocol', DebugTests)
+  DapTests = executable('dap-tests', 'Dap.cpp', dependencies : FeatherDependency)
+  test('dap-adapter', DapTests)
+  SocketTests = executable('socket-tests', 'Socket.cpp', '../src/Cli/Socket.cpp',
+    dependencies : [FeatherDependency] + SocketSystemDependencies)
+  test('debug-socket-transport', SocketTests)
+  test('debug-wait-requires-listener', FeatherVmCli,
+    args : [MultiRootFbc, '--wait-debugger'], depends : MultiRootFbc,
+    expected_fail : true)
+endif
 
 MultimoduleTests = executable('multimodule-tests', 'Multimodule.cpp', dependencies : FeatherDependency)
 test('multimodule', MultimoduleTests)

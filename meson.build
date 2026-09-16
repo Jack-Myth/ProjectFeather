@@ -13,8 +13,7 @@ if host_machine.system() == 'windows'
   add_project_arguments('/wd4251', language : 'cpp')
 endif
 
-FeatherCore = shared_library(
-  'feather-core',
+FeatherSources = files(
   'src/Value/Value.cpp',
   'src/Bytecode/Bytecode.cpp',
   'src/Bytecode/ProgramImage.cpp',
@@ -24,46 +23,72 @@ FeatherCore = shared_library(
   'src/Compiler/Compiler.cpp',
   'src/Embed/Import.cpp',
   'src/Snapshot/Snapshot.cpp',
+)
+
+if get_option('debugger')
+  FeatherSources += files(
+    'src/Protocol/Json.cpp',
+    'src/Debug/Debug.cpp',
+    'src/Debug/Dap.cpp',
+  )
+endif
+
+# Core and the optional debugger are one position-independent static runtime.
+# Interpreter binaries link it whole so the debugger is really bundled;
+# the compiler and native modules pull only referenced objects. No target
+# requires a sibling feather-core.dll.
+FeatherRuntime = static_library(
+  'feather-runtime',
+  FeatherSources,
   include_directories : include_directories('include'),
-  cpp_args : ['-DFEATHER_CORE_SHARED', '-DFEATHER_CORE_BUILD'],
+  pic : true,
   install : true,
 )
 
 FeatherDependency = declare_dependency(
-  link_with : FeatherCore,
+  link_with : FeatherRuntime,
   include_directories : include_directories('include'),
-  compile_args : ['-DFEATHER_CORE_SHARED'],
 )
-
-# Optional transport-independent debug protocol endpoint. feather-core only knows
-# the low-level VmDebugController hook and remains usable without this library.
-FeatherDebug = shared_library(
-  'feather-debug',
-  'src/Debug/Debug.cpp',
-  dependencies : FeatherDependency,
+FeatherBundledDependency = declare_dependency(
+  link_whole : FeatherRuntime,
   include_directories : include_directories('include'),
-  cpp_args : ['-DFEATHER_DEBUG_SHARED', '-DFEATHER_DEBUG_BUILD'],
-  install : true,
-)
-FeatherDebugDependency = declare_dependency(
-  link_with : FeatherDebug,
-  dependencies : FeatherDependency,
-  include_directories : include_directories('include'),
-  compile_args : ['-DFEATHER_DEBUG_SHARED'],
 )
 install_subdir('include/Feather', install_dir : get_option('includedir'))
 
 NativeLoaderSystemDependency = meson.get_compiler('cpp').find_library('dl', required : false)
+SocketSystemDependencies = []
+if get_option('debugger') and host_machine.system() == 'windows'
+  SocketSystemDependencies += meson.get_compiler('cpp').find_library('ws2_32', required : true)
+endif
 
-FeatherCli = executable('feather', 'src/Cli/Main.cpp', 'src/Cli/File.cpp',
-  'src/Cli/Runner.cpp', 'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp',
-  dependencies : [FeatherDependency, NativeLoaderSystemDependency], install : true)
+FeatherCliSources = files('src/Cli/Main.cpp', 'src/Cli/File.cpp', 'src/Cli/Runner.cpp',
+  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp')
+FeatherVmCliSources = files('src/Cli/VmMain.cpp', 'src/Cli/File.cpp', 'src/Cli/Runner.cpp',
+  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp')
+FeatherCliArguments = []
+if get_option('debugger')
+  FeatherCliSources += files('src/Cli/Socket.cpp', 'src/Cli/DebugHost.cpp')
+  FeatherVmCliSources += files('src/Cli/Socket.cpp', 'src/Cli/DebugHost.cpp')
+  FeatherCliArguments += '-DFEATHER_CLI_DEBUGGER=1'
+endif
+
+FeatherCli = executable('feather', FeatherCliSources,
+  cpp_args : FeatherCliArguments,
+  dependencies : [FeatherBundledDependency, NativeLoaderSystemDependency] + SocketSystemDependencies,
+  install : true)
 FeatherCompilerCli = executable('featherc', 'src/Cli/CompilerMain.cpp',
   'src/Cli/File.cpp', dependencies : FeatherDependency, install : true)
-FeatherVmCli = executable('feathervm', 'src/Cli/VmMain.cpp',
-  'src/Cli/File.cpp', 'src/Cli/Runner.cpp', 'src/Cli/ModuleLoader.cpp',
-  'src/Cli/NativeModules.cpp',
-  dependencies : [FeatherDependency, NativeLoaderSystemDependency], install : true)
+FeatherVmCli = executable('feathervm', FeatherVmCliSources,
+  cpp_args : FeatherCliArguments,
+  dependencies : [FeatherBundledDependency, NativeLoaderSystemDependency] + SocketSystemDependencies,
+  install : true)
+
+if get_option('debugger')
+  FeatherDebuggerCli = executable('feather-debugger',
+    'src/Cli/DebuggerMain.cpp', 'src/Cli/Socket.cpp',
+    dependencies : [FeatherDependency] + SocketSystemDependencies,
+    install : true)
+endif
 
 subdir('modules')
 subdir('tests')

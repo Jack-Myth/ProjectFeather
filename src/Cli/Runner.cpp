@@ -29,13 +29,14 @@ void CheckResult(const Value& Result, const char* Stage, const Vm& Machine) {
 } // namespace
 
 int RunProgram(const CompiledProgram& Program, const std::filesystem::path& EntryPath,
-               ModuleFileKind Kind) {
+               ModuleFileKind Kind, std::shared_ptr<VmDebugController> DebugController) {
     if (Program.UsesQuickOperators)
         throw std::runtime_error("quick operators require host-provided __QuickOperator functions");
     constexpr std::size_t MaxCliScriptObjects = 100'000;
     constexpr std::size_t MaxCliInstructions = 10'000'000;
     NativeModules Native(std::cin, std::cout);
     Vm Machine(Program.Program, MaxCliScriptObjects, MaxCliInstructions);
+    Machine.SetDebugController(std::move(DebugController));
     struct NativeRootGuard {
         NativeModules& Owner;
         ~NativeRootGuard() { Owner.ReleaseRoots(); }

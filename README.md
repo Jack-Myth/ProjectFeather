@@ -14,9 +14,9 @@ meson compile -C build
 meson test -C build --print-errorlogs
 ```
 
-Meson 同时生成共享核心库和 `build/modules/stdio.felib.dll`（Linux 为 `.so`）。运行 `feather`、`feathervm` 时应保留核心库与 `modules/` 相对可执行文件的目录关系。
+Meson 生成一个位置无关的静态 `feather-runtime`，命令行程序把它完整链接进各自的 exe，不再依赖项目自己的 core/debug DLL；`build/modules/stdio.felib.dll`（Linux 为 `.so`）仍是按需加载的 Native 模块。默认 runtime 同时包含传输无关的 `DebugTarget` 和 Feather-to-DAP adapter。若要构建不含 JSON 调试实现的精简解释器，使用 `meson setup build-nodebug -Ddebugger=false`；VM 的低层安全点接口仍留在 core 中，debug/DAP 头文件对应实现则不可链接。
 
-Meson 还生成可选的 `feather-debug` 共享库。`feather-core` 只含传输无关的 VM 安全点和只读暂停上下文；不链接 `feather-debug` 的宿主不包含 JSON 协议实现。链接调试库后，宿主实现 `DebugChannel`，把每条完整 JSON 消息送入 `DebugTarget::DispatchProtocolMessage()`，并把 channel 回调桥接到自己的管道、Socket、WebSocket 或 IDE adapter，即可取得断点、暂停、单步、调用栈、变量和对象属性能力。协议、线程边界与消息格式见 [调试协议](SPEC-debug-protocol.md)。
+宿主实现 `DebugChannel`，把每条完整 JSON 消息送入 `DebugTarget::DispatchProtocolMessage()`，即可取得源码断点、可选的 Error 结果断点、暂停、单步、调用栈、变量和对象属性。仓库同时提供最小的 `feather-debugger` 控制台前端；它与解释器之间只有一条双向 TCP 连接，脚本 stdin/stdout 不承载调试数据。需要接 IDE 时再实现 `DapChannel`，把 DAP 与 target 两侧的完整消息交给 `DapAdapter`；DAP 的 `setExceptionBreakpoints` 中 `error` filter 会控制 Error 停顿。协议见 [Feather 调试协议](SPEC-debug-protocol.md)、[控制台调试器](SPEC-debugger-cli.md) 和 [DAP adapter](SPEC-dap-adapter.md)。
 
 直接运行 UTF-8 源文件：
 
@@ -28,9 +28,18 @@ build\featherc.exe hello.fe -o hello.fbc --symbols hello.fbs
 build\feathervm.exe hello.fbc --symbols hello.fbs
 ```
 
+控制台调试分两个终端启动。解释器会在连接建立后继续等待 `run`，因此可先设置断点：
+
+```text
+build\feather.exe debug --listen 127.0.0.1:4711 --wait-debugger hello.fe
+build\feather-debugger.exe --connect 127.0.0.1:4711
+```
+
+字节码对应使用 `build\feathervm.exe hello.fbc --symbols hello.fbs --debug-listen 127.0.0.1:4711 --wait-debugger`。`--debug-listen` 单独使用时只开启异步监听，程序立即执行，可供调试器附加到仍在运行的程序；只有再给出 `--wait-debugger` 才等待调试器连接和 `run` 命令。当前 TCP 没有鉴权和加密，只应监听本机回环地址。`feather-debugger` 中输入 `help` 可查看命令；`errors on` 开启 Error 结果断点，默认关闭。
+
 `featherc` 只生成文件，不执行源码；`feather` 和 `feathervm` 先执行顶层语句，然后调用存在时的无参数 `def main()`。不要求定义 `main`，返回的非 Error 值不打印。用法错误的退出码为 2，编译、文件读取、VM 故障以及初始化或 `main` 返回 Error 的退出码为 1。独立运行程序没有注入快捷行所需的四个全局函数，因此它们会明确拒绝含快捷行的程序。一般表达式语句丢弃 Error 的语言语义仍然适用。`.fbc` 文件格式见 [字节码格式](SPEC-bytecode-format.md)。
 
-独立程序的错误会标出输入文件；`feather run` 的初始化或 `main` 返回 Error 时还会显示可用的源码字节偏移与行列。当前 v3 `.fbc` 不保存位置表；需要同样的诊断时可另存独立 `.fbs`，并在 `feathervm` 运行时显式指定。普通运行只读 `.fbc`，不会自动加载符号。VM 故障也会在有位置时标出当前指令。`featherc` 写入失败会标出输出文件。符号格式见 [符号文件格式](SPEC-symbol-format.md)。`feather` 和 `feathervm` 每次最外层执行最多运行 10,000,000 条指令，并限制 100,000 个同时存活的 ScriptObject（含 RootMetaObject）；VM 在安全的指令边界自动回收不可达对象，并在达到硬上限前强制尝试一次完整收集。超出指令预算或收集后仍达到对象上限时以 VM 故障退出。嵌入式宿主可在 `Vm` 构造时自行设置这两项限额，默认不限制指令数；仍可在 VM 空闲时显式调用 `CollectGarbage()`。
+独立程序的错误会标出输入文件；`feather run` 的初始化或 `main` 返回 Error 时还会显示可用的源码字节偏移与行列。当前 v3 `.fbc` 不保存调试表；需要同样的诊断或具名调试栈时可另存独立 v3 `.fbs`，并在 `feathervm` 运行时显式指定。v3 符号还保存函数显示名、参数名、局部变量名、词法生命周期和源码位置是否允许设置断点。普通运行只读 `.fbc`，不会自动加载符号。VM 故障也会在有位置时标出当前指令。`featherc` 写入失败会标出输出文件。符号格式见 [符号文件格式](SPEC-symbol-format.md)。`feather` 和 `feathervm` 每次最外层执行最多运行 10,000,000 条指令，并限制 100,000 个同时存活的 ScriptObject（含 RootMetaObject）；VM 在安全的指令边界自动回收不可达对象，并在达到硬上限前强制尝试一次完整收集。超出指令预算或收集后仍达到对象上限时以 VM 故障退出。嵌入式宿主可在 `Vm` 构造时自行设置这两项限额，默认不限制指令数；仍可在 VM 空闲时显式调用 `CollectGarbage()`。
 
 `import("name")` 是宿主注册的普通全局函数。编译器和 VM 不加载依赖，也不跨 VM 传递脚本对象；宿主可用 `RegisterModuleImport` 把其他 Feather 文件装入同一 VM，也可用旧 `RegisterImport` 和 `NativeObject` 代理子 VM。接口与代理边界见 [import 契约](SPEC-import.md)。独立运行程序的宿主解析器支持 `import("stdio")`、模块目录中的裸名 Feather 文件，以及 `import("./math")`、`import("../shared/util.fe")` 这样的相对文件标识。裸名从可执行文件旁的 `modules/` 搜索，Native 动态库优先；相对标识由真正的调用方文件目录解析。`feather run` 读取相应 `.fe`，`feathervm` 读取同名 `.fbc`；先用 `featherc` 分别编译各文件，产物按相同目录关系放置。含 `.fe` 后缀的相对标识在字节码运行时映射到 `.fbc`。Native 库约定见 [Native 模块规范](SPEC-native-modules.md)。
 
@@ -109,3 +118,14 @@ Target->DispatchProtocolMessage(
 
 `DebugChannel::SendProtocolMessage` 可能由传输分发线程或 VM 线程调用，宿主实现必须线程安全且不得抛异常。传输线程不会直接读取 VM；暂停后的检查命令由 VM 线程处理。
 传输断开时应调用 `Target->Close()` 解除可能存在的暂停；VM 空闲后再调用 `Machine.SetDebugController({})`。
+
+DAP adapter 的最小装配同样只需要一个宿主 channel：
+
+```cpp
+#include <Feather/Dap.hpp>
+
+auto Adapter = std::make_shared<Feather::DapAdapter>(
+    DapChannel, Feather::DapAdapterOptions{.PrimarySourcePath = "main.fe"});
+// IDE 收到完整 DAP JSON：Adapter->DispatchDapMessage(message);
+// target 收到完整 Feather JSON：Adapter->DispatchTargetMessage(message);
+```

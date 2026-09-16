@@ -97,6 +97,24 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
                 Invalid("invalid debug instruction location");
         }
     }
+    if (!Function.DebugName.empty()) (void)Value::String(Function.DebugName);
+    if (Function.LocalVariables.size() > Function.LocalCount)
+        Invalid("too many debug local variables");
+    std::vector<bool> SeenLocalSlots(Function.LocalCount, false);
+    for (const auto& Variable : Function.LocalVariables) {
+        if (Variable.Name.empty()) Invalid("empty debug local variable name");
+        (void)Value::String(Variable.Name);
+        if (Variable.Slot >= Function.LocalCount || SeenLocalSlots[Variable.Slot])
+            Invalid("invalid or duplicate debug local variable slot");
+        SeenLocalSlots[Variable.Slot] = true;
+        if (Variable.StartPc >= Variable.EndPc || Variable.EndPc > Code.size() ||
+            !Indices.contains(Variable.StartPc) ||
+            (Variable.EndPc != Code.size() && !Indices.contains(Variable.EndPc)))
+            Invalid("invalid debug local variable range");
+        if (Variable.Slot < Function.ParameterCount &&
+            (Variable.StartPc != 0 || Variable.EndPc != Code.size()))
+            Invalid("debug parameter range must cover the function");
+    }
     std::vector<int> Heights(Instructions.size(), -1);
     std::queue<std::size_t> Pending;
     Heights[0] = 0;
