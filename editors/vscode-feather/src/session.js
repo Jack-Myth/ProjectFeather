@@ -4,22 +4,33 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { FramedConnection, connect, findAvailablePort } = require('./transport');
 
+function pathKey(value, platform = process.platform) {
+  const paths = platform === 'win32' ? path.win32 : path;
+  const normalized = paths.normalize(paths.resolve(value));
+  return platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
 class FeatherDebugSession {
   constructor(dependencies = {}) {
     this.spawn = dependencies.spawn || spawn;
     this.connect = dependencies.connect || connect;
     this.findAvailablePort = dependencies.findAvailablePort || findAvailablePort;
+    this.platform = dependencies.platform || process.platform;
+    this.kill = dependencies.kill || process.kill;
     this.sink = () => {};
     this.outputSequence = 1;
     this.targetSequence = 1;
     this.nextReference = 1;
     this.pending = new Map();
+    this.clientPending = new Map();
     this.references = new Map();
     this.sourceBreakpoints = new Map();
     this.primarySource = '';
     this.connection = undefined;
     this.child = undefined;
     this.ownsChild = false;
+    this.terminalProcessId = undefined;
+    this.supportsRunInTerminalRequest = false;
     this.disposed = false;
   }
 
@@ -42,7 +53,16 @@ class FeatherDebugSession {
   }
 
   handleMessage(message) {
-    if (!message || message.type !== 'request') return;
+    if (!message) return;
+    if (message.type === 'response') {
+      const pending = this.clientPending.get(message.request_seq);
+      if (!pending) return;
+      this.clientPending.delete(message.request_seq);
+      if (message.success) pending.resolve(message.body || {});
+      else pending.reject(new Error(message.message || `${message.command} request failed`));
+      return;
+    }
+    if (message.type !== 'request') return;
     Promise.resolve(this.dispatch(message)).catch(error => this.fail(message, error));
   }
 
@@ -50,6 +70,7 @@ class FeatherDebugSession {
     const args = request.arguments || {};
     switch (request.command) {
       case 'initialize':
+        this.supportsRunInTerminalRequest = Boolean(args.supportsRunInTerminalRequest);
         this.respond(request, {
           supportsConfigurationDoneRequest: true,
           supportsTerminateRequest: false,
@@ -135,9 +156,28 @@ class FeatherDebugSession {
     const runtime = args.runtimeExecutable || 'feather';
     const runtimeArgs = Array.isArray(args.runtimeArgs) ? args.runtimeArgs : [];
     this.primarySource = path.resolve(args.program);
+    const targetArgs = [...runtimeArgs, 'debug', '--listen', `${host}:${port}`,
+      '--wait-debugger', this.primarySource];
+    if (args.console !== 'internalConsole' && this.supportsRunInTerminalRequest) {
+      const result = await this.clientRequest('runInTerminal', {
+        kind: 'integrated',
+        title: 'Feather Debug',
+        cwd: path.dirname(this.primarySource),
+        args: [runtime, ...targetArgs]
+      });
+      if (Number.isSafeInteger(result.processId)) this.terminalProcessId = result.processId;
+      try {
+        const socket = await this.connect(host, port, args.connectTimeout || 5000, true);
+        this.attachSocket(socket);
+      } catch (error) {
+        this.stopOwnedProcess();
+        throw error;
+      }
+      return;
+    }
     this.ownsChild = true;
     this.child = this.spawn(runtime,
-      [...runtimeArgs, 'debug', '--listen', `${host}:${port}`, '--wait-debugger', this.primarySource],
+      targetArgs,
       { cwd: path.dirname(this.primarySource), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     this.child.stdout.on('data', data => this.output('stdout', data));
     this.child.stderr.on('data', data => this.output('stderr', data));
@@ -174,6 +214,14 @@ class FeatherDebugSession {
 
   output(category, data) {
     this.event('output', { category, output: String(data) });
+  }
+
+  clientRequest(command, args = {}) {
+    const seq = this.outputSequence++;
+    return new Promise((resolve, reject) => {
+      this.clientPending.set(seq, { resolve, reject });
+      this.sink({ seq, type: 'request', command, arguments: args });
+    });
   }
 
   targetRequest(method, params = {}) {
@@ -214,6 +262,7 @@ class FeatherDebugSession {
         break;
       case 'Debugger.executionFinished':
         this.resetReferences();
+        this.terminalProcessId = undefined;
         this.event('terminated');
         break;
       case 'Debugger.breakpointResolved':
@@ -237,7 +286,7 @@ class FeatherDebugSession {
   async setBreakpoints(request, args) {
     const sourcePath = args.source && args.source.path;
     if (!sourcePath) throw new Error('setBreakpoints requires source.path');
-    const key = path.normalize(sourcePath);
+    const key = pathKey(sourcePath, this.platform);
     const old = this.sourceBreakpoints.get(key) || [];
     for (const id of old) await this.targetRequest('Debugger.removeBreakpoint', { breakpointId: id });
     const ids = [];
@@ -255,7 +304,7 @@ class FeatherDebugSession {
   }
 
   moduleId(sourcePath) {
-    return this.primarySource && path.normalize(path.resolve(sourcePath)) === path.normalize(this.primarySource)
+    return this.primarySource && pathKey(sourcePath, this.platform) === pathKey(this.primarySource, this.platform)
       ? '' : sourcePath;
   }
 
@@ -351,6 +400,13 @@ class FeatherDebugSession {
       this.connection = undefined;
     }
     if (this.ownsChild && this.child && this.child.exitCode === null) this.child.kill();
+    this.stopOwnedProcess();
+  }
+
+  stopOwnedProcess() {
+    if (!this.terminalProcessId) return;
+    try { this.kill(this.terminalProcessId); } catch (_) {}
+    this.terminalProcessId = undefined;
   }
 
   dispose() {
@@ -358,9 +414,12 @@ class FeatherDebugSession {
     this.disposed = true;
     if (this.connection) this.connection.close();
     if (this.ownsChild && this.child && this.child.exitCode === null) this.child.kill();
+    this.stopOwnedProcess();
     for (const pending of this.pending.values()) pending.reject(new Error('debug session disposed'));
     this.pending.clear();
+    for (const pending of this.clientPending.values()) pending.reject(new Error('debug session disposed'));
+    this.clientPending.clear();
   }
 }
 
-module.exports = { FeatherDebugSession };
+module.exports = { FeatherDebugSession, pathKey };

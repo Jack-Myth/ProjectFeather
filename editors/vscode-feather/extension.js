@@ -1,10 +1,10 @@
 'use strict';
 
-const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
 const { FeatherDebugSession } = require('./src/session');
 const { completionModel } = require('./src/completion');
+const { finalizeConfiguration } = require('./src/configuration');
 
 class InlineAdapter {
   constructor(session) {
@@ -41,14 +41,11 @@ class ConfigurationProvider {
       vscode.window.showErrorMessage('A Feather attach configuration requires "port".');
       return undefined;
     }
-    if (config.program && !path.isAbsolute(config.program) && folder)
-      config.program = path.join(folder.uri.fsPath, config.program);
-    if (config.request === 'launch' && !config.runtimeExecutable) {
-      const workspace = folder && folder.uri.fsPath;
-      const candidate = workspace && path.join(workspace, 'build', process.platform === 'win32' ? 'feather.exe' : 'feather');
-      config.runtimeExecutable = candidate && fs.existsSync(candidate) ? candidate : 'feather';
-    }
     return config;
+  }
+
+  resolveDebugConfigurationWithSubstitutedVariables(folder, config) {
+    return finalizeConfiguration(folder && folder.uri.fsPath, config, fs.existsSync);
   }
 }
 

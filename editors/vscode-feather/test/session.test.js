@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { FeatherDebugSession } = require('../src/session');
+const { FeatherDebugSession, pathKey } = require('../src/session');
 
 function request(seq, command, args = {}) {
   return { seq, type: 'request', command, arguments: args };
@@ -12,9 +12,39 @@ test('initialize advertises Feather Error breakpoints', async () => {
   const output = [];
   const session = new FeatherDebugSession();
   session.setMessageSink(message => output.push(message));
-  await session.dispatch(request(1, 'initialize'));
+  await session.dispatch(request(1, 'initialize', { supportsRunInTerminalRequest: true }));
   assert.equal(output[0].success, true);
   assert.equal(output[0].body.exceptionBreakpointFilters[0].filter, 'error');
+  assert.equal(session.supportsRunInTerminalRequest, true);
+});
+
+test('launch uses the integrated terminal when the client supports it', async () => {
+  const output = [];
+  const socket = { on() {}, write() {}, destroy() {} };
+  const session = new FeatherDebugSession({
+    findAvailablePort: async () => 4711,
+    connect: async () => socket
+  });
+  session.supportsRunInTerminalRequest = true;
+  session.setMessageSink(message => {
+    output.push(message);
+    if (message.type === 'request' && message.command === 'runInTerminal') {
+      queueMicrotask(() => session.handleMessage({
+        seq: 90, type: 'response', request_seq: message.seq,
+        command: message.command, success: true, body: { processId: 1234 }
+      }));
+    }
+  });
+
+  await session.startLaunch({ program: 'main.fe', runtimeExecutable: 'feather' });
+
+  const launch = output.find(message => message.command === 'runInTerminal');
+  assert.equal(launch.arguments.kind, 'integrated');
+  assert.deepEqual(launch.arguments.args.slice(0, 5),
+    ['feather', 'debug', '--listen', '127.0.0.1:4711', '--wait-debugger']);
+  assert.equal(session.terminalProcessId, 1234);
+  session.terminalProcessId = undefined;
+  session.dispose();
 });
 
 test('root breakpoints and Error filter map to target requests', async () => {
@@ -40,6 +70,17 @@ test('root breakpoints and Error filter map to target requests', async () => {
     method: 'Debugger.setPauseOnErrors', params: { enabled: true }
   });
   assert.equal(output[0].body.breakpoints[0].verified, false);
+});
+
+test('Windows root source matching ignores path casing', () => {
+  const session = new FeatherDebugSession({ platform: 'win32' });
+  session.primarySource = 'C:\\Users\\JackMyth\\Projects\\MyFeather\\HelloWorld.fe';
+
+  assert.equal(session.moduleId('c:\\users\\jackmyth\\projects\\myfeather\\HELLOWORLD.FE'), '');
+  assert.equal(
+    pathKey('C:\\Users\\JackMyth\\Projects\\MyFeather\\HelloWorld.fe', 'win32'),
+    pathKey('c:\\users\\jackmyth\\projects\\myfeather\\HELLOWORLD.FE', 'win32')
+  );
 });
 
 test('evaluate and setVariable map through stop-scoped references', async () => {

@@ -59,6 +59,12 @@
                 "default": [],
                 "description": "Arguments inserted before the Feather debug command."
               },
+              "console": {
+                "type": "string",
+                "enum": ["integratedTerminal", "internalConsole"],
+                "default": "integratedTerminal",
+                "description": "Where the Feather process runs. The integrated terminal supports Console.InputLine."
+              },
               "host": {
                 "type": "string",
                 "default": "127.0.0.1",
@@ -126,7 +132,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check extension.js && node --check src/completion.js && node --check src/session.js && node --check src/transport.js"
+    "check": "node --check extension.js && node --check src/completion.js && node --check src/configuration.js && node --check src/session.js && node --check src/transport.js"
   },
   "devDependencies": {}
 }

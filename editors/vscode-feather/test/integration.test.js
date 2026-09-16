@@ -26,8 +26,9 @@ test('launch drives a real breakpoint, inspection, resume, and termination',
     await session.dispatch({ seq: 1, type: 'request', command: 'launch', arguments: {
       program, runtimeExecutable: runtime, connectTimeout: 5000
     }});
+    const breakpointSource = process.platform === 'win32' ? program.toUpperCase() : program;
     await session.dispatch({ seq: 2, type: 'request', command: 'setBreakpoints', arguments: {
-      source: { path: program }, breakpoints: [{ line: 2, condition: 'start == 3' }]
+      source: { path: breakpointSource }, breakpoints: [{ line: 2, condition: 'start == 3' }]
     }});
     const stopped = waitForEvent('stopped');
     await session.dispatch({ seq: 3, type: 'request', command: 'configurationDone', arguments: {} });
