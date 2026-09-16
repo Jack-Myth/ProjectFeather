@@ -2,7 +2,7 @@ project(
   'project-feather',
   'cpp',
   meson_version : '>=1.11.0',
-  version : '0.2.0',
+  version : '0.3.0',
   default_options : [
     'cpp_std=c++20',
     'warning_level=2',
