@@ -1,11 +1,11 @@
 # 脚本语言工程进度
 
-更新日期：2026-09-17
+更新日期：2026-09-19
 设计依据：`SPEC-runtime-design.md`、`SPEC-syntax.md`、`SPEC-snapshot.md`、`SPEC-bytecode-format.md`、`SPEC-symbol-format.md`、`SPEC-multimodule.md`、`SPEC-import.md`、`SPEC-native-modules.md`、`SPEC-stdio.md`、`SPEC-debug-protocol.md`、`SPEC-debugger-cli.md`、`SPEC-dap-adapter.md`；实施记录见 `ROADMAP-multimodule.md` 和 `ROADMAP-runtime-diagnostics.md`，工程结构见 `ENGINEERING.md`。本文件只跟踪进度和待决事项；语义以设计规范为准。
 
 ## 当前状态
 
-**0.3.1 版本节点已形成：M1 至 M5 首版、单 VM 多文件模块、源码与字节码统一运行入口、精简 `feathervm`、嵌入式调试 target、TCP 控制台调试器、DAP adapter，以及带基础语言支持的 VS Code 扩展均可运行。** Release 流程已固定三级优化、LTO、`NDEBUG` 和完整测试；版本内容见 `CHANGELOG.md`。ScriptObject 使用 VM 非移动堆；VM 可在指令安全点自动执行完整标记清除，也保留空闲时显式 GC、RootHandle、NativeObject 登记、内存与收集统计和分配故障通道。宿主可注册 native 函数、读写模块全局值。`Compile(source)` 生成模块、初始化函数、命名函数映射和导出表。实验版 v3 `.fbc` 支持独立编译和加载；可选 v3 `.fbs` 保存源码位置、可断点标记、函数名及带生命周期的局部变量名。v3 快照已能保存/恢复模块集合、跨模块函数和对象。默认静态 runtime 包含 `DebugTarget` 与 `DapAdapter`；`-Ddebugger=false` 可完整移除 JSON 调试实现和控制台调试器，核心仍只保留传输无关的安全点接口。公开 C++ API、调试协议和磁盘格式仍处实验阶段。
+**0.3.1 版本节点已形成：M1 至 M5 首版、单 VM 多文件模块、源码与字节码统一运行入口、精简 `feathervm`、嵌入式调试 target、TCP 控制台调试器、DAP adapter，以及带基础语言支持的 VS Code 扩展均可运行。** Release 流程已固定三级优化、LTO、`NDEBUG` 和完整测试；版本内容见 `CHANGELOG.md`。ScriptObject 使用 VM 非移动堆；VM 可在指令安全点自动执行完整标记清除，也保留空闲时显式 GC、RootHandle、NativeObject 登记、内存与收集统计和分配故障通道。宿主可注册 native 函数、读写模块全局值。`Compile(source)` 生成模块、初始化函数、命名函数映射和导出表。实验版 v3 `.fbc` 支持独立编译和加载；可选 v3 `.fbs` 保存源码位置、可断点标记、函数名及带生命周期的局部变量名。v4 VM 快照已能保存/恢复模块集合、跨模块函数，以及按模块 GUID + 类型名注册的 NativeObject；`snapshot.felib` 进一步提供路径式保存/恢复，CLI 用 `FTHA` 容器记录导入清单并重建新 VM。默认静态 runtime 包含 `DebugTarget` 与 `DapAdapter`；`-Ddebugger=false` 可完整移除 JSON 调试实现和控制台调试器，核心仍只保留传输无关的安全点接口。公开 C++ API、调试协议和磁盘格式仍处实验阶段。
 
 ### 已确定的主要方向
 
@@ -19,7 +19,7 @@
 
 `feather run <program.fe|program.fbc>`、`featherc <source.fe> -o <program.fbc>` 和精简的 `feathervm <program.fbc>` 均已加入。源码运行会优先使用不早于 `.fe` 的同名、有效 `.fbc`，源码调试仍总是重新编译；`feathervm` 不链接编译器和调试实现。运行入口先执行顶层语句，再调用可选的无参数 `main`；独立程序未注册快捷函数，会明确拒绝快捷行。嵌入式宿主可在初始化前用 `RegisterNativeFunction` 注入 `__QuickOperator…`，用 `SetGlobal` 注入一般宿主对象；编译器保留快捷行标记供加载后使用。
 
-`RegisterImport` 只校验并转发普通全局调用；宿主自行解析来源、创建子 VM、代理导出值并管理缓存。CLI 宿主从可执行文件旁的 `modules/` 搜索裸名，Native 动态库优先于同名 Feather 文件；`stdio.felib` 是可运行的独立模块，返回含 Console/IO 的单一对象，不直接注入全局名。解释器与 Native 库分别静态链接同一套 runtime 源码，不要求旁置 Feather DLL。跨 VM ScriptObject/Function 不通过旧适配器返回。
+`RegisterImport` 只校验并转发普通全局调用；宿主自行解析来源、创建子 VM、代理导出值并管理缓存。CLI 宿主从可执行文件旁的 `modules/` 搜索裸名，Native 动态库优先于同名 Feather 文件；`stdio.felib` 返回 Console/IO，`snapshot.felib` 返回 Checkpoint/Restore，均只通过显式 `import` 取得。解释器与 Native 库分别静态链接同一套 runtime 源码，不要求旁置 Feather DLL。跨 VM ScriptObject/Function 不通过旧适配器返回。
 
 ## 阶段 0 已讨论的事项与实施前检查
 
@@ -43,7 +43,7 @@
 
 ## 后置但不可遗忘
 
-- **单 VM 多文件模块**：第一版已完成；模块实例的私有全局表、函数/帧身份、显式导出、重复/循环初始化、GC 和 v3 快照见 `SPEC-multimodule.md`。CLI 宿主层已能按调用方目录解析相对 `.fe`/`.fbc` 导入并缓存文件模块。
+- **单 VM 多文件模块**：第一版已完成；模块实例的私有全局表、函数/帧身份、显式导出、重复/循环初始化、GC 和 v4 快照见 `SPEC-multimodule.md`。CLI 宿主层已能按调用方目录解析相对 `.fe`/`.fbc` 导入并缓存文件模块。
 - **运行时源码位置诊断**：内存指令位置表、普通 Error 查询、独立 `.fbs` 与 VM 故障位置已完成；需要时的快照 Error 来源再按版本演进，v3 `.fbc` 可单独加载并使用无位置回退。
 - **嵌入式调试**：v1 Feather 调试协议、宿主 channel、跨线程命令队列和 VM 线程内暂停检查已完成。v3 `.fbs` 已提供可断点标记、函数名、参数名、局部变量名和词法范围；合成的函数绑定和隐式返回不会抢占源码断点。Error 结果边界可按前端请求暂停，并区分操作结果与函数返回；暂停线程还支持 Feather 表达式求值、条件断点以及 locals/stack/globals 和已有对象属性修改，求值期间屏蔽递归调试回调。DAP adapter 映射标准 exception breakpoint filter、evaluate 与 setVariable。`feather-debugger` 和 VS Code 扩展均用一条双向 TCP 连接消费同一 target；VS Code 侧在 extension host 内完成 DAP 转换并支持 launch/attach。`--debug-listen` 默认异步附加，显式 `--wait-debugger` 才允许先设断点再运行，脚本 stdio 与调试传输隔离。
 - 快照保存/恢复的返回值、代码身份、RootMetaObject 身份和宿主恢复失败语义。

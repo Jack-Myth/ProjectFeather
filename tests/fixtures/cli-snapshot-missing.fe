@@ -1,0 +1,5 @@
+var snapshot = import("snapshot");
+
+def main() {
+    return snapshot.Restore("missing-snapshot-file.ftha");
+}

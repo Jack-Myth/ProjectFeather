@@ -11,6 +11,45 @@ Value Error(std::string Message) {
 }
 }
 
+std::size_t NativeTypeIdHash::operator()(const NativeTypeId& Input) const noexcept {
+    std::size_t Result = 0xcbf29ce484222325ULL;
+    for (auto Byte : Input.Module.Bytes)
+        Result = (Result ^ Byte) * 0x100000001b3ULL;
+    for (unsigned char Byte : Input.Name)
+        Result = (Result ^ Byte) * 0x100000001b3ULL;
+    return Result;
+}
+
+NativeObjectType::NativeObjectType(Vm& InputMachine, NativeModuleGuid Module,
+                                   std::string Name, std::uint32_t InputSnapshotVersion)
+    : Machine(InputMachine), Id{Module, std::move(Name)},
+      SnapshotVersion(InputSnapshotVersion) {
+    if (Id.Name.empty()) throw std::invalid_argument("empty native type name");
+    (void)Value::String(Id.Name);
+    if (SnapshotVersion == 0) throw std::invalid_argument("native snapshot version is zero");
+}
+
+std::vector<std::uint8_t> NativeObjectType::Serialize(const NativeObject& Input) const {
+    if (Input.GetNativeObjectType() != this)
+        throw std::invalid_argument("NativeObject belongs to another native type");
+    return {};
+}
+
+void NativeObjectType::RegisterObject(const std::shared_ptr<NativeObject>& Input) {
+    if (!Input || Input->GetNativeObjectType() != this)
+        throw std::invalid_argument("NativeObject belongs to another native type");
+    Machine.RegisterNativeObject(Input);
+}
+
+std::shared_ptr<NativeObject> NativeSingletonType::Deserialize(
+    std::uint32_t StoredVersion, std::span<const std::uint8_t> Payload) {
+    if (StoredVersion != GetSnapshotVersion() || !Payload.empty())
+        throw std::invalid_argument("invalid native singleton payload");
+    auto Result = Canonical.lock();
+    if (!Result) throw std::logic_error("native singleton is unavailable");
+    return Result;
+}
+
 Value NativeObject::Call(const std::vector<Value>&) { return Error("object is not callable"); }
 Value NativeObject::GetMember(const Value&) { return Error("member does not exist"); }
 Value NativeObject::SetMember(const Value&, const Value&) { return Error("member is not writable"); }

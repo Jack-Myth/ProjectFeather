@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -120,12 +121,34 @@ struct DapAdapter::Impl final {
     }
 
     std::string ModuleId(std::string_view Path) const {
-        return !Options.PrimarySourcePath.empty() && Path == Options.PrimarySourcePath
-            ? std::string{} : std::string(Path);
+        if (!Options.PrimarySourcePath.empty() && Path == Options.PrimarySourcePath)
+            return {};
+        if (Options.PrimarySourcePath.empty()) return std::string(Path);
+        auto Primary = std::filesystem::path(Options.PrimarySourcePath);
+        auto Relative = std::filesystem::path(Path).lexically_relative(Primary.parent_path());
+        if (Relative.empty() || Relative.is_absolute()) return std::string(Path);
+        auto Utf8 = Relative.generic_u8string();
+        std::string Result = "file:";
+        Result.reserve(Result.size() + Utf8.size());
+        for (char8_t Byte : Utf8) Result.push_back(static_cast<char>(Byte));
+        return Result;
     }
 
     std::string SourcePath(std::string_view Module) const {
-        return Module.empty() ? Options.PrimarySourcePath : std::string(Module);
+        if (Module.empty()) return Options.PrimarySourcePath;
+        constexpr std::string_view Prefix = "file:";
+        if (Options.PrimarySourcePath.empty() || !Module.starts_with(Prefix))
+            return std::string(Module);
+        std::u8string Utf8;
+        auto Text = Module.substr(Prefix.size());
+        Utf8.reserve(Text.size());
+        for (unsigned char Byte : Text) Utf8.push_back(static_cast<char8_t>(Byte));
+        auto Path = (std::filesystem::path(Options.PrimarySourcePath).parent_path() /
+                     std::filesystem::path(Utf8)).lexically_normal().u8string();
+        std::string Result;
+        Result.reserve(Path.size());
+        for (char8_t Byte : Path) Result.push_back(static_cast<char>(Byte));
+        return Result;
     }
 
     std::uint64_t AddReference(Reference Value) {

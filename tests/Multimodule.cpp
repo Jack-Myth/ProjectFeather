@@ -13,44 +13,50 @@ void Check(bool Good, const char* Message) {
     if (!Good) throw std::runtime_error(Message);
 }
 
-class CheckpointCall;
-class ModuleCodec final : public SnapshotHostCodec {
-public:
-    explicit ModuleCodec(std::vector<std::uint8_t>& Saved) : Saved(Saved) {}
-    HostSnapshotRecord Encode(const std::shared_ptr<NativeObject>& Input) override;
-    std::shared_ptr<NativeObject> Decode(Vm& Machine, const HostSnapshotRecord& Input) override;
-private:
-    std::vector<std::uint8_t>& Saved;
-};
-
 class CheckpointCall final : public NativeObject {
 public:
-    CheckpointCall(Vm& Machine, std::vector<std::uint8_t>& Saved, ModuleCodec& Codec)
-        : Machine(Machine), Saved(Saved), Codec(Codec) {}
+    CheckpointCall(NativeObjectType& Type, Vm& Machine,
+                   std::vector<std::uint8_t>& Saved);
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>&) override {
-        Saved = Machine.CaptureSnapshot(&Codec);
+        Saved = Machine.CaptureSnapshot();
         return Value::Bool(false);
     }
 private:
     Vm& Machine;
     std::vector<std::uint8_t>& Saved;
-    ModuleCodec& Codec;
 };
 
-HostSnapshotRecord ModuleCodec::Encode(const std::shared_ptr<NativeObject>& Input) {
-    if (!std::dynamic_pointer_cast<CheckpointCall>(Input))
-        throw std::runtime_error("unexpected multimodule host object");
-    return {"checkpoint", {}};
-}
+constexpr NativeModuleGuid SnapshotTestModule{{
+    0x42, 0x2e, 0x81, 0x13, 0x64, 0xf1, 0x4c, 0x98,
+    0xa7, 0xc5, 0x35, 0xd0, 0x69, 0xa1, 0x77, 0x20}};
 
-std::shared_ptr<NativeObject> ModuleCodec::Decode(Vm& Machine,
-                                                  const HostSnapshotRecord& Input) {
-    if (Input.TypeId != "checkpoint" || !Input.Payload.empty())
-        throw std::runtime_error("unknown multimodule host record");
-    return std::make_shared<CheckpointCall>(Machine, Saved, *this);
-}
+class CheckpointType final : public NativeObjectType {
+public:
+    CheckpointType(Vm& Machine, std::vector<std::uint8_t>& Saved)
+        : NativeObjectType(Machine, SnapshotTestModule, "Checkpoint", 1), Saved(Saved) {}
+    std::shared_ptr<CheckpointCall> Create() {
+        return CreateObject<CheckpointCall>(GetVm(), Saved);
+    }
+    std::vector<std::uint8_t> Serialize(const NativeObject& Input) const override {
+        if (!dynamic_cast<const CheckpointCall*>(&Input))
+            throw std::runtime_error("unexpected multimodule host object");
+        return {};
+    }
+    std::shared_ptr<NativeObject> Deserialize(
+        std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
+        if (Version != 1 || !Payload.empty())
+            throw std::runtime_error("unknown multimodule host record");
+        return Create();
+    }
+private:
+    std::vector<std::uint8_t>& Saved;
+};
+
+CheckpointCall::CheckpointCall(NativeObjectType& Type, Vm& Machine,
+                               std::vector<std::uint8_t>& Saved)
+    : NativeObject(Type), Machine(Machine), Saved(Saved) {}
 }
 
 int main() {
@@ -146,22 +152,23 @@ int main() {
             "export var shared = object(); shared.value = 41; "
             "export def entry() { if (checkpoint()) { return shared.value; } return 0; }");
         std::vector<std::uint8_t> Saved;
-        ModuleCodec Codec(Saved);
         Vm Before(SnapshotRoot.Program);
+        auto& BeforeType = Before.CreateNativeObjectType<CheckpointType>(Saved);
         SnapshotMath.LoadInto(Before, "math");
         Before.SetModuleGlobal("math", "checkpoint",
-            Value::FromObject(std::make_shared<CheckpointCall>(Before, Saved, Codec)));
+            Value::FromObject(BeforeType.Create()));
         Check(!SnapshotMath.InitializeModule(Before, "math").IsError(),
               "snapshot module initializer failed");
         Before.SetGlobal("math", Before.GetModuleNamespace("math"));
         SnapshotRoot.Initialize(Before);
         Check(Before.Run(SnapshotRoot.Functions.at("main")).AsNumber() == 1 &&
-              Saved.size() > 12 && Saved[4] == 3,
+              Saved.size() > 12 && Saved[4] == 4,
               "cross-module save point failed");
 
         Vm After(SnapshotRoot.Program);
+        After.CreateNativeObjectType<CheckpointType>(Saved);
         SnapshotMath.LoadInto(After, "math");
-        Check(After.ResumeSnapshot(Saved, &Codec).AsNumber() == 42,
+        Check(After.ResumeSnapshot(Saved).AsNumber() == 42,
               "cross-module frames or globals failed to restore");
         Check(After.GetModuleGlobal("math", "shared").AsScriptObject() !=
               Before.GetModuleGlobal("math", "shared").AsScriptObject() &&
@@ -173,7 +180,7 @@ int main() {
         DamagedSnapshot[20] ^= 1;
         Vm DamagedTarget(SnapshotRoot.Program);
         SnapshotMath.LoadInto(DamagedTarget, "math");
-        try { (void)DamagedTarget.ResumeSnapshot(DamagedSnapshot, &Codec);
+        try { (void)DamagedTarget.ResumeSnapshot(DamagedSnapshot);
               throw std::runtime_error("damaged multi-module snapshot accepted"); }
         catch (const std::invalid_argument&) {}
         Check(DamagedTarget.GetScriptObjectCount() == 1 &&

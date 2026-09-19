@@ -14,6 +14,14 @@ StdioNativeModule = shared_module('stdio.felib', '../stdlib/StdIo.cpp',
   install : true,
   install_dir : get_option('bindir') / 'modules')
 
+SnapshotNativeModule = shared_module('snapshot.felib', '../stdlib/Snapshot.cpp',
+  '../stdlib/SnapshotModule.cpp',
+  name_prefix : '',
+  name_suffix : NativeModuleSuffix,
+  dependencies : FeatherDependency,
+  install : true,
+  install_dir : get_option('bindir') / 'modules')
+
 HelperSource = configure_file(input : '../tests/fixtures/helper.fe',
   output : 'helper.fe', copy : true)
 configure_file(input : '../tests/fixtures/stdio-shadow.fe',

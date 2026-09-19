@@ -82,6 +82,27 @@ StdioBytecode = custom_target('stdio-bytecode',
   build_by_default : true)
 test('cli-stdio-bytecode', FeatherVmCli,
   args : [StdioBytecode], depends : StdioNativeModule)
+
+test('cli-snapshot-source', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/cli-snapshot-source.fe'],
+  depends : [SnapshotNativeModule, StdioNativeModule])
+SnapshotBytecode = custom_target('snapshot-bytecode',
+  input : 'fixtures/cli-snapshot-bytecode.fe', output : 'cli-snapshot-bytecode.fbc',
+  command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
+  build_by_default : true)
+test('cli-snapshot-bytecode', FeatherVmCli,
+  args : [SnapshotBytecode],
+  depends : [SnapshotNativeModule, StdioNativeModule, SnapshotBytecode, HelperBytecode])
+test('cli-snapshot-missing', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/cli-snapshot-missing.fe'],
+  depends : SnapshotNativeModule,
+  expected_fail : true)
+ModuleLoaderTests = executable('module-loader-tests', 'ModuleLoader.cpp',
+  '../src/Cli/File.cpp', '../src/Cli/ModuleLoader.cpp', '../src/Cli/NativeModules.cpp',
+  cpp_args : '-DFEATHER_CLI_SOURCE_LOADER=1',
+  dependencies : [FeatherDependency, NativeLoaderSystemDependency])
+test('module-loader-relative-id', ModuleLoaderTests,
+  args : [meson.current_source_dir() / 'fixtures/cli-bare.fe'])
 test('cli-bare-source', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-bare.fe'])
 BareBytecode = custom_target('bare-bytecode',

@@ -444,7 +444,31 @@ void Vm::RemoveFromRoot(std::uint64_t Token) {
 }
 void Vm::RegisterNativeObject(const std::shared_ptr<NativeObject>& Input) {
     if (!Input) throw std::invalid_argument("null NativeObject");
+    if (Input->Type && &Input->Type->GetVm() != this)
+        throw std::invalid_argument("NativeObject type belongs to another VM");
     NativeRegistry.push_back(Input);
+}
+
+void Vm::RegisterNativeObjectType(std::shared_ptr<NativeObjectType> Input) {
+    if (!Input) throw std::invalid_argument("null NativeObjectType");
+    if (&Input->GetVm() != this)
+        throw std::invalid_argument("NativeObjectType belongs to another VM");
+    bool Any = false;
+    for (auto Byte : Input->GetId().Module.Bytes) Any = Any || Byte != 0;
+    if (!Any) throw std::invalid_argument("native module GUID is zero");
+    if (NativeTypes.contains(Input->GetId()))
+        throw std::invalid_argument("duplicate native object type");
+    OwnedNativeTypes.push_back(Input);
+    try { NativeTypes.emplace(Input->GetId(), Input.get()); }
+    catch (...) {
+        OwnedNativeTypes.pop_back();
+        throw;
+    }
+}
+
+NativeObjectType* Vm::FindNativeObjectType(const NativeTypeId& Id) const {
+    auto Found = NativeTypes.find(Id);
+    return Found == NativeTypes.end() ? nullptr : Found->second;
 }
 void Vm::UpdateCollectionThreshold() {
     auto Live = ScriptHeap.size();

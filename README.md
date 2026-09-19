@@ -4,7 +4,7 @@
 
 ProjectFeather 是一个使用 C++20 编写、面向宿主嵌入的小型脚本语言。当前有栈式字节码 VM、单 VM 多文件模块、对象与 MetaObject、自动非移动标记清除 GC、源码编译器、状态快照、可选的嵌入式调试协议端、VS Code 语言与调试扩展，以及源码运行、独立编译和字节码执行命令行程序。公开接口和磁盘字节格式仍处实验阶段。变量用 `var` 声明，函数用 `def` 声明，顶层导出用 `export` 修饰声明。
 
-当前快照使用带 CRC32 校验和的 v3 格式，可保存模块身份、私有全局与跨模块调用帧，并检测意外损坏；旧版快照不再加载。快照边界见 [快照契约](SPEC-snapshot.md)。
+当前快照使用带 CRC32 校验和的 v4 格式，可保存模块身份、私有全局、跨模块调用帧及按模块 GUID + 类型名注册的 NativeObject，并检测意外损坏；旧版快照不再加载。快照边界见 [快照契约](SPEC-snapshot.md)。
 
 源码支持行首快捷调用，例如 `>你好，我是XXX` 等价于调用全局函数 `__QuickOperatorRightAngleBucket("你好，我是XXX");`。另外三个前缀 `#`、`$`、`&` 分别调用 `__QuickOperatorHash`、`__QuickOperatorDollar`、`__QuickOperatorAmpersand`，不访问 `Env`。详情见 [源码语法](SPEC-syntax.md)。
 
@@ -84,7 +84,9 @@ Main.Initialize(Machine);
 auto Result = Machine.Run(Main.Functions.at("main")); // 13
 ```
 
-独立运行程序可通过 `import("stdio")` 获取单一标准输入输出对象，函数内调用 `stdio.Console.PrintLine("hello")` 或 `stdio.IO.OpenFile(...)`。`IO` 还提供 `CloseFile`、`Seek`、`Tell`、`Read`、`Write`；`Read` 返回可逐字节访问的 `ByteBuffer`。嵌入式宿主可编译 `stdlib/StdIo.cpp` 并将 `StdIoLibrary::GetModule()` 接入自己的 `import`；接口和边界见 [标准输入输出库](SPEC-stdio.md)。
+独立运行程序可通过 `import("stdio")` 获取单一标准输入输出对象，函数内调用 `stdio.Console.PrintLine("hello")` 或 `stdio.IO.OpenFile(...)`。`IO` 还提供 `CloseFile`、`Seek`、`Tell`、`Read`、`Write`；`Read` 返回可逐字节访问的 `ByteBuffer`。嵌入式宿主可编译 `stdlib/StdIo.cpp`，用 `StdIoLibrary(Vm&, input, output)` 将可快照模块接入自己的 `import`；不传 VM 的重载只用于非快照场景。接口和边界见 [标准输入输出库](SPEC-stdio.md)。
+
+保存点可由脚本直接控制：`var snapshot = import("snapshot");` 后调用 `snapshot.Checkpoint(path)`；正常保存返回 `false`，通过 `snapshot.Restore(path)` 回到该位置时返回 `true`。路径只是底层文件能力，slot、标题、缩略图和索引由脚本台本框架自行组织。CLI 会在存档中记录已导入模块并在新 VM 上重建；完整失败边界与 `FTHA` 容器见 [快照契约](SPEC-snapshot.md)。
 
 嵌入时在初始化前注册解析器。宿主可以提供标准库，也可以继续解析自己的模块标识：
 
@@ -98,7 +100,7 @@ auto Compiled = Feather::Compile(
     "var stdio = import(\"stdio\"); "
     "def main() { stdio.Console.PrintLine(\"hello\"); }");
 Feather::Vm Machine(Compiled.Program);
-Feather::StdIoLibrary Library(std::cin, std::cout);
+Feather::StdIoLibrary Library(Machine, std::cin, std::cout);
 Feather::RegisterImport(Machine, [&Library](std::string_view Name) {
     if (Name == "stdio") return Library.GetModule();
     return Feather::Value::FromObject(
@@ -122,7 +124,7 @@ Compiled.Initialize(Machine);
 auto Result = Machine.Run(Compiled.Functions.at("answer"));
 ```
 
-`MyDoubleFunction`、`MyHashFunction` 和 `MyHostObject` 是宿主实现的 `NativeObject` 子类。`RegisterNativeFunction` 把可调用对象绑定为全局函数；`SetGlobal` 可注入一般宿主对象。`Compiled.Initialize(Machine)` 会绑定顶层函数并执行顶层语句一次，顶层代码因此能立即调用已注册的函数。宿主跨 GC 持有脚本对象时需使用 `RootHandle`。快照由脚本调用宿主注册的 native 保存入口，在该入口中调用 `CaptureSnapshot`；恢复到新 VM 时调用 `ResumeSnapshot`。具体限制见 [源码语法](SPEC-syntax.md)、[运行时设计](SPEC-runtime-design.md) 和 [快照契约](SPEC-snapshot.md)。工程状态见 [Progress.md](Progress.md)；完整注入样例见 [快捷行测试](tests/Quick.cpp)。
+`MyDoubleFunction`、`MyHashFunction` 和 `MyHostObject` 是宿主实现的 `NativeObject` 子类。`RegisterNativeFunction` 把可调用对象绑定为全局函数；`SetGlobal` 可注入一般宿主对象。`Compiled.Initialize(Machine)` 会绑定顶层函数并执行顶层语句一次，顶层代码因此能立即调用已注册的函数。宿主跨 GC 持有脚本对象时需使用 `RootHandle`。VM 的低层接口用 `CaptureSnapshot` 生成字节、用新 VM 的 `ResumeSnapshot` 恢复；独立解释器可 `import("snapshot")`，调用 `snapshot.Checkpoint(path)` 和 `snapshot.Restore(path)`。CLI 存档同时记录已导入模块并在恢复前重建它们，而 slot、metadata 与索引仍由脚本框架实现。具体限制见 [源码语法](SPEC-syntax.md)、[运行时设计](SPEC-runtime-design.md) 和 [快照契约](SPEC-snapshot.md)。工程状态见 [Progress.md](Progress.md)；完整注入样例见 [快捷行测试](tests/Quick.cpp)。
 
 调试端的最小接入形态如下；`MyChannel` 只负责消息传输，不需要了解 VM 帧或对象布局：
 

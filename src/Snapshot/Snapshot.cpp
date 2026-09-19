@@ -191,7 +191,9 @@ struct ObjectRecord {
     std::uint32_t Function = 0;
     std::uint32_t Module = 0;
     std::string Message;
-    HostSnapshotRecord Host;
+    NativeTypeId HostType;
+    std::uint32_t HostVersion = 0;
+    std::vector<std::uint8_t> HostPayload;
     std::vector<std::pair<std::string, EncodedValue>> Visible;
 };
 struct FrameRecord {
@@ -250,8 +252,7 @@ std::vector<int> StackDepths(const FunctionPrototype& Function) {
 
 } // namespace
 
-std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
-                                               std::size_t MaxBytes) const {
+std::vector<std::uint8_t> Vm::CaptureSnapshot(std::size_t MaxBytes) const {
     if (SnapshotBusy) throw std::logic_error("snapshot operation already active");
     if (ActiveRuns != 1 || ActiveNativeCalls != 1 || !ActiveExecution ||
         !ActiveExecution->PendingCallResult || ActiveExecution->Frames.empty())
@@ -362,12 +363,14 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
                 break;
             }
             ObjectBytes.U8(3);
-            if (!Codec) Invalid("host snapshot codec required");
-            auto Record = Codec->Encode(Native);
-            if (Record.TypeId.empty()) Invalid("empty host snapshot type ID");
-            (void)Value::String(Record.TypeId);
-            ObjectBytes.String(Record.TypeId);
-            ObjectBytes.Blob(Record.Payload); break;
+            auto* Type = Native->GetNativeObjectType();
+            if (!Type || FindNativeObjectType(Type->GetId()) != Type)
+                Invalid("Host NativeObject has no registered type");
+            ObjectBytes.Raw(Type->GetId().Module.Bytes);
+            ObjectBytes.String(Type->GetId().Name);
+            ObjectBytes.U32(Type->GetSnapshotVersion());
+            ObjectBytes.Blob(Type->Serialize(*Native));
+            break;
         }
         case ObjectType::Script: Invalid("invalid native ScriptObject");
         }
@@ -420,7 +423,7 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
 
     Writer Output(MaxBytes);
     Output.U8('F'); Output.U8('T'); Output.U8('H'); Output.U8('S');
-    Output.U16(3); Output.U16(0);
+    Output.U16(4); Output.U16(0);
     auto ModuleBytes = ModuleSetImage(*Program, Ordered, MaxBytes);
     Output.Blob(ModuleBytes);
     Output.Blob(ObjectBytes.Bytes());
@@ -431,7 +434,7 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(SnapshotHostCodec* Codec,
 }
 
 Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
-                         SnapshotHostCodec* Codec, std::size_t MaxBytes) {
+                         std::size_t MaxBytes) {
     if (SnapshotBusy || HasRun || ActiveRuns != 0 || ActiveNativeCalls != 0 || ActiveExecution ||
         !HostRoots.empty() || ScriptHeap.size() != 1 || !RootMetaObject->Members.empty())
         throw std::logic_error("snapshot restore requires a fresh idle VM");
@@ -471,7 +474,7 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
     if (Input.U8() != 'F' || Input.U8() != 'T' || Input.U8() != 'H' || Input.U8() != 'S')
         Invalid("invalid snapshot magic");
     auto Major = Input.U16(), Minor = Input.U16();
-    if (Major != 3 || Minor != 0) Invalid("unsupported snapshot version");
+    if (Major != 4 || Minor != 0) Invalid("unsupported snapshot version");
     Reader ChecksumInput(std::span<const std::uint8_t>(Bytes.data() + Bytes.size() - 4, 4));
     if (ChecksumInput.U32() != SnapshotChecksum(Content)) Invalid("snapshot checksum mismatch");
     auto SavedModule = Input.Blob();
@@ -519,11 +522,16 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
         } else if (Record.Kind == 2) {
             Record.Message = ObjectInput.String();
         } else if (Record.Kind == 3) {
-            Record.Host.TypeId = ObjectInput.String();
-            if (Record.Host.TypeId.empty()) Invalid("empty host snapshot type ID");
+            auto Guid = ObjectInput.Raw(Record.HostType.Module.Bytes.size());
+            std::copy(Guid.begin(), Guid.end(), Record.HostType.Module.Bytes.begin());
+            Record.HostType.Name = ObjectInput.String();
+            if (Record.HostType.Name.empty()) Invalid("empty native type name");
+            Record.HostVersion = ObjectInput.U32();
+            if (Record.HostVersion == 0) Invalid("native snapshot version is zero");
             auto Payload = ObjectInput.Blob();
-            Record.Host.Payload.assign(Payload.begin(), Payload.end());
-            if (!Codec) Invalid("host snapshot codec required");
+            Record.HostPayload.assign(Payload.begin(), Payload.end());
+            if (!FindNativeObjectType(Record.HostType))
+                Invalid("native snapshot type is not registered");
         } else if (Record.Kind == 4) {
             Record.Module = ObjectInput.U32();
             if (Record.Module == 0 || Record.Module > Ordered.size() ||
@@ -629,11 +637,13 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
             case 1: Decoded[I] = Value::FromObject(FunctionAt(Record.Module, Record.Function)); break;
             case 2: Decoded[I] = Value::FromObject(std::make_shared<ErrorObject>(Record.Message)); break;
             case 3: {
-                auto Native = Codec->Decode(*this, Record.Host);
-                if (!Native || Native->GetObjectType() != ObjectType::Host)
-                    Invalid("host snapshot codec returned invalid object");
+                auto* Type = FindNativeObjectType(Record.HostType);
+                auto Native = Type->Deserialize(Record.HostVersion, Record.HostPayload);
+                if (!Native || Native->GetObjectType() != ObjectType::Host ||
+                    Native->GetNativeObjectType() != Type)
+                    Invalid("native object type returned invalid object");
                 if (!DecodedHosts.insert(Native.get()).second)
-                    Invalid("host snapshot codec reused object identity");
+                    Invalid("native object type reused object identity");
                 Decoded[I] = Value::FromObject(Native);
                 RegisterNativeObject(Native);
                 break;
@@ -666,6 +676,8 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
                 auto Native = std::dynamic_pointer_cast<NativeObject>(Decoded[I].AsNativeObject());
                 for (const auto& [Name, Member] : Record.Visible)
                     Native->GcVisibleMembers.emplace(Name, Materialize(Member));
+                if (Record.Kind == 3)
+                    Native->GetNativeObjectType()->FinalizeRestore(*Native);
             }
         }
         for (std::size_t ModuleId = 0; ModuleId < SavedGlobals.size(); ++ModuleId)

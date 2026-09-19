@@ -417,7 +417,12 @@
 - [x] 调用栈是运行时自行维护的数据结构（而非借助 C 原生调用栈），因此可以完整
       序列化与重建
 - [x] 保存点由宿主注册的 native 函数触发，不新增专门字节码指令；宿主在该
-      函数内部调用 `Vm::CaptureSnapshot(codec)`，持久化字节后让函数返回 false。
+      函数内部调用 `Vm::CaptureSnapshot()`，持久化字节后让函数返回 false。
+- [x] `CaptureSnapshot` 只生成字节，不接收路径。独立解释器可通过可导入的
+      `snapshot` Native 模块提供 `Checkpoint(path)`；该模块只负责 continuation
+      与文件提交，slot、metadata、索引及目录策略由 Feather 脚本实现。加载成功
+      需要解释器以新 VM 执行受控恢复，而不能在当前 native 调用栈上原地恢复；
+      具体边界见 `SPEC-snapshot.md`。
 - [x] 约束检测：维护 native 调用深度，保存入口检查其值是否恰好为 1。
 - [x] 深度不符的捕获 API 抛 `std::logic_error`，面向脚本的 native 包装器把
       预期拒绝映射为 Error；正常保存调用返回 false，恢复后该调用返回 true。
@@ -438,15 +443,17 @@
 > 脚本状态中若引用了宿主对象（文件句柄、宿主指针等），无法直接序列化，
 > 需要宿主提供序列化/反序列化钩子。
 
-- [x] FunctionObject/ErrorObject 由 VM 自身编码；其他 NativeObject 由宿主 codec
-      编为稳定类型 ID 与不透明字节，并使用新 VM 引用重建。NativeObject 的 VM
-      可见成员表由 VM 单独序列化。具体接口形状见 `SPEC-snapshot.md`。
-- [x] 缺少 codec、未知类型 ID 或 codec 失败均拒绝快照/恢复，不丢弃对象。
+- [x] FunctionObject/ErrorObject 由 VM 自身编码；其他可保存的 NativeObject 必须
+      绑定 VM 注册的 `NativeObjectType`，以模块 GUID + 模块内类型名作为稳定身份，
+      再由类型读写 schema 版本和不透明字节。NativeObject 的 VM 可见成员表由 VM
+      单独序列化。具体接口形状见 `SPEC-snapshot.md`。
+- [x] 未绑定类型、未知类型身份或类型序列化/反序列化失败均拒绝快照/恢复，
+      不静默丢弃对象；首版没有类型别名和自动迁移。
 
 ### 6.4 版本兼容性
 
 - [x] 格式含 magic、主/次版本和显式长度；恢复前验证版本、边界与对象引用。
-- [x] 用规范化模块内容逐字节比较绑定代码；与宿主 codec 类型实现绑定，首版
+- [x] 用规范化模块内容逐字节比较绑定代码；与注册的 Native 类型实现绑定，首版
       不保证跨版本兼容。
 
 ---
@@ -461,6 +468,12 @@
       `RegisterNativeFunction(name, shared_ptr<NativeObject>)` 登记到 VM 并绑定
       全局名称。其他持有 GC 可见成员的原生对象通过 `RegisterNativeObject`
       登记，再使用专用 GC 可见成员 setter/移除接口。
+- [x] 需要保存的宿主对象由 `Vm::CreateNativeObjectType` 注册类型，并走该类型的
+      创建、销毁、序列化和反序列化接口；同一模块 GUID 内类型名唯一。未绑定类型
+      的旧式 NativeObject 仍可运行，但不能进入快照。
+- [x] `NativeObjectType` 默认把无额外状态的对象编码为空 payload；模块重新导入时
+      会重建的单一命名空间或静态函数可直接使用 `NativeSingletonType`，无需另写
+      序列化和反序列化方法。
 - [x] `Vm(shared_ptr<Module>, MaxScriptObjects, MaxInstructionsPerInvocation)` 构造时验证并冻结模块；
       析构销毁 VM 堆及全局状态。宿主用 `Run(functionConstantIndex, args)`
       调用主模块入口。`GetGlobal(name)`/`SetGlobal(name, value)` 访问主模块全局表；
@@ -478,9 +491,9 @@
 - [x] 单 VM 多文件模块通过 `LoadModule` / `RunModule` / `InitializeModule` 维护私有全局和代码身份；
       `RegisterModuleImport` 是另一种宿主适配器，可返回同一 VM 的脚本值。VM 不读取文件，
       逻辑模块 ID、`export`、循环初始化、GC 和快照边界见 `SPEC-multimodule.md`。
-- [x] 与第 6 节快照功能相关的 C++ API 首版：`CaptureSnapshot(codec)`、
-      `ResumeSnapshot(bytes, codec)` 与 `SnapshotHostCodec` 接口，语义见
-      `SPEC-snapshot.md`；公开签名和磁盘格式尚未承诺稳定。
+- [x] 与第 6 节快照功能相关的 C++ API 当前为 `CaptureSnapshot()`、
+      `ResumeSnapshot(bytes)` 与 `NativeObjectType` 接口，语义见 `SPEC-snapshot.md`；
+      公开签名和磁盘格式尚未承诺稳定。
 - [x] 调试钩子以 `Vm::SetDebugController` 注册；`VmDebugController` 接收安全点、
       Error 结果边界和执行结束回调，Error 来源区分 Operation / FunctionReturn。
 
@@ -499,7 +512,7 @@
       分配失败通道、宿主调用入口及 native 注册方式见第 2、7 节；调试钩子
       签名仍待完善；磁盘模块加载入口为实验版。
 - [x] **快照最小语义设计**：保存/恢复返回值、续执行位置、深度错误、代码身份、
-      宿主 codec 与失败语义已写入 `SPEC-snapshot.md`；实现仍属 M5 待办。
+      Native 类型与失败语义已写入 `SPEC-snapshot.md`；M5 首版已实现。
 - [x] **实现顺序**：先做内存模块驱动的最小 VM，再接对象协议、GC 与嵌入、
       编译器、快照；目录边界和各阶段验收见 `ENGINEERING.md`。源码语法
       现见独立的 `SPEC-syntax.md`。

@@ -144,6 +144,13 @@ void Run() {
         R"({"method":"Debugger.paused","params":{"stopId":3,"reason":"breakpoint","conditionError":"expected expression"}})");
     Check(Channel->DapContains(R"("description":"expected expression")"),
           "condition failure was not exposed in the stopped event");
+
+    auto RelativeChannel = std::make_shared<RecordingChannel>();
+    DapAdapter RelativeAdapter(RelativeChannel, {.PrimarySourcePath = "root/main.fe"});
+    RelativeAdapter.DispatchDapMessage(
+        R"({"seq":1,"type":"request","command":"setBreakpoints","arguments":{"source":{"path":"root/sub/math.fe"},"breakpoints":[{"line":1}]}})");
+    Check(RelativeChannel->TargetContains(R"("moduleId":"file:sub/math.fe")"),
+          "entry-relative module ID was not mapped from the DAP source path");
 }
 
 } // namespace

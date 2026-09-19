@@ -71,7 +71,7 @@ NativeModuleEntry GetEntry(void* Handle) {
 #else
     auto* Symbol = dlsym(Handle, NativeModuleEntryName);
 #endif
-    if (!Symbol) throw std::runtime_error("Native module has no FeatherNativeModuleV1 entry");
+    if (!Symbol) throw std::runtime_error("Native module has no FeatherNativeModuleV2 entry");
     return reinterpret_cast<NativeModuleEntry>(Symbol);
 }
 
@@ -87,6 +87,20 @@ void NativeModules::ReleaseRoots() noexcept {
     for (auto& Library : Libraries) Library.Root = {};
 }
 
+std::vector<NativeModuleIdentity> NativeModules::LoadedIdentities() const {
+    std::vector<NativeModuleIdentity> Result;
+    Result.reserve(Libraries.size());
+    for (const auto& Library : Libraries)
+        Result.push_back(NativeModuleIdentity{Library.Name, Library.Id});
+    return Result;
+}
+
+bool NativeModules::HasIdentity(std::string_view Name, const NativeModuleGuid& Id) const {
+    for (const auto& Library : Libraries)
+        if (Library.Name == Name) return Library.Id == Id;
+    return false;
+}
+
 std::optional<Value> NativeModules::Resolve(Vm& Machine, std::string_view Name) {
     if (auto Found = ByName.find(std::string(Name)); Found != ByName.end()) return Found->second;
     for (const auto& Directory : Paths) {
@@ -95,15 +109,22 @@ std::optional<Value> NativeModules::Resolve(Vm& Machine, std::string_view Name) 
         auto Path = std::filesystem::canonical(Candidate);
         auto Handle = OpenLibrary(Path);
         auto* Descriptor = GetEntry(Handle.get())();
+        bool AnyGuidByte = false;
+        if (Descriptor)
+            for (auto Byte : Descriptor->Id.Bytes) AnyGuidByte = AnyGuidByte || Byte != 0;
         if (!Descriptor || Descriptor->InterfaceVersion != NativeModuleInterfaceVersion ||
-            !Descriptor->Name || Name != Descriptor->Name || !Descriptor->Create)
+            !AnyGuidByte || !Descriptor->Name || Name != Descriptor->Name || !Descriptor->Create)
             throw std::runtime_error("Native module descriptor mismatch: " + PathText(Path));
-        auto Root = Descriptor->Create(NativeModuleContext{Machine, &Input, &Output});
+        for (const auto& Library : Libraries)
+            if (Library.Id == Descriptor->Id)
+                throw std::runtime_error("duplicate Native module GUID: " + PathText(Path));
+        auto Root = Descriptor->Create(NativeModuleContext{Machine, &Input, &Output, Snapshots});
         if (Root.IsError()) return Root;
         if (Root.GetType() != ValueType::Object || Root.IsScriptObject() ||
             Root.GetObjectType() != ObjectType::Host)
             throw std::runtime_error("Native module must return a Host object: " + PathText(Path));
-        Libraries.push_back(Loaded{std::move(Handle), Root});
+        Libraries.push_back(Loaded{std::move(Handle), Descriptor->Id,
+                                   std::string(Name), Root});
         ByName.emplace(std::string(Name), Root);
         return Root;
     }

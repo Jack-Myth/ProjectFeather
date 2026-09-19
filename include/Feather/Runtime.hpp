@@ -1,6 +1,7 @@
 #pragma once
 #include <Feather/Export.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -11,8 +12,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace Feather {
@@ -21,13 +24,24 @@ class Object;
 class Module;
 class Vm;
 class ScriptObject;
+class NativeObject;
+class NativeObjectType;
 struct ExecutionState;
 struct ModuleInstance;
-class SnapshotHostCodec;
 
-struct HostSnapshotRecord {
-    std::string TypeId;
-    std::vector<std::uint8_t> Payload;
+struct NativeModuleGuid {
+    std::array<std::uint8_t, 16> Bytes{};
+    bool operator==(const NativeModuleGuid&) const = default;
+};
+
+struct NativeTypeId {
+    NativeModuleGuid Module;
+    std::string Name;
+    bool operator==(const NativeTypeId&) const = default;
+};
+
+struct NativeTypeIdHash {
+    std::size_t operator()(const NativeTypeId& Input) const noexcept;
 };
 
 enum class ValueType { Null, Bool, Number, String, Object };
@@ -85,23 +99,72 @@ public:
 
 class FEATHER_API NativeObject : public Object {
 public:
+    NativeObjectType* GetNativeObjectType() const noexcept { return Type; }
     virtual bool IsCallable() const { return false; }
     virtual Value Call(const std::vector<Value>& Arguments);
     virtual Value GetMember(const Value& Key);
     virtual Value SetMember(const Value& Key, const Value& Input);
     void SetGcVisibleMember(std::string Name, Value Input);
     void RemoveGcVisibleMember(const std::string& Name);
+protected:
+    NativeObject() = default;
+    explicit NativeObject(NativeObjectType& InputType) : Type(&InputType) {}
 private:
     friend class Vm;
     friend class VmDebugContext;
+    NativeObjectType* Type = nullptr;
     std::unordered_map<std::string, Value> GcVisibleMembers;
 };
 
-class FEATHER_API SnapshotHostCodec {
+class FEATHER_API NativeObjectType : public std::enable_shared_from_this<NativeObjectType> {
 public:
-    virtual ~SnapshotHostCodec() = default;
-    virtual HostSnapshotRecord Encode(const std::shared_ptr<NativeObject>& Input) = 0;
-    virtual std::shared_ptr<NativeObject> Decode(Vm& Machine, const HostSnapshotRecord& Input) = 0;
+    virtual ~NativeObjectType() = default;
+    const NativeTypeId& GetId() const noexcept { return Id; }
+    std::uint32_t GetSnapshotVersion() const noexcept { return SnapshotVersion; }
+    Vm& GetVm() const noexcept { return Machine; }
+    virtual std::vector<std::uint8_t> Serialize(const NativeObject& Input) const;
+    virtual std::shared_ptr<NativeObject> Deserialize(
+        std::uint32_t StoredVersion, std::span<const std::uint8_t> Payload) = 0;
+    virtual void FinalizeRestore(NativeObject&) {}
+protected:
+    NativeObjectType(Vm& Machine, NativeModuleGuid Module, std::string Name,
+                     std::uint32_t SnapshotVersion = 1);
+    template<class ObjectType, class... Arguments>
+    std::shared_ptr<ObjectType> CreateObject(Arguments&&... Input) {
+        static_assert(std::is_base_of_v<NativeObject, ObjectType>);
+        auto Owner = shared_from_this();
+        auto Result = std::shared_ptr<ObjectType>(
+            new ObjectType(*this, std::forward<Arguments>(Input)...),
+            [Owner = std::move(Owner)](ObjectType* Object) { Owner->Destroy(Object); });
+        RegisterObject(Result);
+        return Result;
+    }
+    void RegisterObject(const std::shared_ptr<NativeObject>& Input);
+    virtual void Destroy(NativeObject* Input) noexcept { delete Input; }
+private:
+    friend class Vm;
+    Vm& Machine;
+    NativeTypeId Id;
+    std::uint32_t SnapshotVersion;
+};
+
+class FEATHER_API NativeSingletonType final : public NativeObjectType {
+public:
+    NativeSingletonType(Vm& Machine, NativeModuleGuid Module, std::string Name,
+                        std::uint32_t SnapshotVersion = 1)
+        : NativeObjectType(Machine, Module, std::move(Name), SnapshotVersion) {}
+    template<class Object, class... Arguments>
+    std::shared_ptr<Object> Create(Arguments&&... Input) {
+        if (!Canonical.expired())
+            throw std::logic_error("native singleton already exists");
+        auto Result = CreateObject<Object>(std::forward<Arguments>(Input)...);
+        Canonical = Result;
+        return Result;
+    }
+    std::shared_ptr<NativeObject> Deserialize(
+        std::uint32_t StoredVersion, std::span<const std::uint8_t> Payload) override;
+private:
+    std::weak_ptr<NativeObject> Canonical;
 };
 
 class FEATHER_API ScriptObject final : public Object {
@@ -325,11 +388,18 @@ public:
     void SetModuleGlobal(std::string_view Id, std::string Name, Value Input);
     Value GetModuleNamespace(std::string_view Id) const;
     std::string GetActiveModuleId() const;
-    std::vector<std::uint8_t> CaptureSnapshot(SnapshotHostCodec* Codec = nullptr,
-                                              std::size_t MaxBytes = 64 * 1024 * 1024) const;
+    std::vector<std::uint8_t> CaptureSnapshot(
+        std::size_t MaxBytes = 64 * 1024 * 1024) const;
     Value ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
-                         SnapshotHostCodec* Codec = nullptr,
                          std::size_t MaxBytes = 64 * 1024 * 1024);
+    template<class Type, class... Arguments>
+    Type& CreateNativeObjectType(Arguments&&... Input) {
+        static_assert(std::is_base_of_v<NativeObjectType, Type>);
+        auto Owned = std::make_shared<Type>(*this, std::forward<Arguments>(Input)...);
+        auto* Result = Owned.get();
+        RegisterNativeObjectType(std::move(Owned));
+        return *Result;
+    }
     bool IsBuiltFrom(const std::shared_ptr<Module>& Source) const { return SourceProgram == Source; }
     ScriptObject* GetRootMetaObject() const { return RootMetaObject; }
     ScriptObject* CreateScriptObject();
@@ -361,6 +431,8 @@ private:
     std::size_t CollectGarbageImpl();
     void UpdateCollectionThreshold();
     void RemoveFromRoot(std::uint64_t Token);
+    void RegisterNativeObjectType(std::shared_ptr<NativeObjectType> Input);
+    NativeObjectType* FindNativeObjectType(const NativeTypeId& Id) const;
     bool OwnsScript(ScriptObject* Input) const;
     void ValidateOwnedValue(const Value& Input) const;
     Value EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t FrameId,
@@ -372,6 +444,8 @@ private:
     void ReachDebugError(ExecutionState& Execution, const Value& Error,
                          DebugErrorOrigin Origin, std::size_t InstructionPc);
     void NotifyDebugExecutionFinished(bool Faulted);
+    std::vector<std::shared_ptr<NativeObjectType>> OwnedNativeTypes;
+    std::unordered_map<NativeTypeId, NativeObjectType*, NativeTypeIdHash> NativeTypes;
     std::shared_ptr<Module> Program;
     std::shared_ptr<Module> SourceProgram;
     std::vector<std::shared_ptr<Object>> Functions;

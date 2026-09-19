@@ -1,0 +1,11 @@
+var snapshot = import("snapshot");
+var stdio = import("stdio");
+var helper = import("helper");
+
+def main() {
+    if (snapshot.Checkpoint("cli-snapshot-source.ftha")) {
+        stdio.Console.Print("");
+        return helper.Value() - 42;
+    }
+    return snapshot.Restore("cli-snapshot-source.ftha");
+}

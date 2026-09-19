@@ -62,9 +62,9 @@ if get_option('debugger') and host_machine.system() == 'windows'
 endif
 
 FeatherCliSources = files('src/Cli/Main.cpp', 'src/Cli/File.cpp', 'src/Cli/Runner.cpp',
-  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp')
+  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp', 'src/Cli/SnapshotHost.cpp')
 FeatherVmCliSources = files('src/Cli/VmMain.cpp', 'src/Cli/File.cpp', 'src/Cli/Runner.cpp',
-  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp')
+  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp', 'src/Cli/SnapshotHost.cpp')
 FeatherCliArguments = ['-DFEATHER_CLI_SOURCE_LOADER=1']
 if get_option('debugger')
   FeatherCliSources += files('src/Cli/Socket.cpp', 'src/Cli/DebugHost.cpp')

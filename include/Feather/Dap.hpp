@@ -21,7 +21,8 @@ public:
 
 struct DapAdapterOptions {
     // The primary source is represented by an empty Feather module ID.
-    // Other DAP source paths are forwarded as module IDs.
+    // Entry-relative file: module IDs are mapped to and from source paths.
+    // Other module IDs are forwarded unchanged.
     std::string PrimarySourcePath;
     std::size_t MaxMessageBytes = 1024 * 1024;
 };

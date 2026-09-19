@@ -6,9 +6,14 @@
 namespace Feather {
 namespace {
 
+constexpr NativeModuleGuid ImportAdapterGuid{{
+    0x55, 0x17, 0x89, 0xb2, 0x72, 0x5b, 0x45, 0xec,
+    0xa8, 0x24, 0xc7, 0x4d, 0x10, 0x0e, 0x35, 0xc3}};
+
 class ImportFunction final : public NativeObject {
 public:
-    explicit ImportFunction(ImportCallback Callback) : Callback(std::move(Callback)) {}
+    ImportFunction(NativeObjectType& Type, ImportCallback Callback)
+        : NativeObject(Type), Callback(std::move(Callback)) {}
 
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     bool IsCallable() const override { return true; }
@@ -29,8 +34,8 @@ private:
 
 class ModuleImportFunction final : public NativeObject {
 public:
-    ModuleImportFunction(Vm& Machine, ModuleImportCallback Callback)
-        : Machine(Machine), Callback(std::move(Callback)) {}
+    ModuleImportFunction(NativeObjectType& Type, Vm& Machine, ModuleImportCallback Callback)
+        : NativeObject(Type), Machine(Machine), Callback(std::move(Callback)) {}
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>& Arguments) override {
@@ -48,14 +53,18 @@ private:
 
 void RegisterImport(Vm& Machine, ImportCallback Callback) {
     if (!Callback) throw std::invalid_argument("import callback is empty");
+    auto& Type = Machine.CreateNativeObjectType<NativeSingletonType>(
+        ImportAdapterGuid, "LegacyImport");
     Machine.RegisterNativeFunction("import",
-        std::make_shared<ImportFunction>(std::move(Callback)));
+        Type.Create<ImportFunction>(std::move(Callback)));
 }
 
 void RegisterModuleImport(Vm& Machine, std::string_view ModuleId,
                           ModuleImportCallback Callback) {
     if (!Callback) throw std::invalid_argument("module import callback is empty");
-    auto Native = std::make_shared<ModuleImportFunction>(Machine, std::move(Callback));
+    auto& Type = Machine.CreateNativeObjectType<NativeSingletonType>(
+        ImportAdapterGuid, "ModuleImport:" + std::string(ModuleId));
+    auto Native = Type.Create<ModuleImportFunction>(Machine, std::move(Callback));
     if (ModuleId.empty()) Machine.RegisterNativeFunction("import", std::move(Native));
     else {
         Machine.RegisterNativeObject(Native);

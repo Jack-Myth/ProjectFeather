@@ -1,6 +1,6 @@
 # 工程结构与开工顺序
 
-状态：M1 至 M5、单 VM 多文件模块、Native 动态库、嵌入式调试协议端、TCP 控制台调试器、传输无关 DAP adapter 和 VS Code 扩展首版可运行，源码与独立字节码命令行程序已接入；`stdio.felib` 是首个独立 Native 模块。公开 API 和字节格式仍处实验阶段。运行时语义以 `SPEC-runtime-design.md` 为准，源码语法以 `SPEC-syntax.md` 为准，多模块以 `SPEC-multimodule.md` 为准，快照行为以 `SPEC-snapshot.md` 为准，磁盘编译产物以 `SPEC-bytecode-format.md` 为准，导入以 `SPEC-import.md`、`SPEC-native-modules.md` 为准，标准输入输出以 `SPEC-stdio.md` 为准，调试嵌入边界以 `SPEC-debug-protocol.md`、`SPEC-debugger-cli.md` 和 `SPEC-dap-adapter.md` 为准。
+状态：M1 至 M5、单 VM 多文件模块、Native 动态库、嵌入式调试协议端、TCP 控制台调试器、传输无关 DAP adapter 和 VS Code 扩展首版可运行，源码与独立字节码命令行程序已接入；`stdio.felib` 与 `snapshot.felib` 已作为独立 Native 模块运行。公开 API 和字节格式仍处实验阶段。运行时语义以 `SPEC-runtime-design.md` 为准，源码语法以 `SPEC-syntax.md` 为准，多模块以 `SPEC-multimodule.md` 为准，快照行为以 `SPEC-snapshot.md` 为准，磁盘编译产物以 `SPEC-bytecode-format.md` 为准，导入以 `SPEC-import.md`、`SPEC-native-modules.md` 为准，标准输入输出以 `SPEC-stdio.md` 为准，调试嵌入边界以 `SPEC-debug-protocol.md`、`SPEC-debugger-cli.md` 和 `SPEC-dap-adapter.md` 为准。
 
 ## 目录
 
@@ -71,7 +71,7 @@ Release 流程统一由 `scripts/build-release.ps1` 驱动，显式设置 `build
 
 `Value` 不依赖 VM；`Bytecode` 可依赖 Value 类型定义；`Vm` 依赖 Value 与 Bytecode。`Object`、`Memory` 与 `Embed` 通过窄接口接入 VM，避免 Value 反向依赖解释器。`Compiler` 只生成 Bytecode 模块，不直接调用解释循环。`Snapshot` 读取 VM 的显式帧和对象图，不依赖 C++ 调用栈。`include/Feather/Runtime.hpp` 暂时公开手写字节码所需构建器与原型，是实验性接口；稳定嵌入接口完成时再收窄公开头文件。ScriptObject 现由 VM 非移动堆持有，宿主跨 GC 使用它须持 RootHandle。
 
-`stdio.felib` 静态链接 runtime 的公开嵌入实现，核心不反向依赖标准输入输出，也不再要求旁置 `feather-core.dll`。`feather` 和 `feathervm` 运行时从旁边的 `modules/` 装载它；`featherc` 不装载。`StdIoLibrary::GetModule()` 也允许嵌入式宿主自行装配；库不注入标准输入输出全局名。Native 库入口见 `include/Feather/NativeModule.hpp`，动态库加载与缓存位于 `src/Cli/NativeModules.cpp`。
+`stdio.felib` 与 `snapshot.felib` 静态链接 runtime 的公开嵌入实现，核心不反向依赖控制台、文件或 CLI 会话。`feather` 和 `feathervm` 运行时从旁边的 `modules/` 装载它们；`featherc` 不装载。`StdIoLibrary::GetModule()` 允许嵌入式宿主自行装配；`SnapshotLibrary` 则要求宿主实现显式的 `SnapshotHost` 能力。库均不注入全局名。Native 库入口见 `include/Feather/NativeModule.hpp`，动态库加载与缓存位于 `src/Cli/NativeModules.cpp`，CLI 的存档容器和会话切换位于 `src/Cli/SnapshotHost.cpp` 与 `Runner.cpp`。
 
 默认静态 runtime 在 core 之后加入 `DebugTarget`、共用 JSON 和 `DapAdapter`；`feather` 可链接这些实现，`feathervm` 始终不链接。`-Ddebugger=false` 会从 runtime 源码中完全移除后三者以及 `feather-debugger`。core 只公开 `VmDebugController` 和回调期内有效的 `VmDebugContext`，不反向调用调试实现。宿主分别实现 `DebugChannel` 与 `DapChannel` 传输完整消息。可复用库仍不依赖 Socket；TCP、字节流 framing 和控制台交互位于 `src/Cli` 的薄宿主中。`feather` 的 `--debug-listen` 采用异步附加生命周期，`--wait-debugger` 才启用连接与启动门控。
 
@@ -85,6 +85,6 @@ Release 流程统一由 `scripts/build-release.ps1` 驱动，显式设置 `build
 4. **M4 编译器**：先完成独立语法规范，再实现 lexer、parser、AST 与字节码生成；与 M1/M2 手写模块的行为对齐。
 5. **M5 快照**：先冻结保存/恢复语义，再实现对象图和帧序列化。
 
-每个里程碑须有能运行的验收样例。M1 至 M5 均已具备对应测试；快照当前以保存/恢复往返、v3 CRC32 意外损坏检测、基本资源边界和宿主 codec 失败回滚验收，不再扩展细碎的畸形输入组合。
+每个里程碑须有能运行的验收样例。M1 至 M5 均已具备对应测试；快照当前以保存/恢复往返、v4 CRC32 意外损坏检测、基本资源边界和 Native 类型失败回滚验收，不再扩展细碎的畸形输入组合。
 
-单 VM 多文件模块已作为独立阶段接入 VM 执行、GC 和 v3 快照；模块身份、显式导出与初始化状态见 `SPEC-multimodule.md`。独立 CLI 仍只执行单个入口文件，文件解析由宿主层决定。
+单 VM 多文件模块已作为独立阶段接入 VM 执行、GC 和 v4 快照；模块身份、显式导出与初始化状态见 `SPEC-multimodule.md`。独立 CLI 仍只执行单个入口文件，文件解析由宿主层决定。

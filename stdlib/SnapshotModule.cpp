@@ -1,14 +1,14 @@
 #include <Feather/NativeModule.hpp>
-#include <Feather/StdIo.hpp>
+#include <Feather/Snapshot.hpp>
 
 #include <memory>
 
 namespace {
 Feather::Value Create(const Feather::NativeModuleContext& Context) {
-    if (!Context.Input || !Context.Output)
+    if (!Context.Snapshots)
         return Feather::Value::FromObject(std::make_shared<Feather::ErrorObject>(
-            "stdio requires input and output streams"));
-    Feather::StdIoLibrary Library(Context.Machine, *Context.Input, *Context.Output);
+            "snapshot requires host snapshot services"));
+    Feather::SnapshotLibrary Library(Context.Machine, *Context.Snapshots);
     return Library.GetModule();
 }
 }
@@ -16,7 +16,7 @@ Feather::Value Create(const Feather::NativeModuleContext& Context) {
 extern "C" FEATHER_NATIVE_EXPORT const Feather::NativeModuleDescriptor* FeatherNativeModuleV2() {
     static const Feather::NativeModuleDescriptor Descriptor{
         Feather::NativeModuleInterfaceVersion,
-        Feather::StdIoModuleGuid,
-        "stdio", &Create};
+        Feather::SnapshotModuleGuid,
+        "snapshot", &Create};
     return &Descriptor;
 }
