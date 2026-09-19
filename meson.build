@@ -9,6 +9,10 @@ project(
   ],
 )
 
+if not get_option('render2d').disabled()
+  add_languages('c', native : false)
+endif
+
 if host_machine.system() == 'windows'
   add_project_arguments('/wd4251', language : 'cpp')
 endif

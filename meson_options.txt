@@ -4,3 +4,10 @@ option(
   value : true,
   description : 'Bundle debug support and build the TCP console debugger',
 )
+
+option(
+  'render2d',
+  type : 'feature',
+  value : 'enabled',
+  description : 'Build the SDL3 + bgfx render2d Native module',
+)

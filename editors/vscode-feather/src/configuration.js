@@ -8,7 +8,7 @@ function finalizeConfiguration(folderPath, config, existsSync, platform = proces
 
   if (config.request === 'launch' && !config.runtimeExecutable) {
     const executable = platform === 'win32' ? 'feather.exe' : 'feather';
-    const candidate = folderPath && path.join(folderPath, 'build', executable);
+    const candidate = folderPath && path.join(folderPath, 'build', 'debug', executable);
     config.runtimeExecutable = candidate && existsSync(candidate) ? candidate : 'feather';
   }
 

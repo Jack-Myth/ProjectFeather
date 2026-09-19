@@ -7,7 +7,8 @@ const path = require('node:path');
 const { FeatherDebugSession } = require('../src/session');
 
 const repository = path.resolve(__dirname, '..', '..', '..');
-const runtime = path.join(repository, 'build', process.platform === 'win32' ? 'feather.exe' : 'feather');
+const runtime = path.join(repository, 'build', 'debug',
+  process.platform === 'win32' ? 'feather.exe' : 'feather');
 const program = path.join(repository, 'tests', 'fixtures', 'cli-ok.fe');
 
 test('launch drives a real breakpoint, inspection, resume, and termination',

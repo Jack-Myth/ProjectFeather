@@ -1,11 +1,15 @@
 # 脚本语言工程进度
 
-更新日期：2026-09-19
-设计依据：`SPEC-runtime-design.md`、`SPEC-syntax.md`、`SPEC-snapshot.md`、`SPEC-bytecode-format.md`、`SPEC-symbol-format.md`、`SPEC-multimodule.md`、`SPEC-import.md`、`SPEC-native-modules.md`、`SPEC-stdio.md`、`SPEC-debug-protocol.md`、`SPEC-debugger-cli.md`、`SPEC-dap-adapter.md`；实施记录见 `ROADMAP-multimodule.md` 和 `ROADMAP-runtime-diagnostics.md`，工程结构见 `ENGINEERING.md`。本文件只跟踪进度和待决事项；语义以设计规范为准。
+更新日期：2026-09-20
+设计依据：`SPEC-runtime-design.md`、`SPEC-syntax.md`、`SPEC-snapshot.md`、`SPEC-bytecode-format.md`、`SPEC-symbol-format.md`、`SPEC-multimodule.md`、`SPEC-import.md`、`SPEC-native-modules.md`、`SPEC-stdio.md`、`SPEC-time.md`、`SPEC-render2d.md`、`SPEC-debug-protocol.md`、`SPEC-debugger-cli.md`、`SPEC-dap-adapter.md`；实施记录见 `ROADMAP-multimodule.md` 和 `ROADMAP-runtime-diagnostics.md`，工程结构见 `ENGINEERING.md`。本文件只跟踪进度和待决事项；语义以设计规范为准。
 
 ## 当前状态
 
 **0.3.1 版本节点已形成：M1 至 M5 首版、单 VM 多文件模块、源码与字节码统一运行入口、精简 `feathervm`、嵌入式调试 target、TCP 控制台调试器、DAP adapter，以及带基础语言支持的 VS Code 扩展均可运行。** Release 流程已固定三级优化、LTO、`NDEBUG` 和完整测试；版本内容见 `CHANGELOG.md`。ScriptObject 使用 VM 非移动堆；VM 可在指令安全点自动执行完整标记清除，也保留空闲时显式 GC、RootHandle、NativeObject 登记、内存与收集统计和分配故障通道。宿主可注册 native 函数、读写模块全局值。`Compile(source)` 生成模块、初始化函数、命名函数映射和导出表。实验版 v3 `.fbc` 支持独立编译和加载；可选 v3 `.fbs` 保存源码位置、可断点标记、函数名及带生命周期的局部变量名。v4 VM 快照已能保存/恢复模块集合、跨模块函数，以及按模块 GUID + 类型名注册的 NativeObject；`snapshot.felib` 进一步提供路径式保存/恢复，CLI 用 `FTHA` 容器记录导入清单并重建新 VM。默认静态 runtime 包含 `DebugTarget` 与 `DapAdapter`；`-Ddebugger=false` 可完整移除 JSON 调试实现和控制台调试器，核心仍只保留传输无关的安全点接口。公开 C++ API、调试协议和磁盘格式仍处实验阶段。
+
+`render2d.felib` 首版已接入 SDL3 + bgfx：脚本通过粗粒度命令创建窗口、逐帧绘制图片和文字并读取事件；不暴露底层图形句柄，不提供自定义 Shader。RenderContext 快照恢复时重建窗口，Texture/Font 保存路径并惰性重载，打开帧期间拒绝快照。标准配置默认构建该模块，轻量配置可用 `-Drender2d=disabled` 显式裁剪。
+
+`time.felib` 已提供单调时间、Unix 时间、同步 Sleep、deadline 等待和可快照 Clock；Clock 恢复时重建单调时间基准，不把存档离线时间计入帧 delta。构建产物统一收在 `build/<配置>/`，Render2D 现随标准配置默认构建，也可用 `-Drender2d=disabled` 裁剪。
 
 ### 已确定的主要方向
 
@@ -19,7 +23,7 @@
 
 `feather run <program.fe|program.fbc>`、`featherc <source.fe> -o <program.fbc>` 和精简的 `feathervm <program.fbc>` 均已加入。源码运行会优先使用不早于 `.fe` 的同名、有效 `.fbc`，源码调试仍总是重新编译；`feathervm` 不链接编译器和调试实现。运行入口先执行顶层语句，再调用可选的无参数 `main`；独立程序未注册快捷函数，会明确拒绝快捷行。嵌入式宿主可在初始化前用 `RegisterNativeFunction` 注入 `__QuickOperator…`，用 `SetGlobal` 注入一般宿主对象；编译器保留快捷行标记供加载后使用。
 
-`RegisterImport` 只校验并转发普通全局调用；宿主自行解析来源、创建子 VM、代理导出值并管理缓存。CLI 宿主从可执行文件旁的 `modules/` 搜索裸名，Native 动态库优先于同名 Feather 文件；`stdio.felib` 返回 Console/IO，`snapshot.felib` 返回 Checkpoint/Restore，均只通过显式 `import` 取得。解释器与 Native 库分别静态链接同一套 runtime 源码，不要求旁置 Feather DLL。跨 VM ScriptObject/Function 不通过旧适配器返回。
+`RegisterImport` 只校验并转发普通全局调用；宿主自行解析来源、创建子 VM、代理导出值并管理缓存。CLI 宿主从可执行文件旁的 `modules/` 搜索裸名，Native 动态库优先于同名 Feather 文件；`stdio.felib` 返回 Console/IO，`snapshot.felib` 返回 Checkpoint/Restore，`time.felib` 返回时钟与等待函数，均只通过显式 `import` 取得。解释器与 Native 库分别静态链接同一套 runtime 源码，不要求旁置 Feather DLL。跨 VM ScriptObject/Function 不通过旧适配器返回。
 
 ## 阶段 0 已讨论的事项与实施前检查
 

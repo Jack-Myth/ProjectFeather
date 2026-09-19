@@ -91,4 +91,6 @@ const Feather::NativeModuleDescriptor* FeatherNativeModuleV2() {
 
 `Snapshots` 是可选宿主能力；普通模块不得假定它存在。标准 `snapshot` 模块在缺少该能力时导入为 Error，在 CLI 中则把 `Checkpoint(path)` 和 `Restore(path)` 转交给解释器会话管理器。它不接收 slot，也不提供存档索引策略。
 
+标准 `time` 模块不需要额外宿主服务，提供单调时钟、Unix 时间、同步等待及可快照的 `Clock`。`Clock` 的类型身份使用 time 模块 GUID 与类型名 `Clock`；恢复时重新建立单调时间基准，具体契约见 `SPEC-time.md`。标准 `render2d` 模块则把 SDL3/bgfx 完全封装在模块内部，具体契约见 `SPEC-render2d.md`。
+
 对应的 `modules/meson.build` 将 `stdlib/StdIo.cpp` 和入口文件编译为 `shared_module('stdio.felib', name_prefix: '')`，依赖同一份共享 Core，输出到 `modules/`。新的模块把 `stdio` 换为自己的裸名，返回自身的 `NativeObject` 根对象即可。模块里的对象/方法可以参考 `stdlib/StdIo.cpp`；资源句柄活多久、怎样关闭、哪些失败返回 Error，都由该模块定义。

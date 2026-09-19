@@ -51,7 +51,7 @@
               },
               "runtimeExecutable": {
                 "type": "string",
-                "description": "Path to feather.exe. Defaults to build/feather.exe in the workspace, then feather on PATH."
+                "description": "Path to feather.exe. Defaults to build/debug/feather.exe in the workspace, then feather on PATH."
               },
               "runtimeArgs": {
                 "type": "array",

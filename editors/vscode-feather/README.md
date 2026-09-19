@@ -27,7 +27,7 @@ code --install-extension editors\vscode-feather\feather-debug-0.3.1.vsix
       "request": "launch",
       "name": "Debug Feather program",
       "program": "${workspaceFolder}/hello.fe",
-      "runtimeExecutable": "${workspaceFolder}/build/feather.exe",
+      "runtimeExecutable": "${workspaceFolder}/build/debug/feather.exe",
       "console": "integratedTerminal"
     }
   ]
@@ -52,7 +52,7 @@ feather debug --listen <host:port> --wait-debugger <program>
 先自行启动等待调试器的目标：
 
 ```powershell
-build\feather.exe debug --listen 127.0.0.1:4711 --wait-debugger hello.fe
+build\debug\feather.exe debug --listen 127.0.0.1:4711 --wait-debugger hello.fe
 ```
 
 再使用：

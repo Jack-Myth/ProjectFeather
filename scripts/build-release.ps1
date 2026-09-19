@@ -6,7 +6,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
-    $BuildDirectory = Join-Path $PSScriptRoot '..\build-release'
+    $Configuration = if ($WithoutDebugger) { 'release-nodebug' } else { 'release' }
+    $BuildDirectory = Join-Path $PSScriptRoot "..\build\$Configuration"
 }
 $ResolvedBuildDirectory = [System.IO.Path]::GetFullPath($BuildDirectory)
 $CoreData = Join-Path $ResolvedBuildDirectory 'meson-private\coredata.dat'

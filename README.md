@@ -13,9 +13,9 @@ ProjectFeather 是一个使用 C++20 编写、面向宿主嵌入的小型脚本�
 开发构建。在 Windows 上请从 Visual Studio 的 **x64 Native Tools Command Prompt** 运行：
 
 ```text
-meson setup build
-meson compile -C build
-meson test -C build --print-errorlogs
+meson setup build/debug
+meson compile -C build/debug
+meson test -C build/debug --print-errorlogs
 ```
 
 优化的 Release 构建使用三级优化、LTO 与 `NDEBUG`，并在构建后自动运行测试：
@@ -24,26 +24,37 @@ meson test -C build --print-errorlogs
 powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
 ```
 
-产物位于 `build-release/`。默认保留 `feather debug`、控制台调试器和 VS Code 调试所需实现；若只发布不含调试实现的解释器与运行器，可加 `-WithoutDebugger`。等价的手工配置命令为：
+产物位于 `build/release/`。默认保留 `feather debug`、控制台调试器和 VS Code 调试所需实现；若只发布不含调试实现的解释器与运行器，可加 `-WithoutDebugger`，产物进入 `build/release-nodebug/`。等价的手工配置命令为：
 
 ```text
-meson setup build-release --buildtype=release -Doptimization=3 -Db_lto=true -Db_ndebug=true -Ddebugger=true
-meson compile -C build-release
-meson test -C build-release --print-errorlogs
+meson setup build/release --buildtype=release -Doptimization=3 -Db_lto=true -Db_ndebug=true -Ddebugger=true
+meson compile -C build/release
+meson test -C build/release --print-errorlogs
 ```
 
-Meson 生成一个位置无关的静态 `feather-runtime`，不再依赖项目自己的 core/debug DLL；`build/modules/stdio.felib.dll`（Linux 为 `.so`）仍是按需加载的 Native 模块。`feather` 完整链接 runtime，默认包含传输无关的 `DebugTarget` 和 Feather-to-DAP adapter；`feathervm` 只按需链接字节码执行所需对象，不包含源码编译器、调试协议或 Socket transport。若要构建连 `feather` 也不含 JSON 调试实现的版本，使用 `meson setup build-nodebug -Ddebugger=false`；VM 的低层安全点接口仍留在 core 中，debug/DAP 头文件对应实现则不可链接。
+所有生成产物统一位于 `build/` 下，并按配置分为 `debug/`、`nodebug/`、`release/` 和 `release-nodebug/`。Meson 生成一个位置无关的静态 `feather-runtime`，不再依赖项目自己的 core/debug DLL；Native 模块位于对应配置的 `modules/`，Windows 文件名包括 `stdio.felib.dll`、`snapshot.felib.dll`、`time.felib.dll` 和 `render2d.felib.dll`。`feather` 完整链接 runtime，默认包含传输无关的 `DebugTarget` 和 Feather-to-DAP adapter；`feathervm` 只按需链接字节码执行所需对象，不包含源码编译器、调试协议或 Socket transport。若要构建连 `feather` 也不含 JSON 调试实现的版本，使用 `meson setup build/nodebug -Ddebugger=false`；VM 的低层安全点接口仍留在 core 中，debug/DAP 头文件对应实现则不可链接。
+
+`render2d.felib` 提供 SDL3 + bgfx 二维渲染后端。它默认构建，需要 Git、CMake 和平台图形 SDK，Meson 会按 wrap 中固定的版本取得依赖；只构建轻量 runtime 时可显式传入 `-Drender2d=disabled`：
+
+```text
+meson setup build/debug -Drender2d=enabled
+meson compile -C build/debug
+```
+
+脚本显式 `import("render2d")` 后可创建窗口，使用 `BeginRender`、`DrawTexture`、`DrawText`、`EndRender` 逐帧绘制。首版不公开 SDL/bgfx handle，也不提供自定义 Shader 或通用 Quad；资源快照只保存路径并在恢复后按需重载。完整接口与快照边界见 [Render2D 模块规范](SPEC-render2d.md)。
+
+`time.felib` 提供单调时间、Unix 时间、同步 Sleep、deadline 等待和可快照的帧 Clock。Clock 恢复时重建单调时间基准，不把离线时间计入下一次 Tick；接口见 [Time 模块规范](SPEC-time.md)。
 
 宿主实现 `DebugChannel`，把每条完整 JSON 消息送入 `DebugTarget::DispatchProtocolMessage()`，即可取得源码及条件断点、可选的 Error 结果断点、暂停、单步、调用栈、变量和对象属性、暂停帧表达式求值与变量修改。仓库同时提供最小的 `feather-debugger` 控制台前端和 [VS Code 调试扩展](editors/vscode-feather/README.md)。二者都与解释器建立唯一一条双向 TCP 连接，脚本 stdin/stdout 不承载调试数据；VS Code 扩展在 extension host 内完成 DAP 转换，不启动中继进程。嵌入式 IDE 宿主也可实现 `DapChannel`，把 DAP 与 target 两侧的完整消息交给 C++ `DapAdapter`。DAP 的 `setExceptionBreakpoints` 中 `error` filter 会控制 Error 停顿。协议见 [Feather 调试协议](SPEC-debug-protocol.md)、[控制台调试器](SPEC-debugger-cli.md) 和 [DAP adapter](SPEC-dap-adapter.md)。
 
 直接运行 UTF-8 源文件：
 
 ```text
-build\feather.exe run hello.fe
-build\featherc.exe hello.fe -o hello.fbc
-build\feather.exe run hello.fbc
-build\feathervm.exe hello.fbc
-build\featherc.exe hello.fe -o hello.fbc --symbols hello.fbs
+build\debug\feather.exe run hello.fe
+build\debug\featherc.exe hello.fe -o hello.fbc
+build\debug\feather.exe run hello.fbc
+build\debug\feathervm.exe hello.fbc
+build\debug\featherc.exe hello.fe -o hello.fbc --symbols hello.fbs
 ```
 
 `feather run hello.fe` 会检查同目录的 `hello.fbc`；若字节码修改时间不早于源码且能通过完整验证，就直接执行该缓存，否则重新编译源码。源码模块导入采用相同规则。该时间戳只用于本地开发加速，确定性部署应显式运行 `.fbc`。`feather debug` 始终重新编译源码，以保留完整调试信息。
@@ -51,8 +62,8 @@ build\featherc.exe hello.fe -o hello.fbc --symbols hello.fbs
 控制台调试分两个终端启动。解释器会在连接建立后继续等待 `run`，因此可先设置断点：
 
 ```text
-build\feather.exe debug --listen 127.0.0.1:4711 --wait-debugger hello.fe
-build\feather-debugger.exe --connect 127.0.0.1:4711
+build\debug\feather.exe debug --listen 127.0.0.1:4711 --wait-debugger hello.fe
+build\debug\feather-debugger.exe --connect 127.0.0.1:4711
 ```
 
 `feathervm` 是只接受单个 `.fbc` 参数的精简生产运行器，不提供调试选项。源码调试使用 `feather debug`；`--listen` 单独使用时只开启异步监听，程序立即执行，可供调试器附加到仍在运行的程序，只有再给出 `--wait-debugger` 才等待调试器连接和 `run` 命令。当前 TCP 没有鉴权和加密，只应监听本机回环地址。`feather-debugger` 中输入 `help` 可查看命令；`errors on` 开启 Error 结果断点，默认关闭。

@@ -73,6 +73,24 @@ test('cli-vm-rejects-debug-option', FeatherVmCli,
 StdIoTests = executable('stdio-tests', 'StdIo.cpp', '../stdlib/StdIo.cpp',
   dependencies : FeatherDependency)
 test('stdio', StdIoTests)
+Render2DTests = executable('render2d-tests', 'Render2D.cpp',
+  '../modules/render2d/Render2D.cpp',
+  include_directories : include_directories('../modules/render2d'),
+  dependencies : FeatherDependency)
+test('render2d-core', Render2DTests)
+TimeTests = executable('time-tests', 'Time.cpp',
+  '../modules/time/Time.cpp',
+  include_directories : include_directories('../modules/time'),
+  dependencies : FeatherDependency)
+test('time-core', TimeTests)
+test('cli-time-import', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/cli-time-import.fe'],
+  depends : TimeNativeModule)
+if get_option('render2d').enabled()
+  test('cli-render2d-import', FeatherCli,
+    args : ['run', meson.current_source_dir() / 'fixtures/cli-render2d-import.fe'],
+    depends : Render2DNativeModule)
+endif
 test('cli-stdio', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-stdio.fe'],
   depends : StdioNativeModule)

@@ -27,7 +27,7 @@ test('resolves an ordinary relative program against its workspace', () => {
 
 test('uses the workspace build runtime when it exists', () => {
   const workspace = path.resolve('workspace');
-  const expected = path.join(workspace, 'build', 'feather.exe');
+  const expected = path.join(workspace, 'build', 'debug', 'feather.exe');
   const config = { request: 'launch', program: path.join(workspace, 'main.fe') };
 
   finalizeConfiguration(workspace, config, candidate => candidate === expected, 'win32');

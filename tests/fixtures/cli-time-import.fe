@@ -1,0 +1,9 @@
+var time = import("time");
+
+def main() {
+    var clock = time.CreateClock();
+    time.Sleep(0);
+    var delta = time.Tick(clock);
+    if (delta < 0) { return error; }
+    return time.Monotonic() < time.UnixTime();
+}

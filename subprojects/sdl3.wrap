@@ -1,0 +1,4 @@
+[wrap-git]
+url = https://github.com/libsdl-org/SDL.git
+revision = a6c68172beb08143d895bc8d8980d0796903c4e4
+depth = 1

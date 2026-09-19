@@ -1,0 +1,5 @@
+var render2d = import("render2d");
+
+def main() {
+    return render2d.IsOpen;
+}
