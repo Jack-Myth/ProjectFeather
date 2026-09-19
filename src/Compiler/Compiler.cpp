@@ -13,9 +13,10 @@ namespace Feather {
 namespace {
 
 enum class TokenKind {
-    End, Name, Number, String, Def, Var, Export, Return, If, Else, While, Null,
+    End, Name, Number, String, Def, Var, Export, Return, If, Else, While, Break,
+    Continue, Null,
     True, False, Object, LeftParen, RightParen, LeftBrace, RightBrace,
-    LeftBracket, RightBracket, Comma, Dot, Semicolon, Assign, Equal,
+    LeftBracket, RightBracket, Comma, Dot, Semicolon, Assign, Equal, NotEqual,
     Less, Plus, Minus, Star, Slash, QuickHash, QuickDollar,
     QuickAmpersand, QuickRightAngle
 };
@@ -114,6 +115,7 @@ public:
                     {"def", TokenKind::Def}, {"var", TokenKind::Var},
                     {"export", TokenKind::Export}, {"return", TokenKind::Return},
                     {"if", TokenKind::If}, {"else", TokenKind::Else}, {"while", TokenKind::While},
+                    {"break", TokenKind::Break}, {"continue", TokenKind::Continue},
                     {"null", TokenKind::Null}, {"true", TokenKind::True}, {"false", TokenKind::False},
                     {"object", TokenKind::Object}};
                 auto Found = Keywords.find(Start.Text);
@@ -181,6 +183,11 @@ public:
                     if (Position < Input.size() && Input[Position] == '=') { Advance(); Start.Kind = TokenKind::Equal; }
                     else Start.Kind = TokenKind::Assign;
                     break;
+                case '!':
+                    if (Position < Input.size() && Input[Position] == '=') {
+                        Advance(); Start.Kind = TokenKind::NotEqual;
+                    } else Fail(Start, "expected '=' after '!'");
+                    break;
                 default: Fail(Start, "unexpected character");
                 }
             }
@@ -200,7 +207,7 @@ private:
 };
 
 enum class NodeKind { Literal, Name, Object, Member, Call, Unary, Binary, Assign,
-    Var, Return, If, While, Block, Expression };
+    Var, Return, If, While, Break, Continue, Block, Expression };
 struct Node {
     NodeKind Kind;
     Token At;
@@ -337,7 +344,18 @@ private:
             Expect(TokenKind::LeftParen, "expected '('");
             Result->Children.push_back(ParseExpression());
             Expect(TokenKind::RightParen, "expected ')'");
-            Result->Children.push_back(ParseBlock()); return Result;
+            ++LoopDepth;
+            Result->Children.push_back(ParseBlock());
+            --LoopDepth;
+            return Result;
+        }
+        if (Match(TokenKind::Break) || Match(TokenKind::Continue)) {
+            auto At = Previous();
+            if (LoopDepth == 0)
+                Fail(At, At.Kind == TokenKind::Break
+                    ? "break outside loop" : "continue outside loop");
+            Expect(TokenKind::Semicolon, "expected ';'");
+            return Make(At.Kind == TokenKind::Break ? NodeKind::Break : NodeKind::Continue, At);
         }
         auto Result = Make(NodeKind::Expression, Peek());
         Result->Children.push_back(ParseExpression());
@@ -375,7 +393,9 @@ private:
         Result->Children.push_back(std::move(Left));
         Result->Children.push_back(ParseAssignment()); return Result;
     }
-    NodePtr ParseEquality() { return ParseBinary(&Parser::ParseComparison, {TokenKind::Equal}); }
+    NodePtr ParseEquality() {
+        return ParseBinary(&Parser::ParseComparison, {TokenKind::Equal, TokenKind::NotEqual});
+    }
     NodePtr ParseComparison() { return ParseBinary(&Parser::ParseTerm, {TokenKind::Less}); }
     NodePtr ParseTerm() { return ParseBinary(&Parser::ParseFactor, {TokenKind::Plus, TokenKind::Minus}); }
     NodePtr ParseFactor() { return ParseBinary(&Parser::ParseUnary, {TokenKind::Star, TokenKind::Slash}); }
@@ -445,6 +465,7 @@ private:
     std::vector<Token> Tokens;
     std::size_t Position = 0;
     std::size_t Depth = 0;
+    std::size_t LoopDepth = 0;
 };
 
 class Emitter {
@@ -490,6 +511,10 @@ public:
     }
     std::uint32_t GetLocalCount() const { return LocalCount; }
 private:
+    struct LoopContext {
+        std::size_t ContinueTarget;
+        std::vector<std::size_t> BreakJumps;
+    };
     struct SourceGuard {
         SourceGuard(const Token*& Current, const Token& At) : Current(Current), Previous(Current) { Current = &At; }
         ~SourceGuard() { Current = Previous; }
@@ -591,10 +616,26 @@ private:
             auto Body = EmitJump(Op::JumpIf);
             auto Exit = EmitJump(Op::Jump);
             Code.PatchJump(Body, Code.Offset());
+            Loops.push_back({Start, {}});
             EmitBlock(*Statement.Children[1], true);
             auto Back = EmitJump(Op::Jump);
             Code.PatchJump(Back, Start);
-            Code.PatchJump(Exit, Code.Offset()); break;
+            auto Loop = std::move(Loops.back());
+            Loops.pop_back();
+            auto End = Code.Offset();
+            Code.PatchJump(Exit, End);
+            for (auto Jump : Loop.BreakJumps) Code.PatchJump(Jump, End);
+            break;
+        }
+        case NodeKind::Break:
+            if (Loops.empty()) Fail(Statement.At, "internal break outside loop");
+            Loops.back().BreakJumps.push_back(EmitJump(Op::Jump));
+            break;
+        case NodeKind::Continue: {
+            if (Loops.empty()) Fail(Statement.At, "internal continue outside loop");
+            auto Jump = EmitJump(Op::Jump);
+            Code.PatchJump(Jump, Loops.back().ContinueTarget);
+            break;
         }
         default: Fail(Statement.At, "internal invalid statement");
         }
@@ -641,6 +682,8 @@ private:
             case TokenKind::Star: Emit(Op::Mul); break;
             case TokenKind::Slash: Emit(Op::Div); break;
             case TokenKind::Equal: Emit(Op::Equal); break;
+            case TokenKind::NotEqual:
+                Emit(Op::Equal); Emit(Op::False); Emit(Op::Equal); break;
             case TokenKind::Less: Emit(Op::Less); break;
             default: Fail(Expression.At, "internal invalid binary operator");
             }
@@ -675,6 +718,7 @@ private:
     std::vector<std::unordered_map<std::string, std::uint32_t>> Scopes;
     std::vector<std::vector<std::size_t>> ScopeSymbols;
     std::vector<LocalVariableInfo> LocalVariables;
+    std::vector<LoopContext> Loops;
 };
 
 } // namespace

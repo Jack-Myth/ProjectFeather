@@ -15,6 +15,8 @@ test('quick', QuickTests)
 
 test('cli-run', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-ok.fe'])
+test('cli-loop-control', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/cli-loop-control.fe'])
 test('cli-main-error', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-main-error.fe'],
   expected_fail : true)

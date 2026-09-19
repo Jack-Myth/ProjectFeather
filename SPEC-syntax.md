@@ -5,11 +5,11 @@
 ## 词法
 
 - 空格、制表符和换行分隔 token；词法器扫描时跳过 `//` 至行尾的注释，不存在先对整个源码删注释的独立预处理步骤。
-- 标识符：`[A-Za-z_][A-Za-z0-9_]*`；保留字为 `def var export return if else while null true false object`。
+- 标识符：`[A-Za-z_][A-Za-z0-9_]*`；保留字为 `def var export return if else while break continue null true false object`。
 - `import` 是普通标识符和宿主注册的全局函数名，不属于保留字；编译器不解析依赖。契约见 `SPEC-import.md`。
 - 数字：十进制 `DIGIT+ ('.' DIGIT+)? ([eE] [+-]? DIGIT+)?`，无符号；负号为一元运算。词法阶段拒绝超出有限 double 范围的字面量。
 - 双引号字符串；支持 `\\`、`\"`、`\n`、`\r`、`\t`，其他反斜线转义报错。原始换行不得出现在字符串中；解码后的字节必须是合法 UTF-8。
-- 普通语句以分号结束；块语句、函数声明、`if`/`while` 和快捷行后不加分号。
+- 普通语句以及 `break`/`continue` 以分号结束；块语句、函数声明、`if`/`while` 和快捷行后不加分号。
 
 ### 行首快捷调用
 
@@ -38,10 +38,11 @@ statement     = "var" IDENT [ "=" expression ] ";"
               | "return" [ expression ] ";"
               | "if" "(" expression ")" block [ "else" block ]
               | "while" "(" expression ")" block
+              | "break" ";" | "continue" ";"
               | block | expression ";" | QUICK_LINE ;
 expression    = assignment ;
 assignment    = equality [ "=" assignment ] ;
-equality      = comparison { "==" comparison } ;
+equality      = comparison { ( "==" | "!=" ) comparison } ;
 comparison    = term { "<" term } ;
 term          = factor { ( "+" | "-" ) factor } ;
 factor        = unary { ( "*" | "/" ) unary } ;
@@ -62,6 +63,8 @@ literal       = "null" | "true" | "false" | NUMBER | STRING ;
 - 函数默认参数只能是字面量，且带默认值的形参后面不允许无默认值的形参。调用参数从左到右求值；其余补值、截断规则沿用运行时。
 - 编译结果包含一个模块、初始化函数索引、声明函数名到常量索引的映射及导出名表。宿主可用此模块构造主 VM，或调用 `CompiledProgram::LoadInto(vm, id)` 装入已有 VM，再以 `InitializeModule(vm, id)` 初始化；后者只执行顶层代码一次。主模块的旧 `Initialize(vm)` 接口仍可重复执行顶层代码。初始化先将所有声明函数写入所属模块的全局表，再按源码顺序执行顶层语句。因此函数可相互递归，顶层语句可调用任意声明函数。宿主随后可按映射索引调用函数。装入多个模块后的运行契约见 `SPEC-multimodule.md`。
 - `if` 和 `while` 条件使用 VM 的真值规则；`else` 只接块。`object()` 编译为 `NewObject`。没有隐式分号、闭包、方法 `this` 绑定、逻辑短路运算或浮点字面量 `NaN`/`Infinity`。
+- `break` 和 `continue` 只允许出现在 `while` 循环体内，并作用于词法上最近的外层循环。`break` 跳到该循环之后，`continue` 跳回该循环的条件求值处；两者均以 `JUMP` 降级，不增加 ISA opcode。即使循环位于顶层，这些语句也不能跨越函数边界。
+- `!=` 与 `==` 具有相同优先级并左结合，其结果严格等于对应 `==` 结果的布尔取反。编译器可将其降级为 `Equal; False; Equal`，不新增字节码指令。
 
 ## 诊断与边界
 

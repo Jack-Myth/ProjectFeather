@@ -7,6 +7,8 @@ const { completionModel, documentSymbols, maskCommentsAndStrings } = require('..
 test('completion model contains Feather keywords, builtins, and snippets', () => {
   const model = completionModel('');
   assert.ok(model.keywords.some(item => item.name === 'export'));
+  assert.ok(model.keywords.some(item => item.name === 'break'));
+  assert.ok(model.keywords.some(item => item.name === 'continue'));
   assert.ok(model.builtins.some(item => item.name === 'import'));
   assert.ok(model.snippets.some(item => item.name === 'def' && item.insertText.includes('${1:name}')));
 });

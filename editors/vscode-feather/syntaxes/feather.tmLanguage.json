@@ -63,7 +63,7 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.feather", "match": "\\b(?:export|return|if|else|while)\\b" },
+        { "name": "keyword.control.feather", "match": "\\b(?:export|return|if|else|while|break|continue)\\b" },
         { "name": "constant.language.feather", "match": "\\b(?:null|true|false)\\b" },
         { "name": "support.function.feather", "match": "\\b(?:import|object)\\b(?=\\s*\\()" }
       ]

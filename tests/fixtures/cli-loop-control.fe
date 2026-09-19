@@ -1,0 +1,12 @@
+def main() {
+    var index = 0;
+    var total = 0;
+    while (true) {
+        index = index + 1;
+        if (index < 3) { continue; }
+        if (index == 5) { break; }
+        total = total + index;
+    }
+    if (total == 7) { return 0; }
+    return 1 + "incorrect loop-control result";
+}

@@ -8,6 +8,8 @@ const KEYWORDS = [
   ['if', 'Conditional statement'],
   ['else', 'Alternative branch'],
   ['while', 'Loop while a condition is true'],
+  ['break', 'Exit the nearest loop'],
+  ['continue', 'Continue the nearest loop'],
   ['null', 'Null value'],
   ['true', 'Boolean true'],
   ['false', 'Boolean false']

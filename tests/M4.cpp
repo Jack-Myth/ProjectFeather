@@ -86,6 +86,56 @@ int main() {
         Vm AssignmentVm(Assign.Program);
         Check(AssignmentVm.Run(Assign.Functions.at("value")).AsNumber() == 14,
               "assignment value and precedence");
+        auto NotEqual = Compile(
+            "def values() { return 1 != 2; } "
+            "def same() { return \"x\" != \"x\"; } "
+            "def mixed() { return 1 != \"1\"; } "
+            "def objects() { var value = object(); return value != value; }");
+        Vm NotEqualVm(NotEqual.Program);
+        Check(NotEqualVm.Run(NotEqual.Functions.at("values")).AsBool(),
+              "different numbers were equal");
+        Check(!NotEqualVm.Run(NotEqual.Functions.at("same")).AsBool(),
+              "equal strings were different");
+        Check(NotEqualVm.Run(NotEqual.Functions.at("mixed")).AsBool(),
+              "different value types were equal");
+        Check(!NotEqualVm.Run(NotEqual.Functions.at("objects")).AsBool(),
+              "one object was different from itself");
+        auto LoopControl = Compile(R"(
+            def nested() {
+                var outer = 0;
+                var total = 0;
+                while (outer < 3) {
+                    outer = outer + 1;
+                    var inner = 0;
+                    while (inner < 4) {
+                        inner = inner + 1;
+                        if (inner == 2) { continue; }
+                        if (inner == 4) { break; }
+                        total = total + outer * 10 + inner;
+                    }
+                }
+                return total;
+            }
+            def stop() {
+                var value = 0;
+                while (true) { value = value + 1; break; value = 99; }
+                return value;
+            }
+            var top = 0;
+            while (top < 3) {
+                top = top + 1;
+                if (top < 2) { continue; }
+                break;
+            }
+        )");
+        Vm LoopControlVm(LoopControl.Program);
+        Check(LoopControl.Initialize(LoopControlVm).GetType() == ValueType::Null &&
+              LoopControlVm.GetGlobal("top").AsNumber() == 2,
+              "top-level break/continue failed");
+        Check(LoopControlVm.Run(LoopControl.Functions.at("nested")).AsNumber() == 132,
+              "nested break/continue targeted the wrong loop");
+        Check(LoopControlVm.Run(LoopControl.Functions.at("stop")).AsNumber() == 1,
+              "break did not skip the rest of the loop body");
         auto Exported = Compile("export var answer = 41; export def add(x) { return answer + x; } var hidden = 9;");
         Check(Exported.Exports.size() == 2 && Exported.Exports[0] == "answer" &&
               Exported.Exports[1] == "add", "export declarations were not recorded");
@@ -107,6 +157,11 @@ int main() {
         Reject("def a() { return \"bad\\q\"; }", "invalid escape accepted");
         Reject("def a() { return 1e9999; }", "number overflow accepted");
         Reject("def a() { return 1 }", "missing semicolon accepted");
+        Reject("def a() { return !true; }", "standalone bang accepted");
+        Reject("def a() { break; }", "break outside loop accepted");
+        Reject("def a() { continue; }", "continue outside loop accepted");
+        Reject("break;", "top-level break outside loop accepted");
+        Reject("continue;", "top-level continue outside loop accepted");
         Reject("def a() { return \"\xFF\"; }", "invalid UTF-8 string accepted");
         Reject("// \xFF\nfn a() {}", "invalid UTF-8 comment accepted");
         Reject("def a() { return " + std::string(300, '-') + "1; }", "deep unary expression accepted");

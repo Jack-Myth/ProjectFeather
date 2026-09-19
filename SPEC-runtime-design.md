@@ -260,6 +260,8 @@
 
 - [x] `JUMP_IF` 为 true 时跳转，且无论是否跳转都消耗条件值。`JUMP`
       不读写值栈。`if/else` 可由编译器排列代码并组合这两条指令实现。
+- [x] 源码 `break` 和 `continue` 不增加 ISA 指令：编译器把它们分别降级为
+      跳到最近外层 `while` 之后、跳回该 `while` 条件求值处的 `JUMP`。
 - [x] `Call` 的实参数量是**源码已经求值并入栈**的数量。形参缺省和多余
       实参规则见 5.1 节；多余实参仍保留其求值副作用，然后被丢弃。
 - [x] ScriptObject 的 `__call` 接收原对象 `self` 作为首参数，再接原始
@@ -393,6 +395,9 @@
 - [x] `Equal`：同类型的 null、bool、number 按值比较，string 按 UTF-8
       字节内容比较，object 按对象身份比较；不同顶层类型返回 false。
       NaN 不等于任何数，`+0` 等于 `-0`。
+- [x] 源码 `a != b` 是 `a == b` 结果的布尔取反；编译器以
+      `Equal; False; Equal` 降级，不增加 ISA opcode，因此同样继承 NaN、跨类型
+      和 object 身份比较规则。
 - [x] `Less` 仅对 number/number 有定义；NaN 参与时返回 false，其余
       类型组合生成新 Error。初版不支持字符串排序。
 - [x] `Add` 对 number/number 执行 IEEE 754 双精度加法，对 string/string
