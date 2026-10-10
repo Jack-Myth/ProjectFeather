@@ -76,7 +76,7 @@ std::size_t ScriptObject::KeyHash::operator()(const Key& Input) const {
 std::optional<ScriptObject::Key> ScriptObject::ConvertKey(const Value& Input) {
     if (Input.GetType() == ValueType::String)
         return Key{ValueType::String, Input.AsString()};
-    if (Input.GetType() == ValueType::Number && !std::isnan(Input.AsNumber()))
+    if (Input.IsNumeric() && !std::isnan(Input.AsNumber()))
         return Key{ValueType::Number, {}, Input.AsNumber() == 0 ? 0 : Input.AsNumber()};
     return std::nullopt;
 }

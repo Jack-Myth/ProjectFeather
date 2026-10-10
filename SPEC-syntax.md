@@ -5,7 +5,7 @@
 ## 词法
 
 - 空格、制表符和换行分隔 token；词法器扫描时跳过 `//` 至行尾的注释，不存在先对整个源码删注释的独立预处理步骤。
-- 标识符：`[A-Za-z_][A-Za-z0-9_]*`；保留字为 `def var export return if else while break continue null true false object`。
+- 标识符：`[A-Za-z_][A-Za-z0-9_]*`；保留字为 `def var export return if else while break continue null true false object byte`。
 - `import` 是普通标识符和宿主注册的全局函数名，不属于保留字；编译器不解析依赖。契约见 `SPEC-import.md`。
 - 数字：十进制 `DIGIT+ ('.' DIGIT+)? ([eE] [+-]? DIGIT+)?`，无符号；负号为一元运算。词法阶段拒绝超出有限 double 范围的字面量。
 - 双引号字符串；支持 `\\`、`\"`、`\n`、`\r`、`\t`，其他反斜线转义报错。原始换行不得出现在字符串中；解码后的字节必须是合法 UTF-8。
@@ -49,7 +49,7 @@ factor        = unary { ( "*" | "/" ) unary } ;
 unary         = "-" unary | postfix ;
 postfix       = primary { "(" [ expression { "," expression } ] ")"
               | "." IDENT | "[" expression "]" } ;
-primary       = literal | IDENT | "object" "(" ")" | "(" expression ")" ;
+primary       = literal | IDENT | "object" "(" ")" | "byte" "(" expression ")" | "(" expression ")" ;
 literal       = "null" | "true" | "false" | NUMBER | STRING ;
 ```
 
@@ -70,4 +70,10 @@ literal       = "null" | "true" | "false" | NUMBER | STRING ;
 
 词法或语法错误、非法赋值目标、重复声明、过多形参/实参/常量/局部槽位、超过 256 层嵌套及字节码校验失败，均使编译失败，不产生可执行的部分模块。诊断至少包含源码字节偏移及行列；行列按 UTF-8 字节计数。编译器生成的每个函数最终由 `Module::Validate()` 校验。
 
-编译成功时，内存函数原型可附带每条指令起始 PC 对应的源码字节偏移与行列，供 VM 查询 Error 来源。表达式操作一般对应运算符或调用符号；跨函数、跨模块返回保持原 Error 的来源。当前 v3 `.fbc` 不保存位置表，可由独立 `.fbs` 提供。
+编译成功时，内存函数原型可附带每条指令起始 PC 对应的源码字节偏移与行列，供 VM 查询 Error 来源。表达式操作一般对应运算符或调用符号；跨函数、跨模块返回保持原 Error 的来源。当前 v4 `.fbc` 不保存位置表，可由独立 `.fbs` 提供。
+
+## byte 转换
+
+`byte` 是保留字，`byte(expression)` 是单参数内建转换，一般映射为 `ToByte`，合法的常量转换直接编码为 byte 常量，无需宿主注册。十进制字面量仍为 number；`byte(255)` 产生 byte，`byte(256)`、`byte(-1)`、`byte(1.5)` 与非数值输入在执行时产生 Error，与动态类型检查一致。空参数、多个参数或缺少括号属于编译错误。
+
+默认参数另外允许常量形式 `byte(NUMBER)`，例如 `def send(x = byte(255))`；编译时检查范围和整数性。默认值不允许计算表达式或嵌套转换。普通转换可嵌套；`byte(byte(1))` 保留 byte。运行时运算提升和存储规则见运行时规范的 byte 条目。

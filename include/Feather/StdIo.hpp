@@ -15,7 +15,6 @@ inline constexpr NativeModuleGuid StdIoModuleGuid{{
 // The supplied streams must outlive the library and every VM using its objects.
 class StdIoLibrary final {
 public:
-    StdIoLibrary(std::istream& Input, std::ostream& Output);
     StdIoLibrary(Vm& Machine, std::istream& Input, std::ostream& Output);
     ~StdIoLibrary();
     StdIoLibrary(const StdIoLibrary&) = delete;
@@ -25,7 +24,6 @@ public:
     Value GetModule() const;
 
 private:
-    StdIoLibrary(Vm* Machine, std::istream& Input, std::ostream& Output);
     struct State;
     std::shared_ptr<State> Shared;
     std::shared_ptr<NativeObject> ConsoleObject;

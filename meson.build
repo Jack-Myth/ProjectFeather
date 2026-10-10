@@ -19,10 +19,12 @@ endif
 
 FeatherSources = files(
   'src/Value/Value.cpp',
+  'src/Value/ByteBuffer.cpp',
   'src/Bytecode/Bytecode.cpp',
   'src/Bytecode/ProgramImage.cpp',
   'src/Bytecode/SymbolImage.cpp',
   'src/Vm/Vm.cpp',
+  'src/Vm/Idle.cpp',
   'src/Object/Object.cpp',
   'src/Compiler/Compiler.cpp',
   'src/Embed/Import.cpp',

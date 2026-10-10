@@ -1,0 +1,44 @@
+var network = import("network");
+var time = import("time");
+var stdio = import("stdio");
+var pending = null;
+var done = false;
+var failure = null;
+def echo(event) {
+    if (event.Kind == "data") { pending = event.Data; }
+    else { done = true; failure = connectionEnded; }
+}
+def received(event) {
+    if (event.Kind == "data") { stdio.Console.PrintLine(event.Data.Get(0)); }
+    else { failure = connectionEnded; }
+    done = true;
+}
+def main() {
+    var listener = network.CreateTcp();
+    network.Bind(listener, "127.0.0.1", 0);
+    network.Listen(listener);
+    var client = network.CreateTcp();
+    if (network.Connect(client, "127.0.0.1", network.LocalAddress(listener).Port) == false) {
+        network.Poll(client, false, true, 1000);
+        if (network.FinishConnect(client) != true) {
+            network.Close(client); network.Close(listener); return connectFailed;
+        }
+    }
+    network.Poll(listener, true, false, 1000);
+    var server = network.Accept(listener);
+    network.OnReceive(server, echo);
+    network.OnReceive(client, received);
+    network.Send(client, byte(255));
+    var attempts = 0;
+    while (done == false) {
+        time.Sleep(0.01); // Receive callbacks run here, on this same VM thread.
+        if (pending != null) {
+            // This example echoes one byte; larger protocols must track send offsets.
+            if (network.Send(server, pending) == 1) { pending = null; }
+        }
+        attempts = attempts + 1;
+        if (attempts == 100) { failure = timedOut; break; }
+    }
+    network.Close(client); network.Close(server); network.Close(listener);
+    return failure;
+}

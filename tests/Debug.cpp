@@ -450,6 +450,12 @@ void EvaluationConditionsAndMutation() {
     Check(Evaluated.find(R"("value":12)") != std::string::npos,
           "paused expression did not see locals and globals");
     Target->DispatchProtocolMessage(
+        R"json({"id":182,"method":"Debugger.evaluate","params":{"frameId":0,"expression":"byte(255)"}})json");
+    auto ByteValue = Channel->WaitFor(R"("id":182)");
+    Check(ByteValue.find(R"("type":"byte")") != std::string::npos &&
+          ByteValue.find(R"("value":255)") != std::string::npos,
+          "debug evaluation lost byte type or unsigned value");
+    Target->DispatchProtocolMessage(
         R"({"id":83,"method":"Debugger.getVariables","params":{"frameId":0,"scope":"locals"}})");
     auto Locals = Channel->WaitFor(R"("id":83)");
     Check(Locals.find(R"("name":"item")") != std::string::npos &&

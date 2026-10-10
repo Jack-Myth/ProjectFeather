@@ -25,13 +25,13 @@ public:
     double Wall = 1000;
 };
 
-constexpr NativeModuleGuid CheckpointGuid{{
+constexpr NativeModuleGuid SnapshotCaptureGuid{{
     0x38, 0x85, 0x72, 0x1d, 0xce, 0xe5, 0x4b, 0x74,
     0x9e, 0x0f, 0xa1, 0x8a, 0xc9, 0x67, 0x44, 0x22}};
 
-class Checkpoint final : public NativeObject {
+class SnapshotCapture final : public NativeObject {
 public:
-    Checkpoint(NativeObjectType& Type, Vm& Machine, std::vector<std::uint8_t>& Saved)
+    SnapshotCapture(NativeObjectType& Type, Vm& Machine, std::vector<std::uint8_t>& Saved)
         : NativeObject(Type), Machine(Machine), Saved(Saved) {}
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     bool IsCallable() const override { return true; }
@@ -47,17 +47,17 @@ private:
     std::vector<std::uint8_t>& Saved;
 };
 
-class CheckpointType final : public NativeObjectType {
+class SnapshotCaptureType final : public NativeObjectType {
 public:
-    CheckpointType(Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObjectType(Machine, CheckpointGuid, "Checkpoint"), Saved(Saved) {}
-    std::shared_ptr<Checkpoint> Create() {
-        return CreateObject<Checkpoint>(GetVm(), Saved);
+    SnapshotCaptureType(Vm& Machine, std::vector<std::uint8_t>& Saved)
+        : NativeObjectType(Machine, SnapshotCaptureGuid, "Capture"), Saved(Saved) {}
+    std::shared_ptr<SnapshotCapture> Create() {
+        return CreateObject<SnapshotCapture>(GetVm(), Saved);
     }
     std::shared_ptr<NativeObject> Deserialize(
         std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
         if (Version != 1 || !Payload.empty())
-            throw std::invalid_argument("invalid test checkpoint");
+            throw std::invalid_argument("invalid test snapshot capture");
         return Create();
     }
 private:
@@ -102,18 +102,18 @@ int main() {
         auto SnapshotProgram = Compile(
             "var time = import(\"time\"); var clock = null; var before = 0; "
             "def main() { clock = time.CreateClock(); time.Sleep(2); "
-            "before = time.Tick(clock); if (checkpoint()) { "
+            "before = time.Tick(clock); if (captureSnapshot()) { "
             "time.Sleep(4); return before + time.Tick(clock); } return before; }");
         std::vector<std::uint8_t> Saved;
         {
             Vm Original(SnapshotProgram.Program);
             auto OriginalHost = std::make_shared<Host>();
             TimeLibrary OriginalTime(Original, OriginalHost);
-            RegisterImport(Original, [&](std::string_view Name) {
+            RegisterModuleImport(Original, "", [&](std::string_view, std::string_view Name) {
                 return Name == "time" ? OriginalTime.GetModule() : Value{};
             });
-            auto& Checkpoints = Original.CreateNativeObjectType<CheckpointType>(Saved);
-            Original.RegisterNativeFunction("checkpoint", Checkpoints.Create());
+            auto& Captures = Original.CreateNativeObjectType<SnapshotCaptureType>(Saved);
+            Original.RegisterNativeFunction("captureSnapshot", Captures.Create());
             Check(!SnapshotProgram.Initialize(Original).IsError(), "time snapshot initializer failed");
             Check(Original.Run(SnapshotProgram.Functions.at("main")).AsNumber() == 2 && !Saved.empty(),
                   "time snapshot save path failed");
@@ -123,10 +123,10 @@ int main() {
             auto RestoredHost = std::make_shared<Host>();
             RestoredHost->Now = 5000;
             TimeLibrary RestoredTime(Restored, RestoredHost);
-            RegisterImport(Restored, [&](std::string_view Name) {
+            RegisterModuleImport(Restored, "", [&](std::string_view, std::string_view Name) {
                 return Name == "time" ? RestoredTime.GetModule() : Value{};
             });
-            Restored.CreateNativeObjectType<CheckpointType>(Saved);
+            Restored.CreateNativeObjectType<SnapshotCaptureType>(Saved);
             Check(Restored.ResumeSnapshot(Saved).AsNumber() == 6,
                   "restored Clock counted offline time or lost its new baseline");
         }

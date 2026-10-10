@@ -1,6 +1,7 @@
 #include <Feather/Runtime.hpp>
 
 #include <new>
+#include <cmath>
 #include <utility>
 
 namespace Feather {
@@ -55,6 +56,7 @@ void Value::CopyFrom(const Value& Other) {
     case ValueType::Null: break;
     case ValueType::Bool: Data.Boolean = Other.Data.Boolean; break;
     case ValueType::Number: Data.Numeric = Other.Data.Numeric; break;
+    case ValueType::Byte: Data.ByteValue = Other.Data.ByteValue; break;
     case ValueType::String: new (&Data.Text) std::shared_ptr<const std::string>(Other.Data.Text); break;
     case ValueType::Object:
         if (ScriptReference) Data.Script = Other.Data.Script;
@@ -64,6 +66,17 @@ void Value::CopyFrom(const Value& Other) {
 }
 Value Value::Bool(bool Input) { Value Result(ValueType::Bool); Result.Data.Boolean = Input; return Result; }
 Value Value::Number(double Input) { Value Result(ValueType::Number); Result.Data.Numeric = Input; return Result; }
+Value Value::Byte(double Input) {
+    if (!std::isfinite(Input) || Input < 0 || Input > 255 || std::trunc(Input) != Input)
+        throw std::invalid_argument("byte requires an integer in [0, 255]");
+    Value Result(ValueType::Byte);
+    Result.Data.ByteValue = static_cast<std::uint8_t>(Input);
+    return Result;
+}
+std::uint8_t Value::AsByte() const {
+    if (Type != ValueType::Byte) throw std::logic_error("value is not byte");
+    return Data.ByteValue;
+}
 Value Value::String(std::string Input) {
     if (!IsValidUtf8(Input)) throw std::invalid_argument("invalid UTF-8 string");
     auto Text = std::make_shared<const std::string>(std::move(Input));
@@ -91,6 +104,7 @@ bool Value::AsBool() const {
     return Data.Boolean;
 }
 double Value::AsNumber() const {
+    if (Type == ValueType::Byte) return Data.ByteValue;
     if (Type != ValueType::Number) throw std::logic_error("value is not number");
     return Data.Numeric;
 }
@@ -121,6 +135,7 @@ bool Value::IsTruthy() const {
     case ValueType::Null: return false;
     case ValueType::Bool: return Data.Boolean;
     case ValueType::Number: return Data.Numeric != 0;
+    case ValueType::Byte: return Data.ByteValue != 0;
     case ValueType::String: return !Data.Text->empty();
     case ValueType::Object: return true;
     }

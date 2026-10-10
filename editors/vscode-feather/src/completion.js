@@ -16,6 +16,7 @@ const KEYWORDS = [
 ];
 
 const BUILTINS = [
+  ['byte', 'Convert an integer in [0, 255] to an unsigned byte'],
   ['import', 'Import a host or Feather module'],
   ['object', 'Create a new object']
 ];

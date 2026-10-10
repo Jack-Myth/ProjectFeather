@@ -53,7 +53,7 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
         case Op::Null: case Op::True: case Op::False: case Op::Pop:
         case Op::NewObject: case Op::GetMember: case Op::SetMember:
         case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
-        case Op::Negate: case Op::Equal: case Op::Less: case Op::Return: break;
+        case Op::ToByte: case Op::Negate: case Op::Equal: case Op::Less: case Op::Return: break;
         default: Invalid("unknown opcode");
         }
         if (Code.size() - Pc - 1 < Width) Invalid("truncated instruction");
@@ -67,7 +67,7 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
         case Op::Null: case Op::True: case Op::False: case Op::NewObject:
         case Op::GetLocal: case Op::GetGlobal: Current.Produces = 1; break;
         case Op::Pop: Current.Consumes = 1; break;
-        case Op::SetLocal: case Op::SetGlobal: case Op::Negate: Current.Consumes = 1; Current.Produces = 1; break;
+        case Op::SetLocal: case Op::SetGlobal: case Op::ToByte: case Op::Negate: Current.Consumes = 1; Current.Produces = 1; break;
         case Op::GetMember: case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
         case Op::Equal: case Op::Less: Current.Consumes = 2; Current.Produces = 1; break;
         case Op::SetMember: Current.Consumes = 3; Current.Produces = 1; break;
@@ -154,12 +154,18 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
 } // namespace
 
 Constant Constant::Number(double Input) { Constant Result{Kind::Number}; Result.Numeric = Input; return Result; }
+Constant Constant::Byte(double Input) {
+    Constant Result{Kind::Byte}; Result.ByteValue = Value::Byte(Input).AsByte(); return Result;
+}
 Constant Constant::String(std::string Input) { Constant Result{Kind::String}; Result.Text = std::move(Input); return Result; }
 Constant Constant::FunctionRef(std::shared_ptr<FunctionPrototype> Input) {
     Constant Result{Kind::Function}; Result.Function = std::move(Input); return Result;
 }
 std::uint32_t Module::AddNumber(double Input) {
     Constants.push_back(Constant::Number(Input)); return static_cast<std::uint32_t>(Constants.size() - 1);
+}
+std::uint32_t Module::AddByte(double Input) {
+    Constants.push_back(Constant::Byte(Input)); return static_cast<std::uint32_t>(Constants.size() - 1);
 }
 std::uint32_t Module::AddString(std::string Input) {
     Constants.push_back(Constant::String(std::move(Input))); return static_cast<std::uint32_t>(Constants.size() - 1);

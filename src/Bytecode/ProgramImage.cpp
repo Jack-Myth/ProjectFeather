@@ -11,8 +11,8 @@ namespace Feather {
 namespace {
 
 constexpr std::uint8_t Magic[8] = {'F', 'T', 'H', 'R', 'B', 'C', 0, 0};
-constexpr std::uint16_t FormatVersion = 3;
-constexpr std::uint16_t InstructionVersion = 1;
+constexpr std::uint16_t FormatVersion = 4;
+constexpr std::uint16_t InstructionVersion = 2;
 constexpr std::size_t HeaderSize = 16;
 constexpr std::uint32_t MaxEntries = 65'536;
 
@@ -101,6 +101,7 @@ void WriteDefault(Writer& Output, const std::optional<Value>& Input) {
     switch (Input->GetType()) {
     case ValueType::Null: Output.U8(1); break;
     case ValueType::Bool: Output.U8(Input->AsBool() ? 3 : 2); break;
+    case ValueType::Byte: Output.U8(6); Output.U8(Input->AsByte()); break;
     case ValueType::Number:
         Output.U8(4); Output.U64(std::bit_cast<std::uint64_t>(Input->AsNumber())); break;
     case ValueType::String: Output.U8(5); Output.String(Input->AsString()); break;
@@ -116,6 +117,7 @@ std::optional<Value> ReadDefault(Reader& Input) {
     case 3: return Value::Bool(true);
     case 4: return Value::Number(std::bit_cast<double>(Input.U64()));
     case 5: return Value::String(Input.String());
+    case 6: return Value::Byte(Input.U8());
     default: Invalid("invalid default value tag");
     }
 }
@@ -164,6 +166,8 @@ std::vector<std::uint8_t> SerializeProgram(const CompiledProgram& Input,
     Output.U32(static_cast<std::uint32_t>(Input.Program->Constants.size()));
     for (const auto& Item : Input.Program->Constants) {
         switch (Item.Type) {
+        case Constant::Kind::Byte:
+            Output.U8(3); Output.U8(Item.ByteValue); break;
         case Constant::Kind::Number:
             Output.U8(0); Output.U64(std::bit_cast<std::uint64_t>(Item.Numeric)); break;
         case Constant::Kind::String:
@@ -215,6 +219,7 @@ CompiledProgram DeserializeProgram(std::span<const std::uint8_t> Bytes,
     Result.Program->Constants.reserve(ConstantCount);
     for (std::uint32_t I = 0; I < ConstantCount; ++I) {
         switch (Input.U8()) {
+        case 3: Result.Program->AddByte(Input.U8()); break;
         case 0: Result.Program->AddNumber(std::bit_cast<double>(Input.U64())); break;
         case 1: Result.Program->AddString(Input.String()); break;
         case 2: {

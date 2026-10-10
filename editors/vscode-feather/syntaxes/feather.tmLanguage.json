@@ -65,7 +65,7 @@
       "patterns": [
         { "name": "keyword.control.feather", "match": "\\b(?:export|return|if|else|while|break|continue)\\b" },
         { "name": "constant.language.feather", "match": "\\b(?:null|true|false)\\b" },
-        { "name": "support.function.feather", "match": "\\b(?:import|object)\\b(?=\\s*\\()" }
+        { "name": "support.function.feather", "match": "\\b(?:import|object|byte)\\b(?=\\s*\\()" }
       ]
     },
     "operators": {

@@ -13,9 +13,9 @@ void Check(bool Good, const char* Message) {
     if (!Good) throw std::runtime_error(Message);
 }
 
-class CheckpointCall final : public NativeObject {
+class SnapshotCaptureCall final : public NativeObject {
 public:
-    CheckpointCall(NativeObjectType& Type, Vm& Machine,
+    SnapshotCaptureCall(NativeObjectType& Type, Vm& Machine,
                    std::vector<std::uint8_t>& Saved);
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     bool IsCallable() const override { return true; }
@@ -32,15 +32,15 @@ constexpr NativeModuleGuid SnapshotTestModule{{
     0x42, 0x2e, 0x81, 0x13, 0x64, 0xf1, 0x4c, 0x98,
     0xa7, 0xc5, 0x35, 0xd0, 0x69, 0xa1, 0x77, 0x20}};
 
-class CheckpointType final : public NativeObjectType {
+class SnapshotCaptureType final : public NativeObjectType {
 public:
-    CheckpointType(Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObjectType(Machine, SnapshotTestModule, "Checkpoint", 1), Saved(Saved) {}
-    std::shared_ptr<CheckpointCall> Create() {
-        return CreateObject<CheckpointCall>(GetVm(), Saved);
+    SnapshotCaptureType(Vm& Machine, std::vector<std::uint8_t>& Saved)
+        : NativeObjectType(Machine, SnapshotTestModule, "Capture", 1), Saved(Saved) {}
+    std::shared_ptr<SnapshotCaptureCall> Create() {
+        return CreateObject<SnapshotCaptureCall>(GetVm(), Saved);
     }
     std::vector<std::uint8_t> Serialize(const NativeObject& Input) const override {
-        if (!dynamic_cast<const CheckpointCall*>(&Input))
+        if (!dynamic_cast<const SnapshotCaptureCall*>(&Input))
             throw std::runtime_error("unexpected multimodule host object");
         return {};
     }
@@ -54,7 +54,7 @@ private:
     std::vector<std::uint8_t>& Saved;
 };
 
-CheckpointCall::CheckpointCall(NativeObjectType& Type, Vm& Machine,
+SnapshotCaptureCall::SnapshotCaptureCall(NativeObjectType& Type, Vm& Machine,
                                std::vector<std::uint8_t>& Saved)
     : NativeObject(Type), Machine(Machine), Saved(Saved) {}
 }
@@ -150,23 +150,23 @@ int main() {
         auto SnapshotRoot = Compile("def main() { return math.entry() + 1; }");
         auto SnapshotMath = Compile(
             "export var shared = object(); shared.value = 41; "
-            "export def entry() { if (checkpoint()) { return shared.value; } return 0; }");
+            "export def entry() { if (captureSnapshot()) { return shared.value; } return 0; }");
         std::vector<std::uint8_t> Saved;
         Vm Before(SnapshotRoot.Program);
-        auto& BeforeType = Before.CreateNativeObjectType<CheckpointType>(Saved);
+        auto& BeforeType = Before.CreateNativeObjectType<SnapshotCaptureType>(Saved);
         SnapshotMath.LoadInto(Before, "math");
-        Before.SetModuleGlobal("math", "checkpoint",
+        Before.SetModuleGlobal("math", "captureSnapshot",
             Value::FromObject(BeforeType.Create()));
         Check(!SnapshotMath.InitializeModule(Before, "math").IsError(),
               "snapshot module initializer failed");
         Before.SetGlobal("math", Before.GetModuleNamespace("math"));
         SnapshotRoot.Initialize(Before);
         Check(Before.Run(SnapshotRoot.Functions.at("main")).AsNumber() == 1 &&
-              Saved.size() > 12 && Saved[4] == 4,
+              Saved.size() > 12 && Saved[4] == 5,
               "cross-module save point failed");
 
         Vm After(SnapshotRoot.Program);
-        After.CreateNativeObjectType<CheckpointType>(Saved);
+        After.CreateNativeObjectType<SnapshotCaptureType>(Saved);
         SnapshotMath.LoadInto(After, "math");
         Check(After.ResumeSnapshot(Saved).AsNumber() == 42,
               "cross-module frames or globals failed to restore");

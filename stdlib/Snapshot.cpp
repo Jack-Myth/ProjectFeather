@@ -50,21 +50,21 @@ private:
 SnapshotLibrary::SnapshotLibrary(Vm& Machine, SnapshotHost& Host) {
     auto& ModuleType = Machine.CreateNativeObjectType<NativeSingletonType>(
         SnapshotModuleGuid, "Module");
-    auto& CheckpointType = Machine.CreateNativeObjectType<NativeSingletonType>(
-        SnapshotModuleGuid, "Checkpoint");
+    auto& CaptureType = Machine.CreateNativeObjectType<NativeSingletonType>(
+        SnapshotModuleGuid, "Capture");
     auto& RestoreType = Machine.CreateNativeObjectType<NativeSingletonType>(
         SnapshotModuleGuid, "Restore");
     auto Module = ModuleType.Create<Namespace>();
-    Module->Add("Checkpoint", Value::FromObject(CheckpointType.Create<Function>(
+    Module->Add("Capture", Value::FromObject(CaptureType.Create<Function>(
         [&Machine, &Host](const std::vector<Value>& Arguments) {
             if (Arguments.size() != 1 || Arguments[0].GetType() != ValueType::String)
-                return Error("Snapshot.Checkpoint expects one path string");
-            return Host.Checkpoint(Machine, Arguments[0].AsString());
+                return Error("snapshot.Capture expects one path string");
+            return Host.Capture(Machine, Arguments[0].AsString());
         })));
     Module->Add("Restore", Value::FromObject(RestoreType.Create<Function>(
         [&Host](const std::vector<Value>& Arguments) {
             if (Arguments.size() != 1 || Arguments[0].GetType() != ValueType::String)
-                return Error("Snapshot.Restore expects one path string");
+                return Error("snapshot.Restore expects one path string");
             return Host.Restore(Arguments[0].AsString());
         })));
     ModuleObject = std::move(Module);

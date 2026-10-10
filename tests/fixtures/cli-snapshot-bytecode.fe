@@ -3,7 +3,7 @@ var stdio = import("stdio");
 var helper = import("helper");
 
 def main() {
-    if (snapshot.Checkpoint("cli-snapshot-bytecode.ftha")) {
+    if (snapshot.Capture("cli-snapshot-bytecode.ftha")) {
         stdio.Console.Print("");
         return helper.Value() - 42;
     }

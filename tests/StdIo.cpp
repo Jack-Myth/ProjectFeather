@@ -52,14 +52,14 @@ constexpr NativeModuleGuid SnapshotTestGuid{{
 class SnapshotCallType final : public NativeObjectType {
 public:
     SnapshotCallType(Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObjectType(Machine, SnapshotTestGuid, "Checkpoint"), Saved(Saved) {}
+        : NativeObjectType(Machine, SnapshotTestGuid, "Capture"), Saved(Saved) {}
     std::shared_ptr<SnapshotCall> Create() {
         return CreateObject<SnapshotCall>(GetVm(), Saved);
     }
     std::shared_ptr<NativeObject> Deserialize(
         std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
         if (Version != 1 || !Payload.empty())
-            throw std::invalid_argument("invalid checkpoint payload");
+            throw std::invalid_argument("invalid snapshot capture payload");
         return Create();
     }
 private:
@@ -72,7 +72,8 @@ int main() {
     try {
         std::istringstream Input("first line\n");
         std::ostringstream Output;
-        StdIoLibrary Library(Input, Output);
+        Vm LibraryVm(std::make_shared<Module>());
+        StdIoLibrary Library(LibraryVm, Input, Output);
         auto Stdio = Library.GetModule();
         auto Console = Member(Stdio, "Console");
         Check(!Call(Console, "Print", {Value::String("prompt: ")}).IsError(), "Print failed");
@@ -83,7 +84,8 @@ int main() {
         Check(Call(Console, "Print", {Member(Stdio, "IO")}).IsError(), "printing objects should fail");
         std::istringstream InvalidInput(std::string("\xff\n", 2));
         std::ostringstream IgnoredOutput;
-        StdIoLibrary InvalidConsole(InvalidInput, IgnoredOutput);
+        Vm InvalidVm(std::make_shared<Module>());
+        StdIoLibrary InvalidConsole(InvalidVm, InvalidInput, IgnoredOutput);
         Check(Call(Member(InvalidConsole.GetModule(), "Console"), "InputLine").IsError(),
               "invalid UTF-8 console input should fail");
 
@@ -98,8 +100,9 @@ int main() {
             "return data.Get(2) + position; } "
             "var stdio = import(\"stdio\");");
         Vm Machine(Program.Program);
-        RegisterImport(Machine, [&Library](std::string_view Specifier) {
-            return Specifier == "stdio" ? Library.GetModule() : Value{};
+        StdIoLibrary ScriptLibrary(Machine, Input, Output);
+        RegisterModuleImport(Machine, "", [&ScriptLibrary](std::string_view, std::string_view Specifier) {
+            return Specifier == "stdio" ? ScriptLibrary.GetModule() : Value{};
         });
         auto Path = std::filesystem::temp_directory_path() / "feather-stdio-test.bin";
         Machine.SetGlobal("testPath", Value::String(Path.string()));
@@ -107,7 +110,7 @@ int main() {
         Check(!Result.IsError(), "script initializer failed");
         Check(Machine.GetGlobal("Console").IsError() && Machine.GetGlobal("IO").IsError(),
               "standard IO should not be available as direct globals");
-        Check(Machine.GetGlobal("stdio").AsObject() == Stdio.AsObject(),
+        Check(Machine.GetGlobal("stdio").AsObject() == ScriptLibrary.GetModule().AsObject(),
               "top-level import did not create a global value");
         Result = Machine.Run(Program.Functions.at("main"));
         if (Result.IsError()) {
@@ -147,7 +150,7 @@ int main() {
             "def main() { var io = stdio.IO; var read = io.Read; "
             "handle = io.OpenFile(testPath, \"w+\"); io.Write(handle, \"ABC\"); "
             "io.Seek(handle, 0, \"start\"); buffer = read(handle, 2); "
-            "var getter = buffer.Get; if (checkpoint()) { "
+            "var getter = buffer.Get; if (captureSnapshot()) { "
             "var tail = read(handle, 1); stdio.Console.PrintLine(\"restored\"); "
             "var result = getter(0) + buffer.Get(1) + tail.Get(0); "
             "io.CloseFile(handle); return result; } return 0; }");
@@ -157,11 +160,11 @@ int main() {
             std::ostringstream SnapshotOutput;
             Vm Original(SnapshotProgram.Program);
             StdIoLibrary SnapshotIo(Original, SnapshotInput, SnapshotOutput);
-            RegisterImport(Original, [&](std::string_view Name) {
+            RegisterModuleImport(Original, "", [&](std::string_view, std::string_view Name) {
                 return Name == "stdio" ? SnapshotIo.GetModule() : Value{};
             });
-            auto& CheckpointType = Original.CreateNativeObjectType<SnapshotCallType>(Saved);
-            Original.RegisterNativeFunction("checkpoint", CheckpointType.Create());
+            auto& CaptureType = Original.CreateNativeObjectType<SnapshotCallType>(Saved);
+            Original.RegisterNativeFunction("captureSnapshot", CaptureType.Create());
             Original.SetGlobal("testPath", Value::String(Path.string()));
             Check(!SnapshotProgram.Initialize(Original).IsError(),
                   "snapshot stdio initializer failed");
@@ -174,7 +177,7 @@ int main() {
             std::ostringstream SnapshotOutput;
             Vm Restored(SnapshotProgram.Program);
             StdIoLibrary SnapshotIo(Restored, SnapshotInput, SnapshotOutput);
-            RegisterImport(Restored, [&](std::string_view Name) {
+            RegisterModuleImport(Restored, "", [&](std::string_view, std::string_view Name) {
                 return Name == "stdio" ? SnapshotIo.GetModule() : Value{};
             });
             Restored.CreateNativeObjectType<SnapshotCallType>(Saved);
@@ -189,7 +192,7 @@ int main() {
             std::ostringstream SnapshotOutput;
             Vm MissingFile(SnapshotProgram.Program);
             StdIoLibrary SnapshotIo(MissingFile, SnapshotInput, SnapshotOutput);
-            RegisterImport(MissingFile, [&](std::string_view Name) {
+            RegisterModuleImport(MissingFile, "", [&](std::string_view, std::string_view Name) {
                 return Name == "stdio" ? SnapshotIo.GetModule() : Value{};
             });
             MissingFile.CreateNativeObjectType<SnapshotCallType>(Saved);

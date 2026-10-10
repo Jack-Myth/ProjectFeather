@@ -1,0 +1,36 @@
+var stdio = import("stdio");
+var network = import("network");
+var time = import("time");
+var done = false;
+var failure = null;
+def echo(event) {
+    if (event.Kind == "data") {
+        network.SendTo(event.Socket, event.Data, event.Address, event.Port);
+    } else { failure = event.Error; done = true; }
+}
+def received(event) {
+    if (event.Kind == "data") {
+        stdio.Console.PrintLine(event.Data.Get(0));
+        stdio.Console.PrintLine(event.Data.Get(1));
+    } else { failure = event.Error; }
+    done = true;
+}
+def main() {
+    var server = network.CreateUdp();
+    var client = network.CreateUdp();
+    network.Bind(server, "127.0.0.1", 0);
+    network.Bind(client, "127.0.0.1", 0);
+    network.OnReceive(server, echo);
+    network.OnReceive(client, received);
+    network.SendTo(client, network.Buffer(byte(0), byte(255)),
+                   "127.0.0.1", network.LocalAddress(server).Port);
+    var attempts = 0;
+    while (done == false) {
+        time.Sleep(0.02); // VM idle dispatches both receive callbacks.
+        attempts = attempts + 1;
+        if (attempts == 50) { network.Close(server); network.Close(client); return timedOut; }
+    }
+    network.Close(server);
+    network.Close(client);
+    return failure;
+}

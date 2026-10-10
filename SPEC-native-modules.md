@@ -27,7 +27,7 @@ Native 根对象建议实现 `GetObjectType() == ObjectType::Host`、只读 `Get
 
 ## 动态库入口
 
-文件名只解决定位，还需要统一的入口。每个库导出固定符号 `FeatherNativeModuleV2`，其开发期接口见 `include/Feather/NativeModule.hpp`：
+文件名只解决定位，还需要统一的入口。每个库导出固定符号 `FeatherNativeModule`，其开发期接口见 `include/Feather/NativeModule.hpp`：
 
 ```cpp
 struct NativeModuleContext {
@@ -37,15 +37,14 @@ struct NativeModuleContext {
     SnapshotHost* Snapshots = nullptr;
 };
 struct NativeModuleDescriptor {
-    std::uint32_t InterfaceVersion; // 当前为 2
     NativeModuleGuid Id;            // 模块稳定 GUID，不得全零
     const char* Name;               // 例如 "stdio"
     Value (*Create)(const NativeModuleContext&);
 };
-extern "C" const NativeModuleDescriptor* FeatherNativeModuleV2();
+extern "C" const NativeModuleDescriptor* FeatherNativeModule();
 ```
 
-宿主打开文件后只查找该符号，核对版本、非零 GUID、声明名与请求的裸名相同，再调用 `Create`；同一宿主已装入的另一个模块若使用相同 GUID，也会被拒绝。GUID 是模块作者维护的稳定身份，同一模块的各个 `NativeObjectType` 都使用它，类型身份由 GUID 与类型名共同组成；模块改名或文件换路径不应顺便更换 GUID。`stdio` 从上下文取得输入/输出流；缺失服务时返回明确错误。创建失败或版本不符时关闭尚未交付对象的库句柄并报告错误；脚本看不到半创建模块。额外的宿主服务以后扩展上下文版本，模块不得自行假定所有宿主都允许文件 IO。
+宿主打开文件后只查找该符号，核对非零 GUID、声明名与请求的裸名相同，再调用 `Create`；同一宿主已装入的另一个模块若使用相同 GUID，也会被拒绝。GUID 是模块作者维护的稳定身份，同一模块的各个 `NativeObjectType` 都使用它，类型身份由 GUID 与类型名共同组成；模块改名或文件换路径不应顺便更换 GUID。`stdio` 从上下文取得输入/输出流；缺失服务时返回明确错误。创建失败或描述结构不符时关闭尚未交付对象的库句柄并报告错误；脚本看不到半创建模块。额外的宿主服务以后扩展上下文版本，模块不得自行假定所有宿主都允许文件 IO。
 
 首版开发期可要求 Native 库与解释器使用相同编译器、标准库、运行时和 Feather 构建版本，采用版本化的 **C 导出符号 + C++ 模块接口**。`extern "C"` 只固定符号名，并不让 `Value`、`std::shared_ptr` 或 `NativeObject` 自动成为稳定 C ABI。为了让对象类型与分配/释放边界一致，动态库和解释器还必须链接同一份共享 `FeatherCore`，而不是各自静态链接一份 Core。Meson 工程因此需要共享 Core、符号导出和 Native 库目标；这些是构建/宿主接口变化，不是新的 VM 指令。若以后要支持任意编译器制作的第三方库，应另设计全不透明句柄的 C ABI；不把开发期 C++ 接口冒充跨工具链规范。
 
@@ -81,16 +80,25 @@ Feather::Value Create(const Feather::NativeModuleContext& context) {
 }
 
 extern "C" FEATHER_NATIVE_EXPORT
-const Feather::NativeModuleDescriptor* FeatherNativeModuleV2() {
+const Feather::NativeModuleDescriptor* FeatherNativeModule() {
     static const Feather::NativeModuleDescriptor descriptor{
-        Feather::NativeModuleInterfaceVersion,
         {{/* 固定的 16 个 GUID 字节 */}}, "stdio", &Create};
     return &descriptor;
 }
 ```
 
-`Snapshots` 是可选宿主能力；普通模块不得假定它存在。标准 `snapshot` 模块在缺少该能力时导入为 Error，在 CLI 中则把 `Checkpoint(path)` 和 `Restore(path)` 转交给解释器会话管理器。它不接收 slot，也不提供存档索引策略。
+`Snapshots` 是可选宿主能力；普通模块不得假定它存在。标准 `snapshot` 模块在缺少该能力时导入为 Error，在 CLI 中则把 `Capture(path)` 和 `Restore(path)` 转交给解释器会话管理器。它不接收 slot，也不提供存档索引策略。
+
+标准 `checkpoint` 模块不需要额外宿主能力，提供仅限当前 VM、当前最外层 `Run` 的
+`Capture()`、`Restore(id)` 和 `Unload(id)`。它不读写文件，也不进入 Snapshot；语义见
+`SPEC-checkpoint.md`。
 
 标准 `time` 模块不需要额外宿主服务，提供单调时钟、Unix 时间、同步等待及可快照的 `Clock`。`Clock` 的类型身份使用 time 模块 GUID 与类型名 `Clock`；恢复时重新建立单调时间基准，具体契约见 `SPEC-time.md`。标准 `render2d` 模块则把 SDL3/bgfx 完全封装在模块内部，具体契约见 `SPEC-render2d.md`。
 
 对应的 `modules/meson.build` 将 `stdlib/StdIo.cpp` 和入口文件编译为 `shared_module('stdio.felib', name_prefix: '')`，依赖同一份共享 Core，输出到 `modules/`。新的模块把 `stdio` 换为自己的裸名，返回自身的 `NativeObject` 根对象即可。模块里的对象/方法可以参考 `stdlib/StdIo.cpp`；资源句柄活多久、怎样关闭、哪些失败返回 Error，都由该模块定义。
+
+Native 模块只导出 `FeatherNativeModule`，描述结构只包含 GUID、名称和 Create。没有接口版本协商、旧入口探测或别名；所有 Native 库与宿主使用相同工具链和当前头文件一起编译。读取数值参数时使用 `IsNumeric()/AsNumber()` 接受 byte 和 number；要求 byte 时使用 `GetType()/AsByte()`。
+
+## 当前接口约束
+
+项目尚未发布，只维护当前接口；所有模块随宿主重建。磁盘字节码、符号、快照与 Native payload 的格式标记、版本相等校验、长度及 CRC 校验继续保留，用于拒绝误读和损坏数据，不提供历史格式迁移。源码缓存失败后重新编译源文件、缺少可选调试符号时显示基础位置，以及 Windows/Linux/macOS 的系统接口差异，均属于当前功能，不是历史兼容层。

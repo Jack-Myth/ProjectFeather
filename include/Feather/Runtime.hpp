@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -44,7 +45,7 @@ struct NativeTypeIdHash {
     std::size_t operator()(const NativeTypeId& Input) const noexcept;
 };
 
-enum class ValueType { Null, Bool, Number, String, Object };
+enum class ValueType { Null, Bool, Number, String, Object, Byte };
 enum class ObjectType { Script, Function, Error, Host };
 
 class FEATHER_API Value {
@@ -58,6 +59,8 @@ public:
 
     static Value Bool(bool Input);
     static Value Number(double Input);
+    // Checked conversion: finite integral input in [0, 255], otherwise invalid_argument.
+    static Value Byte(double Input);
     static Value String(std::string Input);
     static Value FromObject(std::shared_ptr<Object> Input);
     static Value FromScript(ScriptObject* Input);
@@ -65,7 +68,9 @@ public:
     ValueType GetType() const { return Type; }
     bool IsScriptObject() const { return Type == ValueType::Object && ScriptReference; }
     bool AsBool() const;
-    double AsNumber() const;
+    bool IsNumeric() const { return Type == ValueType::Number || Type == ValueType::Byte; }
+    double AsNumber() const; // Also widens byte without losing information.
+    std::uint8_t AsByte() const;
     const std::string& AsString() const;
     Object* AsObject() const;
     ObjectType GetObjectType() const;
@@ -83,6 +88,7 @@ private:
     union Storage {
         bool Boolean;
         double Numeric;
+        std::uint8_t ByteValue;
         std::shared_ptr<const std::string> Text;
         std::shared_ptr<Object> Reference;
         ScriptObject* Script;
@@ -317,7 +323,7 @@ private:
 enum class Op : std::uint8_t {
     Const, Null, True, False, Pop, GetLocal, GetGlobal, SetLocal, SetGlobal,
     NewObject, GetMember, SetMember, Add, Sub, Mul, Div, Negate, Equal, Less,
-    Jump, JumpIf, Call, Return
+    Jump, JumpIf, Call, Return, ToByte
 };
 
 struct FunctionPrototype {
@@ -332,11 +338,13 @@ struct FunctionPrototype {
 };
 
 struct FEATHER_API Constant {
-    enum class Kind { Number, String, Function } Type;
+    enum class Kind { Number, String, Function, Byte } Type;
     double Numeric = 0;
+    std::uint8_t ByteValue = 0;
     std::string Text;
     std::shared_ptr<FunctionPrototype> Function;
     static Constant Number(double Input);
+    static Constant Byte(double Input);
     static Constant String(std::string Input);
     static Constant FunctionRef(std::shared_ptr<FunctionPrototype> Input);
 };
@@ -345,6 +353,7 @@ class FEATHER_API Module final {
 public:
     std::vector<Constant> Constants;
     std::uint32_t AddNumber(double Input);
+    std::uint32_t AddByte(double Input);
     std::uint32_t AddString(std::string Input);
     std::uint32_t AddFunction(std::shared_ptr<FunctionPrototype> Input);
     void Validate() const;
@@ -365,6 +374,22 @@ private:
     std::vector<std::uint8_t> Code;
 };
 
+// Keep the returned token alive to stay registered; resetting it unregisters.
+class FEATHER_API IdleRegistration final {
+    friend class Vm;
+    explicit IdleRegistration(std::function<Value(double)> Hook) : Hook(std::move(Hook)) {}
+    std::function<Value(double)> Hook;
+};
+class FEATHER_API IdleCallbackFault final : public std::exception {
+public:
+    explicit IdleCallbackFault(std::exception_ptr Cause);
+    const char* what() const noexcept override { return Message.c_str(); }
+    std::exception_ptr GetCause() const noexcept { return Cause; }
+private:
+    std::exception_ptr Cause;
+    std::string Message;
+};
+
 class FEATHER_API Vm final {
 public:
     explicit Vm(std::shared_ptr<Module> Program,
@@ -376,6 +401,14 @@ public:
     Vm(Vm&&) = delete;
     Vm& operator=(Vm&&) = delete;
     Value Run(std::uint32_t FunctionConstant, const std::vector<Value>& Arguments = {});
+    // Calls a value using the same callable/metacall rules and current instruction budget.
+    bool IsCallable(const Value& Target) const;
+    Value Call(Value Target, std::vector<Value> Arguments = {});
+    // Hook returns bool (work done) or Error. One invocation must do bounded, nonblocking work.
+    std::shared_ptr<IdleRegistration> RegisterIdleHook(std::function<Value(double)> Hook);
+    Value Idle(double Seconds,
+               std::function<double()> Monotonic = {},
+               std::function<void(double)> Wait = {});
     void LoadModule(std::string Id, std::shared_ptr<Module> Source,
                     std::vector<std::string> Exports = {},
                     std::span<const std::uint8_t> Identity = {});
@@ -392,6 +425,11 @@ public:
         std::size_t MaxBytes = 64 * 1024 * 1024) const;
     Value ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
                          std::size_t MaxBytes = 64 * 1024 * 1024);
+    // In-memory control-flow checkpoints. They belong to the current outer Run
+    // and intentionally do not restore locals, globals, heap objects, or budgets.
+    std::uint64_t CaptureCheckpoint();
+    void RequestCheckpointRestore(std::uint64_t Id);
+    bool UnloadCheckpoint(std::uint64_t Id);
     template<class Type, class... Arguments>
     Type& CreateNativeObjectType(Arguments&&... Input) {
         static_assert(std::is_base_of_v<NativeObjectType, Type>);
@@ -424,6 +462,7 @@ public:
     std::uint32_t GetNativeCallDepth() const { return ActiveNativeCalls; }
 private:
     friend class RootHandle;
+    friend class ByteBufferLibrary;
     friend class ScriptObject;
     friend class VmDebugContext;
     ScriptObject* AllocateScriptObject(ScriptObject* MetaObject);
@@ -440,6 +479,7 @@ private:
                                   std::uint32_t FunctionConstant,
                                   const std::vector<Value>& Arguments);
     Value Execute(ExecutionState& Execution);
+    void ApplyCheckpointRestore(ExecutionState& Execution, std::uint64_t Id);
     void ReachDebugSafePoint(ExecutionState& Execution);
     void ReachDebugError(ExecutionState& Execution, const Value& Error,
                          DebugErrorOrigin Origin, std::size_t InstructionPc);
@@ -474,6 +514,10 @@ private:
     ExecutionState* ActiveExecution = nullptr;
     bool HasRun = false;
     mutable bool SnapshotBusy = false;
+    struct CheckpointState;
+    std::unordered_map<std::uint64_t, std::unique_ptr<CheckpointState>> Checkpoints;
+    std::uint64_t NextCheckpointId = 1;
+    std::uint64_t NextFrameInvocationId = 1;
     std::size_t ScriptObjectLimit;
     std::size_t NextCollectionObjectCount = 0;
     std::size_t CollectionCount = 0;
@@ -482,6 +526,9 @@ private:
     bool CollectionPending = false;
     std::size_t InstructionLimit;
     std::size_t InstructionsRemaining = 0;
+    std::vector<std::weak_ptr<IdleRegistration>> IdleHooks;
+    std::size_t NextIdleHook = 0;
+    bool IdleDispatching = false;
 };
 
 } // namespace Feather

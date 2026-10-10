@@ -1,0 +1,15 @@
+var checkpoint = import("checkpoint");
+
+def restoreFromChild(id) {
+    return checkpoint.Restore(id);
+}
+
+def main() {
+    var count = 0;
+    var id = checkpoint.Capture();
+    count = count + 1;
+    if (count < 3) {
+        return restoreFromChild(id);
+    }
+    return checkpoint.Unload(id);
+}

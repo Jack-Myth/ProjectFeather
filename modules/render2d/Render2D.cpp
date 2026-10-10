@@ -105,7 +105,7 @@ std::string ReadString(std::span<const std::uint8_t> Input, std::size_t& At) {
 
 bool ExactInteger(const Value& Input, std::uint32_t& Output, std::uint32_t Minimum,
                   std::uint32_t Maximum) {
-    if (Input.GetType() != ValueType::Number) return false;
+    if (!Input.IsNumeric()) return false;
     auto Number = Input.AsNumber();
     if (!std::isfinite(Number) || std::trunc(Number) != Number ||
         Number < Minimum || Number > Maximum) return false;
@@ -114,7 +114,7 @@ bool ExactInteger(const Value& Input, std::uint32_t& Output, std::uint32_t Minim
 }
 
 float FiniteFloat(const Value& Input, const char* Name) {
-    if (Input.GetType() != ValueType::Number || !std::isfinite(Input.AsNumber()) ||
+    if (!Input.IsNumeric() || !std::isfinite(Input.AsNumber()) ||
         Input.AsNumber() < -std::numeric_limits<float>::max() ||
         Input.AsNumber() > std::numeric_limits<float>::max())
         throw std::invalid_argument(std::string(Name) + " must be a finite number");

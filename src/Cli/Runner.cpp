@@ -35,13 +35,13 @@ int RunProgram(const CompiledProgram& Program, const std::filesystem::path& Entr
     if (Program.UsesQuickOperators)
         throw std::runtime_error("quick operators require host-provided __QuickOperator functions");
     constexpr std::size_t MaxCliScriptObjects = 100'000;
-    constexpr std::size_t MaxCliInstructions = 10'000'000;
+    // constexpr std::size_t MaxCliInstructions = 10'000'000;
     std::optional<SnapshotArchive> Restoring;
     while (true) {
         std::optional<SnapshotArchive> NextRestore;
         {
             NativeModules Native(std::cin, std::cout);
-            Vm Machine(Program.Program, MaxCliScriptObjects, MaxCliInstructions);
+            Vm Machine(Program.Program, MaxCliScriptObjects /*, MaxCliInstructions*/);
             Machine.SetDebugController(DebugController);
             auto Loader = std::make_shared<ModuleLoader>(Machine, EntryPath, Kind, Native);
             CliSnapshotHost Snapshots(*Loader, Native);

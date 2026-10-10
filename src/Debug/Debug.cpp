@@ -136,6 +136,10 @@ struct DebugTarget::Impl final {
             Result = {{"description", Json(Input.AsBool() ? "true" : "false")},
                       {"type", Json("bool")}, {"value", Json(Input.AsBool())}};
             break;
+        case ValueType::Byte:
+            Result = {{"description", Json(std::to_string(Input.AsByte()))},
+                      {"type", Json("byte")}, {"value", Json(Input.AsNumber())}};
+            break;
         case ValueType::Number:
             Result = {{"description", Json(NumberDescription(Input.AsNumber()))},
                       {"type", Json("number")}};

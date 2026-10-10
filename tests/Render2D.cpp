@@ -59,13 +59,13 @@ struct Host final : Render2DHost {
     std::shared_ptr<Context> Last;
 };
 
-constexpr NativeModuleGuid CheckpointGuid{{
+constexpr NativeModuleGuid SnapshotCaptureGuid{{
     0xba, 0x77, 0x8d, 0x2a, 0xf0, 0x32, 0x4e, 0x54,
     0x9c, 0x41, 0x66, 0xe1, 0x93, 0x0d, 0x7f, 0xb8}};
 
-class Checkpoint final : public NativeObject {
+class SnapshotCapture final : public NativeObject {
 public:
-    Checkpoint(NativeObjectType& Type, Vm& Machine, std::vector<std::uint8_t>& Saved)
+    SnapshotCapture(NativeObjectType& Type, Vm& Machine, std::vector<std::uint8_t>& Saved)
         : NativeObject(Type), Machine(Machine), Saved(Saved) {}
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     bool IsCallable() const override { return true; }
@@ -81,17 +81,17 @@ private:
     std::vector<std::uint8_t>& Saved;
 };
 
-class CheckpointType final : public NativeObjectType {
+class SnapshotCaptureType final : public NativeObjectType {
 public:
-    CheckpointType(Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObjectType(Machine, CheckpointGuid, "Checkpoint"), Saved(Saved) {}
-    std::shared_ptr<Checkpoint> Create() {
-        return CreateObject<Checkpoint>(GetVm(), Saved);
+    SnapshotCaptureType(Vm& Machine, std::vector<std::uint8_t>& Saved)
+        : NativeObjectType(Machine, SnapshotCaptureGuid, "Capture"), Saved(Saved) {}
+    std::shared_ptr<SnapshotCapture> Create() {
+        return CreateObject<SnapshotCapture>(GetVm(), Saved);
     }
     std::shared_ptr<NativeObject> Deserialize(
         std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
         if (Version != 1 || !Payload.empty())
-            throw std::invalid_argument("invalid test checkpoint");
+            throw std::invalid_argument("invalid test snapshot capture");
         return Create();
     }
 private:
@@ -182,7 +182,7 @@ int main() {
             "texture = render.LoadTexture(context, \"assets/picture.png\"); "
             "font = render.LoadFont(context, \"assets/font.ttf\"); "
             "render.BeginRender(context, 0, 0, 0, 1); render.EndRender(context); "
-            "if (checkpoint()) { render.BeginRender(context, 0, 0, 0, 1); "
+            "if (captureSnapshot()) { render.BeginRender(context, 0, 0, 0, 1); "
             "render.DrawTexture(context, texture, 0, 0, 10, 10, 1, 1, 1, 1); "
             "render.DrawText(context, font, \"restored\", 1, 2, 24, 1, 1, 1, 1); "
             "render.EndRender(context); return render.IsOpen(context); } return false; }");
@@ -191,11 +191,11 @@ int main() {
             Vm Original(SnapshotProgram.Program);
             auto OriginalHost = std::make_shared<Host>();
             Render2DLibrary OriginalLibrary(Original, OriginalHost);
-            RegisterImport(Original, [&](std::string_view Name) {
+            RegisterModuleImport(Original, "", [&](std::string_view, std::string_view Name) {
                 return Name == "render2d" ? OriginalLibrary.GetModule() : Value{};
             });
-            auto& Checkpoints = Original.CreateNativeObjectType<CheckpointType>(Saved);
-            Original.RegisterNativeFunction("checkpoint", Checkpoints.Create());
+            auto& Captures = Original.CreateNativeObjectType<SnapshotCaptureType>(Saved);
+            Original.RegisterNativeFunction("captureSnapshot", Captures.Create());
             Check(!SnapshotProgram.Initialize(Original).IsError(),
                   "render2d snapshot initializer failed");
             Check(!Original.Run(SnapshotProgram.Functions.at("main")).AsBool() && !Saved.empty(),
@@ -206,13 +206,13 @@ int main() {
             Vm Restored(SnapshotProgram.Program);
             auto RestoredHost = std::make_shared<Host>();
             Render2DLibrary RestoredLibrary(Restored, RestoredHost);
-            RegisterImport(Restored, [&](std::string_view Name) {
+            RegisterModuleImport(Restored, "", [&](std::string_view, std::string_view Name) {
                 return Name == "render2d" ? RestoredLibrary.GetModule() : Value{};
             });
-            Restored.CreateNativeObjectType<CheckpointType>(Saved);
+            Restored.CreateNativeObjectType<SnapshotCaptureType>(Saved);
             auto Result = Restored.ResumeSnapshot(Saved);
             Check(Result.GetType() == ValueType::Bool && Result.AsBool(),
-                  "render2d snapshot did not resume after the checkpoint");
+                  "render2d snapshot did not resume after capture");
             Check(RestoredHost->Creates == 1 && RestoredHost->Config.Title == "Snapshot",
                   "restored context was not recreated from its config");
             Check(RestoredHost->Last->TextureLoads == 1 && RestoredHost->Last->FontLoads == 1 &&
@@ -223,16 +223,16 @@ int main() {
         auto OpenFrameProgram = Compile(
             "var render = import(\"render2d\"); "
             "def main() { var config = object(); var context = render.CreateRenderContext(config); "
-            "render.BeginRender(context, 0, 0, 0, 1); return checkpoint(); }");
+            "render.BeginRender(context, 0, 0, 0, 1); return captureSnapshot(); }");
         std::vector<std::uint8_t> RejectedSnapshot;
         Vm OpenFrame(OpenFrameProgram.Program);
         auto OpenFrameHost = std::make_shared<Host>();
         Render2DLibrary OpenFrameLibrary(OpenFrame, OpenFrameHost);
-        RegisterImport(OpenFrame, [&](std::string_view Name) {
+        RegisterModuleImport(OpenFrame, "", [&](std::string_view, std::string_view Name) {
             return Name == "render2d" ? OpenFrameLibrary.GetModule() : Value{};
         });
-        auto& OpenFrameCheckpoints = OpenFrame.CreateNativeObjectType<CheckpointType>(RejectedSnapshot);
-        OpenFrame.RegisterNativeFunction("checkpoint", OpenFrameCheckpoints.Create());
+        auto& OpenFrameCaptures = OpenFrame.CreateNativeObjectType<SnapshotCaptureType>(RejectedSnapshot);
+        OpenFrame.RegisterNativeFunction("captureSnapshot", OpenFrameCaptures.Create());
         Check(!OpenFrameProgram.Initialize(OpenFrame).IsError(),
               "open-frame snapshot initializer failed");
         Check(OpenFrame.Run(OpenFrameProgram.Functions.at("main")).IsError() &&

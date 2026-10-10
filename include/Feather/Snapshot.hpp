@@ -16,7 +16,7 @@ inline constexpr NativeModuleGuid SnapshotModuleGuid{{
 class FEATHER_API SnapshotHost {
 public:
     virtual ~SnapshotHost() = default;
-    virtual Value Checkpoint(Vm& Machine, std::string_view Path) = 0;
+    virtual Value Capture(Vm& Machine, std::string_view Path) = 0;
     virtual Value Restore(std::string_view Path) = 0;
 };
 

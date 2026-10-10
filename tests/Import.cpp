@@ -70,7 +70,7 @@ int main() {
             "var math = import(\"math\"); def main() { return math.multiply(7); }");
         Vm Parent(ParentProgram.Program);
         int Calls = 0;
-        RegisterImport(Parent, [&](std::string_view Specifier) -> Value {
+        RegisterModuleImport(Parent, "", [&](std::string_view, std::string_view Specifier) -> Value {
             ++Calls;
             if (Specifier == "math") return Value::FromObject(Proxy);
             return Value::FromObject(std::make_shared<ErrorObject>("unknown module"));
@@ -81,7 +81,7 @@ int main() {
 
         auto BadProgram = Compile("def bad() { return import(7); }");
         Vm Bad(BadProgram.Program);
-        RegisterImport(Bad, [](std::string_view) -> Value { return {}; });
+        RegisterModuleImport(Bad, "", [](std::string_view, std::string_view) -> Value { return {}; });
         (void)BadProgram.Initialize(Bad);
         Check(Bad.Run(BadProgram.Functions.at("bad")).IsError(),
               "invalid import argument did not return Error");
@@ -91,7 +91,7 @@ int main() {
         (void)ForeignProgram.Initialize(Foreign);
         auto ForeignScript = Foreign.CreateScriptObject();
         Vm Guarded(ForeignProgram.Program);
-        RegisterImport(Guarded, [&](std::string_view) -> Value {
+        RegisterModuleImport(Guarded, "", [&](std::string_view, std::string_view) -> Value {
             return Value::FromScript(ForeignScript);
         });
         (void)ForeignProgram.Initialize(Guarded);

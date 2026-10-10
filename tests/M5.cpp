@@ -27,9 +27,9 @@ template<class Action> void RejectWith(Action Run, const char* Expected) {
     throw std::runtime_error("invalid snapshot accepted");
 }
 
-class CheckpointNative final : public NativeObject {
+class SnapshotCaptureNative final : public NativeObject {
 public:
-    CheckpointNative(NativeObjectType& Type, Vm& Machine,
+    SnapshotCaptureNative(NativeObjectType& Type, Vm& Machine,
                      std::vector<std::uint8_t>& Saved);
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     bool IsCallable() const override { return true; }
@@ -45,23 +45,23 @@ private:
     std::vector<std::uint8_t>& Saved;
 };
 
-constexpr NativeModuleGuid CheckpointModule{{
+constexpr NativeModuleGuid SnapshotCaptureModule{{
     0x8d, 0x9a, 0x62, 0xc4, 0x2d, 0x1f, 0x44, 0xd5,
     0x91, 0xa4, 0x18, 0x77, 0x31, 0x5e, 0xb2, 0x09}};
-std::size_t DestroyedCheckpointObjects = 0;
+std::size_t DestroyedSnapshotCaptureObjects = 0;
 
-class CheckpointType final : public NativeObjectType {
+class SnapshotCaptureType final : public NativeObjectType {
 public:
-    CheckpointType(Vm& Machine, std::vector<std::uint8_t>& Saved,
-                   NativeModuleGuid Module = CheckpointModule,
-                   std::string Name = "Checkpoint")
+    SnapshotCaptureType(Vm& Machine, std::vector<std::uint8_t>& Saved,
+                   NativeModuleGuid Module = SnapshotCaptureModule,
+                   std::string Name = "Capture")
         : NativeObjectType(Machine, Module, std::move(Name), 1), Saved(Saved) {}
-    std::shared_ptr<CheckpointNative> Create() {
-        return CreateObject<CheckpointNative>(GetVm(), Saved);
+    std::shared_ptr<SnapshotCaptureNative> Create() {
+        return CreateObject<SnapshotCaptureNative>(GetVm(), Saved);
     }
     std::vector<std::uint8_t> Serialize(const NativeObject& Input) const override {
         if (FailEncode) throw std::runtime_error("host encode failed");
-        if (!dynamic_cast<const CheckpointNative*>(&Input))
+        if (!dynamic_cast<const SnapshotCaptureNative*>(&Input))
             throw std::runtime_error("unexpected host object");
         return {};
     }
@@ -73,7 +73,7 @@ public:
         return Create();
     }
     void FinalizeRestore(NativeObject& Input) override {
-        if (!dynamic_cast<CheckpointNative*>(&Input))
+        if (!dynamic_cast<SnapshotCaptureNative*>(&Input))
             throw std::runtime_error("unexpected finalized host object");
         Finalized = true;
     }
@@ -82,14 +82,14 @@ public:
     bool Finalized = false;
 protected:
     void Destroy(NativeObject* Input) noexcept override {
-        ++DestroyedCheckpointObjects;
+        ++DestroyedSnapshotCaptureObjects;
         NativeObjectType::Destroy(Input);
     }
 private:
     std::vector<std::uint8_t>& Saved;
 };
 
-CheckpointNative::CheckpointNative(NativeObjectType& Type, Vm& Machine,
+SnapshotCaptureNative::SnapshotCaptureNative(NativeObjectType& Type, Vm& Machine,
                                    std::vector<std::uint8_t>& Saved)
     : NativeObject(Type), Machine(Machine), Saved(Saved) {}
 
@@ -130,7 +130,7 @@ int main() {
             shared.self = shared;
             def inner(x) {
                 var alias = shared;
-                if (checkpoint()) {
+                if (captureSnapshot()) {
                     if (alias.self == shared) { return x + 1; }
                     return 99;
                 }
@@ -139,53 +139,53 @@ int main() {
             def outer() { return inner(4) * 2; }
         )");
         std::vector<std::uint8_t> Saved;
-        std::shared_ptr<CheckpointNative> TypeLifetimeObject;
-        auto DestroyedBefore = DestroyedCheckpointObjects;
+        std::shared_ptr<SnapshotCaptureNative> TypeLifetimeObject;
+        auto DestroyedBefore = DestroyedSnapshotCaptureObjects;
         {
             Vm TypeLifetimeVm(Compiled.Program);
-            auto& Type = TypeLifetimeVm.CreateNativeObjectType<CheckpointType>(Saved);
+            auto& Type = TypeLifetimeVm.CreateNativeObjectType<SnapshotCaptureType>(Saved);
             TypeLifetimeObject = Type.Create();
         }
-        Check(DestroyedCheckpointObjects == DestroyedBefore,
+        Check(DestroyedSnapshotCaptureObjects == DestroyedBefore,
               "VM destroyed a native type while one of its objects survived");
         TypeLifetimeObject.reset();
-        Check(DestroyedCheckpointObjects == DestroyedBefore + 1,
+        Check(DestroyedSnapshotCaptureObjects == DestroyedBefore + 1,
               "native object destruction did not return to its type");
 
         Vm TypeRules(Compiled.Program);
-        TypeRules.CreateNativeObjectType<CheckpointType>(Saved);
-        RejectWith([&] { TypeRules.CreateNativeObjectType<CheckpointType>(Saved); },
+        TypeRules.CreateNativeObjectType<SnapshotCaptureType>(Saved);
+        RejectWith([&] { TypeRules.CreateNativeObjectType<SnapshotCaptureType>(Saved); },
                    "duplicate native object type");
-        auto OtherModule = CheckpointModule;
+        auto OtherModule = SnapshotCaptureModule;
         OtherModule.Bytes[0] ^= 0xff;
-        TypeRules.CreateNativeObjectType<CheckpointType>(Saved, OtherModule, "Checkpoint");
+        TypeRules.CreateNativeObjectType<SnapshotCaptureType>(Saved, OtherModule, "Capture");
         RejectWith([&] {
-            TypeRules.CreateNativeObjectType<CheckpointType>(
+            TypeRules.CreateNativeObjectType<SnapshotCaptureType>(
                 Saved, NativeModuleGuid{}, "ZeroGuid");
         }, "native module GUID is zero");
 
         Vm Original(Compiled.Program);
-        auto& OriginalType = Original.CreateNativeObjectType<CheckpointType>(Saved);
-        auto Checkpoint = OriginalType.Create();
-        Original.RegisterNativeFunction("checkpoint", Checkpoint);
+        auto& OriginalType = Original.CreateNativeObjectType<SnapshotCaptureType>(Saved);
+        auto CaptureFunction = OriginalType.Create();
+        Original.RegisterNativeFunction("captureSnapshot", CaptureFunction);
         Original.GetRootMetaObject()->SetRaw(Value::String("marker"), Value::Number(9));
         Compiled.Initialize(Original);
         auto OriginalShared = Original.GetGlobal("shared").AsScriptObject();
         auto CustomMeta = Original.CreateMetaObject();
         Original.SetMetaObject(OriginalShared, CustomMeta);
         CustomMeta->SetRaw(Value::String("back"), Value::FromScript(OriginalShared));
-        Original.SetGlobal("alias", Original.GetGlobal("checkpoint"));
+        Original.SetGlobal("alias", Original.GetGlobal("captureSnapshot"));
         Original.SetGlobal("problem", Value::FromObject(std::make_shared<ErrorObject>("oops")));
         Original.SetGlobal("notANumber", Value::Number(std::numeric_limits<double>::quiet_NaN()));
         auto Hidden = Original.CreateScriptObject();
-        Checkpoint->SetGcVisibleMember("hidden", Value::FromScript(Hidden));
+        CaptureFunction->SetGcVisibleMember("hidden", Value::FromScript(Hidden));
         Check(Original.Run(Compiled.Functions.at("outer")).AsNumber() == 0,
               "save path should return false");
         Check(!Saved.empty(), "snapshot bytes missing");
-        Check(Saved[4] == 4 &&
+        Check(Saved[4] == 5 &&
               ReadU32(Saved, Saved.size() - 4) ==
                   TestChecksum(std::span<const std::uint8_t>(Saved.data(), Saved.size() - 4)),
-              "snapshot v4 checksum was not written correctly");
+              "snapshot v5 checksum was not written correctly");
 
         auto BeforeFailedEncode = Saved;
         OriginalType.FailEncode = true;
@@ -199,7 +199,7 @@ int main() {
               "snapshot operation stayed busy after host encode failure");
 
         Vm Restored(Compiled.Program);
-        auto& RestoredType = Restored.CreateNativeObjectType<CheckpointType>(Saved);
+        auto& RestoredType = Restored.CreateNativeObjectType<SnapshotCaptureType>(Saved);
         Check(Restored.ResumeSnapshot(Saved).AsNumber() == 10,
               "restored nested frames or pending call result");
         Check(RestoredType.Finalized, "native object restore was not finalized");
@@ -212,7 +212,7 @@ int main() {
               "custom MetaObject cycle or RootMetaObject identity lost");
         Check(Restored.GetRootMetaObject()->GetRaw(Value::String("marker"))->AsNumber() == 9,
               "RootMetaObject member lost");
-        Check(Restored.GetGlobal("alias").AsObject() == Restored.GetGlobal("checkpoint").AsObject(),
+        Check(Restored.GetGlobal("alias").AsObject() == Restored.GetGlobal("captureSnapshot").AsObject(),
               "native object alias lost");
         Check(Restored.GetGlobal("problem").IsError() &&
               dynamic_cast<ErrorObject*>(Restored.GetGlobal("problem").AsObject())->GetMessage() == "oops",
@@ -231,14 +231,14 @@ int main() {
         Vm TooSmall(Compiled.Program);
         RejectWith([&] { TooSmall.ResumeSnapshot(Saved, 10); }, "size limit");
         Vm TooFewObjects(Compiled.Program, 2);
-        TooFewObjects.CreateNativeObjectType<CheckpointType>(Saved);
+        TooFewObjects.CreateNativeObjectType<SnapshotCaptureType>(Saved);
         RejectWith([&] { TooFewObjects.ResumeSnapshot(Saved); },
                    "ScriptObject limit exceeded");
         Check(TooFewObjects.GetScriptObjectCount() == 1,
               "object limit rejection allocated ScriptObjects");
 
         Vm Failed(Compiled.Program);
-        auto& FailedType = Failed.CreateNativeObjectType<CheckpointType>(Saved);
+        auto& FailedType = Failed.CreateNativeObjectType<SnapshotCaptureType>(Saved);
         FailedType.FailDecode = true;
         Reject([&] { Failed.ResumeSnapshot(Saved); }, "host decode failure accepted");
         FailedType.FailDecode = false;
@@ -291,7 +291,7 @@ int main() {
         for (int I = 0; I < 4; ++I) Corrupt[At + I] = 0xff;
         SealSnapshot(Corrupt);
         Vm BadFrame(Compiled.Program);
-        BadFrame.CreateNativeObjectType<CheckpointType>(Saved);
+        BadFrame.CreateNativeObjectType<SnapshotCaptureType>(Saved);
         Reject([&] { BadFrame.ResumeSnapshot(Corrupt); }, "invalid frame index accepted");
         Corrupt = Saved;
         At = 8;
@@ -300,13 +300,13 @@ int main() {
         Corrupt[At] = 1;
         SealSnapshot(Corrupt);
         Vm BadStack(Compiled.Program);
-        BadStack.CreateNativeObjectType<CheckpointType>(Saved);
+        BadStack.CreateNativeObjectType<SnapshotCaptureType>(Saved);
         RejectWith([&] { BadStack.ResumeSnapshot(Corrupt); }, "stack count");
 
-        auto Nested = Compile("def save() { return checkpoint(); } def call() { return bridge(); }");
+        auto Nested = Compile("def save() { return captureSnapshot(); } def call() { return bridge(); }");
         Vm NestedVm(Nested.Program);
-        auto& NestedType = NestedVm.CreateNativeObjectType<CheckpointType>(Saved);
-        NestedVm.RegisterNativeFunction("checkpoint",
+        auto& NestedType = NestedVm.CreateNativeObjectType<SnapshotCaptureType>(Saved);
+        NestedVm.RegisterNativeFunction("captureSnapshot",
             NestedType.Create());
         NestedVm.RegisterNativeFunction("bridge",
             std::make_shared<BridgeNative>(NestedVm, Nested.Functions.at("save")));

@@ -39,7 +39,7 @@
 ### 1.1 物理布局
 
 - [x] 采用 Tagged Union（而非 NaN-boxing），优先保证正确性与可读性
-- [x] 当前 `Value` 有五种顶层 tag，内部为 tagged union：bool、double、
+- [x] 当前 `Value` 有六种顶层 tag，内部为 tagged union：bool、double、uint8_t byte、
       引用计数不可变 UTF-8 string、非拥有的 ScriptObject 指针、拥有型的
       NativeObject `shared_ptr`。object 内部子标记区分 Script 与 Native，
       不增加脚本可见的顶层类型。NativeObject 的具体种类由其 ObjectType 标记。
@@ -49,6 +49,7 @@
 
 - [x] `null`（不使用 "nil" 这个名称）
 - [x] `bool`
+- [x] `byte`：无符号 8 位整数，范围 0～255；有效载荷为 `std::uint8_t`。
 - [x] `number`：不区分 int / float，底层统一使用 `double` 存储
       （精度权衡：放弃 2^53 以上的精确整数表示；若未来需要精确大整数，
       作为独立的 BigInt 类型单独引入，不改变 number 的既有语义）
@@ -68,7 +69,7 @@
 
 ### 1.3 值语义 vs 引用语义
 
-- [x] `null`、`bool`、`number` 为值语义（栈上直接存储，赋值/传参即拷贝）
+- [x] `null`、`bool`、`number`、`byte` 为值语义（栈上直接存储，赋值/传参即拷贝）
 - [x] `string` 为脚本层值语义；其内容可由共享的不可变堆存储承载，
       赋值/传参不要求逐字节复制，但共享关系不可被脚本观察。
 - [x] `object`（含其所有子类：ScriptObject、NativeObject 及其具体种类）为引用
@@ -127,7 +128,7 @@
         否则返回 Error。VM 不自动追踪更多层的 MetaObject。
 - [x] `a.b` 与 `a[b]` 在 VM 原语层面统一为 `GetMember`/`SetMember`；
       点访问由编译器提供字符串 key，方括号访问先求值 key 表达式。
-- [x] ScriptObject 允许 string 与 number 作为成员 key；点访问 `a.b` 只表示
+- [x] ScriptObject 允许 string 与数值（number/byte）作为成员 key；byte key 无损归一为 number；点访问 `a.b` 只表示
       字符串 key `"b"`，方括号访问可使用 number key，以允许脚本层实现数组式容器。
 - [x] NaN 不允许作为 ScriptObject 成员 key；读取 NaN key 始终返回 Error，
       不调用 `__index`。
@@ -217,8 +218,8 @@
 - [x] 初版只支持内存中的字节码模块。每条指令为 1 字节 opcode，后接定宽
       小端操作数：常量索引、局部槽位、全局名称索引为 u32；`Call` 实参数量为
       u16；`JUMP`/`JUMP_IF` 相对偏移为 i32。无操作数指令只有 opcode。
-- [x] 常量池只含 number、string 和函数原型。函数原型含代码、形参数、局部
-      槽位总数和各形参的可选基础值默认项（null、bool、number 或 string）；
+- [x] 常量池只含 number、byte、string 和函数原型。函数原型含代码、形参数、局部
+      槽位总数和各形参的可选基础值默认项（null、bool、number、byte 或 string）；
       默认项按值存储，不需要为了 null/bool 扩展 `Const` 常量类型。
       模块加载时为每个函数原型创建稳定的 Function
       NativeObject，`Const` 读取该原型时压入同一对象；只要 VM 或宿主仍引用
@@ -240,7 +241,7 @@
 
 | Opcode | 操作数 | 栈效应（入栈/出栈） | 语义说明 |
 |---|---|---|---|
-| `Const` | 常量索引 | `[] → [值]` | 压入 number、string 或稳定的 Function 对象 |
+| `Const` | 常量索引 | `[] → [值]` | 压入 number、byte、string 或稳定的 Function 对象 |
 | `Null` / `True` / `False` | 无 | `[] → [值]` | 压入对应基础值 |
 | `Pop` | 无 | `[值] → []` | 丢弃栈顶；表达式语句的结果也由此丢弃 |
 | `GetLocal` / `GetGlobal` | 槽位/名称索引 | `[] → [值]` | 读取局部或全局变量；未定义全局返回新 Error |
@@ -249,6 +250,7 @@
 | `GetMember` | 无 | `[对象, key] → [结果]` | 执行取成员原语；点访问由编译器压入字符串 key |
 | `SetMember` | 无 | `[对象, key, 值] → [结果]` | 执行写成员原语；成功留下写入值，语言层失败留下 Error |
 | `Add` / `Sub` / `Mul` / `Div` | 无 | `[左, 右] → [结果]` | 按 5.3 节运算规则；非法类型组合返回 Error |
+| `ToByte` | 无 | `[值] → [byte/Error]` | 严格检查 0～255 整数，不截断或回绕 |
 | `Negate` | 无 | `[值] → [结果]` | 数值取负；非法类型返回 Error |
 | `Equal` / `Less` | 无 | `[左, 右] → [结果]` | 按 5.3 节比较规则 |
 | `JUMP` | 相对偏移 | `[] → []` | 无条件跳转 |
@@ -381,6 +383,7 @@
 |---|---|
 | `null` | false |
 | `bool` | 其自身的 true/false |
+| `byte` | 0 为 false，1～255 为 true |
 | `number` | `+0`、`-0` 为 false；其他有限非零数及正负无穷大为 true |
 | `string` | UTF-8 字节长度为 0 时 false，否则 true |
 | `object` | true；包括 Error、ScriptObject、NativeObject |
@@ -392,16 +395,16 @@
       不表示错误检测。需要显式检查其类型或字段。
 - [x] 普通相等比较中 `NaN == NaN` 为 false，`+0 == -0` 为 true；
       ScriptObject 的 key 规则另见 1.5 节（NaN 禁止作 key）。
-- [x] `Equal`：同类型的 null、bool、number 按值比较，string 按 UTF-8
-      字节内容比较，object 按对象身份比较；不同顶层类型返回 false。
+- [x] `Equal`：同类型的 null、bool、number、byte 按值比较，string 按 UTF-8
+      字节内容比较，object 按对象身份比较；不同顶层类型返回 false，但 byte/number 按无损数值提升后比较。
       NaN 不等于任何数，`+0` 等于 `-0`。
 - [x] 源码 `a != b` 是 `a == b` 结果的布尔取反；编译器以
       `Equal; False; Equal` 降级，不增加 ISA opcode，因此同样继承 NaN、跨类型
       和 object 身份比较规则。
-- [x] `Less` 仅对 number/number 有定义；NaN 参与时返回 false，其余
+- [x] `Less` 对 number/byte 数值组合有定义；NaN 参与时返回 false，其余
       类型组合生成新 Error。初版不支持字符串排序。
-- [x] `Add` 对 number/number 执行 IEEE 754 双精度加法，对 string/string
-      执行字节拼接；不做隐式转换。`Sub`、`Mul`、`Div`、`Negate` 只接受 number，
+- [x] `Add` 对 number/byte 数值组合执行 IEEE 754 双精度加法，对 string/string
+      执行字节拼接；不做隐式转换。`Sub`、`Mul`、`Div`、`Negate` 接受 number 或 byte，
       结果采用 IEEE 754 双精度；除以零可得到无穷大或 NaN，不生成 Error。
       其他非法操作数组合生成新 Error。
 
@@ -424,7 +427,7 @@
 - [x] 保存点由宿主注册的 native 函数触发，不新增专门字节码指令；宿主在该
       函数内部调用 `Vm::CaptureSnapshot()`，持久化字节后让函数返回 false。
 - [x] `CaptureSnapshot` 只生成字节，不接收路径。独立解释器可通过可导入的
-      `snapshot` Native 模块提供 `Checkpoint(path)`；该模块只负责 continuation
+      `snapshot` Native 模块提供 `Capture(path)`；该模块只负责 continuation
       与文件提交，slot、metadata、索引及目录策略由 Feather 脚本实现。加载成功
       需要解释器以新 VM 执行受控恢复，而不能在当前 native 调用栈上原地恢复；
       具体边界见 `SPEC-snapshot.md`。
@@ -490,7 +493,7 @@
       注册 native 后调用 `Initialize(vm)` 一次，再按 `Functions` 映射调用脚本函数。该接口仍处
       实验阶段。`SerializeProgram` / `DeserializeProgram` 处理实验版磁盘模块，
       格式及严格加载边界见 `SPEC-bytecode-format.md`。
-- [x] `import` 是宿主通过 `RegisterImport(vm, callback)` 注册的普通 native 全局函数，
+- [x] `import` 是宿主通过 `RegisterModuleImport(vm, "", callback)` 注册的普通 native 全局函数，
       编译器与 VM 不解析依赖或跨 VM 传递脚本对象。宿主 Feather 模块可通过
       NativeObject 代理暴露；参数、返回值和快照责任见 `SPEC-import.md`。
 - [x] 单 VM 多文件模块通过 `LoadModule` / `RunModule` / `InitializeModule` 维护私有全局和代码身份；
@@ -499,6 +502,9 @@
 - [x] 与第 6 节快照功能相关的 C++ API 当前为 `CaptureSnapshot()`、
       `ResumeSnapshot(bytes)` 与 `NativeObjectType` 接口，语义见 `SPEC-snapshot.md`；
       公开签名和磁盘格式尚未承诺稳定。
+- [x] 同一 VM、同一最外层 `Run` 内的轻量控制流回退由独立的 `checkpoint`
+      Native 模块提供，不属于 Snapshot 磁盘格式。它保留帧身份、PC 与操作数栈，
+      不回退局部、全局、堆或 native 副作用；完整边界见 `SPEC-checkpoint.md`。
 - [x] 调试钩子以 `Vm::SetDebugController` 注册；`VmDebugController` 接收安全点、
       Error 结果边界和执行结束回调，Error 来源区分 Operation / FunctionReturn。
 
@@ -521,3 +527,17 @@
 - [x] **实现顺序**：先做内存模块驱动的最小 VM，再接对象协议、GC 与嵌入、
       编译器、快照；目录边界和各阶段验收见 `ENGINEERING.md`。源码语法
       现见独立的 `SPEC-syntax.md`。
+
+### byte 的存储与转换边界
+
+`byte(x)` 接受 byte 或有限、无小数且位于 0～255 的 number，失败产生 Error；无隐式截断、饱和或模 256 回绕。byte 的所有算术运算（含取负）提升为 number，沿用 IEEE 754 行为；`byte(255) + 1` 是 number 256，重新 `byte(...)` 才会检查范围。赋值、参数、返回和对象成员保留值的 tag，变量不固定类型。C++ `Value::Byte(double)` 同样检查范围，失败抛 invalid_argument；`AsByte()` 仅接受 byte，`AsNumber()` 可无损读取 byte，`IsNumeric()` 用于接受两类数值的 Native 接口。
+
+有效载荷和字节序列中的 byte 为 1 字节，通用 Value（栈槽、局部变量、ScriptObject 字段、vector<Value>）仍含 tag/union 和对齐开销。现有语言没有静态结构体或专用数组布局，数字键对象不承诺紧凑存储；已有不可变 ByteBuffer 以连续原始字节保存，每元素 1 字节。未新增数组或结构体语言特性。
+
+### 协作式空闲服务
+
+宿主 `Vm::RegisterIdleHook(function<Value(double remainingSeconds)>)` 返回共享注册令牌；保留令牌即保持注册，释放即注销，VM 只弱持有令牌。服务必须执行有限、非阻塞工作并返回 bool（是否完成工作）或 Error。注册上限 1024，注册仅属于该 VM，不写入快照。
+
+`Vm::Idle(seconds, monotonic, wait)` 在单调 deadline 内轮转服务；宿主可提供时钟/等待器，默认使用 steady_clock 和真实 sleep。无服务时等待剩余时长，无工作时每轮最多等待 5 ms。每次最多 256 次服务调用，达到上限后只等待剩余时间；截止时间前停止启动新工作。Idle(0) 给一个服务一次机会。回调不能被时间预算抢占，超时回调可能使 Idle 超时；嵌套 Idle 只等待，不递归派发。调度中的注销安全，新增服务下一轮生效。
+
+`Vm::Call(value, args)` 使用已有 callable/__call 规则，校验 VM 归属并固定参数根；脚本回调的嵌套 Execute 共用外层 InstructionsRemaining，不重置配额。嵌套调用期间沿用现有禁止重入 GC 的边界，对象分配硬上限仍生效。IsCallable 可预检注册值。脚本 Error 由 Idle 原样返回并停止该轮；抛出的故障通过 IdleCallbackFault 携带原异常继续传播。time 的 Sleep/SleepUntil 已接入该机制。

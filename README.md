@@ -4,7 +4,7 @@
 
 ProjectFeather 是一个使用 C++20 编写、面向宿主嵌入的小型脚本语言。当前有栈式字节码 VM、单 VM 多文件模块、对象与 MetaObject、自动非移动标记清除 GC、源码编译器、状态快照、可选的嵌入式调试协议端、VS Code 语言与调试扩展，以及源码运行、独立编译和字节码执行命令行程序。公开接口和磁盘字节格式仍处实验阶段。变量用 `var` 声明，函数用 `def` 声明，顶层导出用 `export` 修饰声明。
 
-当前快照使用带 CRC32 校验和的 v4 格式，可保存模块身份、私有全局、跨模块调用帧及按模块 GUID + 类型名注册的 NativeObject，并检测意外损坏；旧版快照不再加载。快照边界见 [快照契约](SPEC-snapshot.md)。
+当前快照使用带 CRC32 校验和的 v5 格式，可保存模块身份、私有全局、跨模块调用帧及按模块 GUID + 类型名注册的 NativeObject，并检测意外损坏；旧版快照不再加载。快照边界见 [快照契约](SPEC-snapshot.md)。另有仅在当前 VM 运行期间有效、不读写磁盘的 [Checkpoint](SPEC-checkpoint.md)。
 
 源码支持行首快捷调用，例如 `>你好，我是XXX` 等价于调用全局函数 `__QuickOperatorRightAngleBucket("你好，我是XXX");`。另外三个前缀 `#`、`$`、`&` 分别调用 `__QuickOperatorHash`、`__QuickOperatorDollar`、`__QuickOperatorAmpersand`，不访问 `Env`。详情见 [源码语法](SPEC-syntax.md)。
 
@@ -32,7 +32,7 @@ meson compile -C build/release
 meson test -C build/release --print-errorlogs
 ```
 
-所有生成产物统一位于 `build/` 下，并按配置分为 `debug/`、`nodebug/`、`release/` 和 `release-nodebug/`。Meson 生成一个位置无关的静态 `feather-runtime`，不再依赖项目自己的 core/debug DLL；Native 模块位于对应配置的 `modules/`，Windows 文件名包括 `stdio.felib.dll`、`snapshot.felib.dll`、`time.felib.dll` 和 `render2d.felib.dll`。`feather` 完整链接 runtime，默认包含传输无关的 `DebugTarget` 和 Feather-to-DAP adapter；`feathervm` 只按需链接字节码执行所需对象，不包含源码编译器、调试协议或 Socket transport。若要构建连 `feather` 也不含 JSON 调试实现的版本，使用 `meson setup build/nodebug -Ddebugger=false`；VM 的低层安全点接口仍留在 core 中，debug/DAP 头文件对应实现则不可链接。
+所有生成产物统一位于 `build/` 下，并按配置分为 `debug/`、`nodebug/`、`release/` 和 `release-nodebug/`。Meson 生成一个位置无关的静态 `feather-runtime`，不再依赖项目自己的 core/debug DLL；Native 模块位于对应配置的 `modules/`，Windows 文件名包括 `stdio.felib.dll`、`snapshot.felib.dll`、`checkpoint.felib.dll`、`time.felib.dll` 和 `render2d.felib.dll`。`feather` 完整链接 runtime，默认包含传输无关的 `DebugTarget` 和 Feather-to-DAP adapter；`feathervm` 只按需链接字节码执行所需对象，不包含源码编译器、调试协议或 Socket transport。若要构建连 `feather` 也不含 JSON 调试实现的版本，使用 `meson setup build/nodebug -Ddebugger=false`；VM 的低层安全点接口仍留在 core 中，debug/DAP 头文件对应实现则不可链接。
 
 `render2d.felib` 提供 SDL3 + bgfx 二维渲染后端。它默认构建，需要 Git、CMake 和平台图形 SDK，Meson 会按 wrap 中固定的版本取得依赖；只构建轻量 runtime 时可显式传入 `-Drender2d=disabled`：
 
@@ -72,9 +72,9 @@ VS Code 扩展 0.3.1 为 `.fe` 提供语法高亮、编辑配置、片段和当�
 
 `featherc` 只生成文件，不执行源码；`feather` 和 `feathervm` 先执行顶层语句，然后调用存在时的无参数 `def main()`。不要求定义 `main`，返回的非 Error 值不打印。用法错误的退出码为 2，编译、文件读取、VM 故障以及初始化或 `main` 返回 Error 的退出码为 1。独立运行程序没有注入快捷行所需的四个全局函数，因此它们会明确拒绝含快捷行的程序。一般表达式语句丢弃 Error 的语言语义仍然适用。`.fbc` 文件格式见 [字节码格式](SPEC-bytecode-format.md)。
 
-独立程序的错误会标出输入文件；直接编译源码时，初始化或 `main` 返回 Error 还会显示可用的源码字节偏移与行列。当前 v3 `.fbc` 不保存调试表；可选 v3 `.fbs` 保存函数显示名、参数名、局部变量名、词法生命周期和源码位置是否允许设置断点，供嵌入宿主使用。普通 CLI 字节码执行不加载符号。VM 故障也会在有位置时标出当前指令。`featherc` 写入失败会标出输出文件。符号格式见 [符号文件格式](SPEC-symbol-format.md)。`feather` 和 `feathervm` 每次最外层执行最多运行 10,000,000 条指令，并限制 100,000 个同时存活的 ScriptObject（含 RootMetaObject）；VM 在安全的指令边界自动回收不可达对象，并在达到硬上限前强制尝试一次完整收集。超出指令预算或收集后仍达到对象上限时以 VM 故障退出。嵌入式宿主可在 `Vm` 构造时自行设置这两项限额，默认不限制指令数；仍可在 VM 空闲时显式调用 `CollectGarbage()`。
+独立程序的错误会标出输入文件；直接编译源码时，初始化或 `main` 返回 Error 还会显示可用的源码字节偏移与行列。当前 v4 `.fbc` 不保存调试表；可选 v3 `.fbs` 保存函数显示名、参数名、局部变量名、词法生命周期和源码位置是否允许设置断点，供嵌入宿主使用。普通 CLI 字节码执行不加载符号。VM 故障也会在有位置时标出当前指令。`featherc` 写入失败会标出输出文件。符号格式见 [符号文件格式](SPEC-symbol-format.md)。`feather` 和 `feathervm` 每次最外层执行最多运行 10,000,000 条指令，并限制 100,000 个同时存活的 ScriptObject（含 RootMetaObject）；VM 在安全的指令边界自动回收不可达对象，并在达到硬上限前强制尝试一次完整收集。超出指令预算或收集后仍达到对象上限时以 VM 故障退出。嵌入式宿主可在 `Vm` 构造时自行设置这两项限额，默认不限制指令数；仍可在 VM 空闲时显式调用 `CollectGarbage()`。
 
-`import("name")` 是宿主注册的普通全局函数。编译器和 VM 不加载依赖，也不跨 VM 传递脚本对象；宿主可用 `RegisterModuleImport` 把其他 Feather 文件装入同一 VM，也可用旧 `RegisterImport` 和 `NativeObject` 代理子 VM。接口与代理边界见 [import 契约](SPEC-import.md)。独立运行程序的宿主解析器支持 `import("stdio")`、模块目录中的裸名 Feather 文件，以及 `import("./math")`、`import("../shared/util.fe")` 这样的相对文件标识。裸名从可执行文件旁的 `modules/` 搜索，Native 动态库优先；相对标识由真正的调用方文件目录解析。源码模式读取 `.fe` 并优先使用较新的同名 `.fbc`，显式字节码模式只读取 `.fbc`；先用 `featherc` 分别编译各文件，产物按相同目录关系放置。含 `.fe` 后缀的相对标识在字节码运行时映射到 `.fbc`。Native 库约定见 [Native 模块规范](SPEC-native-modules.md)。
+`import("name")` 是宿主注册的普通全局函数。编译器和 VM 不加载依赖，也不跨 VM 传递脚本对象；宿主可用 `RegisterModuleImport` 把其他 Feather 文件装入同一 VM，也可用接口与代理边界见 [import 契约](SPEC-import.md)。独立运行程序的宿主解析器支持 `import("stdio")`、模块目录中的裸名 Feather 文件，以及 `import("./math")`、`import("../shared/util.fe")` 这样的相对文件标识。裸名从可执行文件旁的 `modules/` 搜索，Native 动态库优先；相对标识由真正的调用方文件目录解析。源码模式读取 `.fe` 并优先使用较新的同名 `.fbc`，显式字节码模式只读取 `.fbc`；先用 `featherc` 分别编译各文件，产物按相同目录关系放置。含 `.fe` 后缀的相对标识在字节码运行时映射到 `.fbc`。Native 库约定见 [Native 模块规范](SPEC-native-modules.md)。
 
 一台 VM 已可装入多个 Feather 文件模块，并为每个文件维护私有全局表。源码 `export var/def` 声明可见名字；模块对象实时读取这些导出。独立 CLI 从单个入口文件开始，按运行时遇到的相对 `import` 装入依赖；路径、读取和缓存由 CLI 宿主层处理。接口、初始化循环与快照边界见 [多模块规范](SPEC-multimodule.md)，验收见 [实施记录](ROADMAP-multimodule.md)。
 
@@ -97,7 +97,9 @@ auto Result = Machine.Run(Main.Functions.at("main")); // 13
 
 独立运行程序可通过 `import("stdio")` 获取单一标准输入输出对象，函数内调用 `stdio.Console.PrintLine("hello")` 或 `stdio.IO.OpenFile(...)`。`IO` 还提供 `CloseFile`、`Seek`、`Tell`、`Read`、`Write`；`Read` 返回可逐字节访问的 `ByteBuffer`。嵌入式宿主可编译 `stdlib/StdIo.cpp`，用 `StdIoLibrary(Vm&, input, output)` 将可快照模块接入自己的 `import`；不传 VM 的重载只用于非快照场景。接口和边界见 [标准输入输出库](SPEC-stdio.md)。
 
-保存点可由脚本直接控制：`var snapshot = import("snapshot");` 后调用 `snapshot.Checkpoint(path)`；正常保存返回 `false`，通过 `snapshot.Restore(path)` 回到该位置时返回 `true`。路径只是底层文件能力，slot、标题、缩略图和索引由脚本台本框架自行组织。CLI 会在存档中记录已导入模块并在新 VM 上重建；完整失败边界与 `FTHA` 容器见 [快照契约](SPEC-snapshot.md)。
+持久化快照可由脚本直接控制：`var snapshot = import("snapshot");` 后调用 `snapshot.Capture(path)`；正常保存返回 `false`，通过 `snapshot.Restore(path)` 回到该位置时返回 `true`。路径只是底层文件能力，slot、标题、缩略图和索引由脚本台本框架自行组织。CLI 会在存档中记录已导入模块并在新 VM 上重建；完整失败边界与 `FTHA` 容器见 [快照契约](SPEC-snapshot.md)。
+
+同一运行过程内的轻量跳转使用 `var checkpoint = import("checkpoint");`，接口为 `Capture()`、`Restore(id)` 和 `Unload(id)`。它恢复调用帧的 PC 与表达式栈，但保留当前局部变量，也不回退堆、全局变量或 Native 副作用；创建帧返回或最外层 `Run` 结束后 ID 失效。详见 [Checkpoint 契约](SPEC-checkpoint.md)。
 
 嵌入时在初始化前注册解析器。宿主可以提供标准库，也可以继续解析自己的模块标识：
 
@@ -112,7 +114,7 @@ auto Compiled = Feather::Compile(
     "def main() { stdio.Console.PrintLine(\"hello\"); }");
 Feather::Vm Machine(Compiled.Program);
 Feather::StdIoLibrary Library(Machine, std::cin, std::cout);
-Feather::RegisterImport(Machine, [&Library](std::string_view Name) {
+Feather::RegisterModuleImport(Machine, "", [&Library](std::string_view, std::string_view Name) {
     if (Name == "stdio") return Library.GetModule();
     return Feather::Value::FromObject(
         std::make_shared<Feather::ErrorObject>("unknown module"));
@@ -135,7 +137,7 @@ Compiled.Initialize(Machine);
 auto Result = Machine.Run(Compiled.Functions.at("answer"));
 ```
 
-`MyDoubleFunction`、`MyHashFunction` 和 `MyHostObject` 是宿主实现的 `NativeObject` 子类。`RegisterNativeFunction` 把可调用对象绑定为全局函数；`SetGlobal` 可注入一般宿主对象。`Compiled.Initialize(Machine)` 会绑定顶层函数并执行顶层语句一次，顶层代码因此能立即调用已注册的函数。宿主跨 GC 持有脚本对象时需使用 `RootHandle`。VM 的低层接口用 `CaptureSnapshot` 生成字节、用新 VM 的 `ResumeSnapshot` 恢复；独立解释器可 `import("snapshot")`，调用 `snapshot.Checkpoint(path)` 和 `snapshot.Restore(path)`。CLI 存档同时记录已导入模块并在恢复前重建它们，而 slot、metadata 与索引仍由脚本框架实现。具体限制见 [源码语法](SPEC-syntax.md)、[运行时设计](SPEC-runtime-design.md) 和 [快照契约](SPEC-snapshot.md)。工程状态见 [Progress.md](Progress.md)；完整注入样例见 [快捷行测试](tests/Quick.cpp)。
+`MyDoubleFunction`、`MyHashFunction` 和 `MyHostObject` 是宿主实现的 `NativeObject` 子类。`RegisterNativeFunction` 把可调用对象绑定为全局函数；`SetGlobal` 可注入一般宿主对象。`Compiled.Initialize(Machine)` 会绑定顶层函数并执行顶层语句一次，顶层代码因此能立即调用已注册的函数。宿主跨 GC 持有脚本对象时需使用 `RootHandle`。VM 的低层接口用 `CaptureSnapshot` 生成字节、用新 VM 的 `ResumeSnapshot` 恢复；独立解释器可 `import("snapshot")`，调用 `snapshot.Capture(path)` 和 `snapshot.Restore(path)`。CLI 存档同时记录已导入模块并在恢复前重建它们，而 slot、metadata 与索引仍由脚本框架实现。具体限制见 [源码语法](SPEC-syntax.md)、[运行时设计](SPEC-runtime-design.md) 和 [快照契约](SPEC-snapshot.md)。工程状态见 [Progress.md](Progress.md)；完整注入样例见 [快捷行测试](tests/Quick.cpp)。
 
 调试端的最小接入形态如下；`MyChannel` 只负责消息传输，不需要了解 VM 帧或对象布局：
 
@@ -164,3 +166,17 @@ auto Adapter = std::make_shared<Feather::DapAdapter>(
 // IDE 收到完整 DAP JSON：Adapter->DispatchDapMessage(message);
 // target 收到完整 Feather JSON：Adapter->DispatchTargetMessage(message);
 ```
+
+## byte
+
+`byte(x)` 创建无符号 8 位值（0～255），拒绝越界、小数及非数值输入；算术提升到 number，赋值和传参保留 byte。ByteBuffer 的元素及二进制文件写入为真正单字节；通用 VM 槽和对象字段仍有 Value 开销。
+
+基本示例：[tests/fixtures/byte.fe](tests/fixtures/byte.fe)，运行 `build\feather.exe run tests\fixtures\byte.fe`，输出 255 和 256。源码中 `byte` 现在是保留字。
+
+本次格式为 .fbc v4 / ISA 2、.fbs v3 / ISA 2、快照 v5；旧产物需重新生成，旧快照不迁移。Native 库使用 V3 入口并需重编译。临时验证数据放 `.work/`（Git 忽略，Meson 安装不包含该目录）。
+
+## network 与空闲回调
+
+`import("network")` 提供非阻塞 TCP/UDP 和二进制 ByteBuffer 收发。用 `network.OnReceive(socket, callback)` 注册接收，再调用 `time.Sleep(...)`；VM 会在等待预算内同线程派发，不需要手动 Update。TCP 回调收到的是字节流片段，应用自行分帧。基础操作、EOF/错误/超时、权限与上限见 [network 规范](SPEC-network.md)。
+
+回环示例：[TCP](tests/fixtures/network-tcp.fe)、[UDP](tests/fixtures/network-udp.fe)。例如 `build/feather.exe run tests/fixtures/network-udp.fe`，输出 0 和 255。构建默认包含 network，可用 `-Dnetwork=false` 禁用；Native 模块及嵌入宿主需使用本次头文件重编。字节码与快照版本不因 network/idle 再次变化。

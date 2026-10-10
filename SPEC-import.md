@@ -1,29 +1,21 @@
-# 宿主提供的 `import` 契约（第一版）
+# import 宿主接口
 
-## 边界
-
-`import` 是宿主在 VM 初始化之前注册的普通全局可调用值，不是关键字、指令或编译器指令。源码 `import("name")` 按普通名称读取与函数调用编译；`Compile(source)` 和 `.fbc` 不解析、记录或打包依赖。VM 只执行已提供的字节码，不负责文件系统、路径、网络、缓存、依赖图或其他 VM 的生命周期。脚本可以像普通全局名一样遮蔽或覆盖 `import`。`featherc` 可以编译这样的调用；独立运行程序的命令行宿主实现了下文的相对文件解析器。
-
-第一版调用约定建议为 `import(specifier: string) -> Value`：恰好一个参数，且为 UTF-8 string。参数值是交给宿主的不透明标识；它可以是路径、包名或其他资源名，具体解析规则由宿主确定。参数数量或类型错误由注册的 native 函数返回 `Error`。宿主查找失败等可预期失败返回 `Error`；宿主/IO 致命故障沿已有 C++ 异常通道处理。`Error` 仍是普通值，不自动中止脚本；独立表达式语句可能丢弃它。
-
-便捷注册适配器只允许返回基础值或宿主 `NativeObject`（包括新建的 `ErrorObject`），拒绝直接返回 ScriptObject 或 FunctionObject。宿主可创建另一台 VM 运行 Feather 模块，并用 `NativeObject` 代理其模块和函数：代理自行复制被允许的参数与结果，不能把子 VM 的脚本对象或函数 Value 交给调用方 VM。推荐的初版代理值边界是 `null`、bool、number、string；Error 应在接收方重新构造。对象代理协议、路径含义、IO、缓存、重复导入和循环依赖均由宿主定义。`NativeObject` 若保存当前 VM 的脚本对象，必须按既有 GC 可见成员或 `RootHandle` 契约维护引用。
-
-`RegisterImport` 与 `RegisterModuleImport` 创建的导入函数会自动绑定无 payload 的规范 `NativeObjectType`；恢复前宿主必须在新 VM 上以相同模块 ID 重新注册回调。导入返回的其他宿主对象仍须绑定适用的类型。父 VM 的快照不自动保存子 VM 及代理的外部状态；宿主须另行实现一致的保存/恢复方案，或拒绝此类快照。
-
-## 便捷注册接口
+`import` 是宿主注册的普通函数，VM 不自行读取文件或加载动态库。唯一适配器为：
 
 ```cpp
-using ImportCallback = std::function<Value(std::string_view Specifier)>;
-void RegisterImport(Vm& Machine, ImportCallback Callback);
+using ModuleImportCallback = std::function<Value(
+    std::string_view CallerModuleId, std::string_view Specifier)>;
+void RegisterModuleImport(Vm& Machine, std::string_view ModuleId,
+                          ModuleImportCallback Callback);
 ```
 
-它只是 `NativeObject` + `Vm::RegisterNativeFunction("import", ...)` 的宿主侧适配器：校验一个 string 实参、转发回调并拒绝直接返回脚本对象/函数。它不读取文件、不编译依赖、不创建其他 VM，也不规定缓存策略。回调在同步 native 调用期间执行，遵守已有 GC、安全点和快照限制。若要让多个嵌入者使用不同解析方式，每台 VM 各自注册回调。回调可通过 C++ 捕获列表持有自己的模块管理器；须保证其生命周期覆盖回调可能被调用的时间。
+空 ModuleId 指根模块。回调收到实际调用方模块 ID 和不透明的 specifier，负责解析、缓存、初始化及返回模块值。参数必须是单个字符串，否则返回 Error；空回调被拒绝。允许返回基础值、宿主对象及同一 VM 的脚本对象/函数；跨 VM 的脚本值仍由所有权校验拒绝。
 
-旧适配器仍可用于子 VM 代理；`tests/Import.cpp` 展示最小的子 VM、模块代理与函数代理，只复制 number 参数和结果。需要更丰富的跨 VM 值类型时，宿主仍必须定义复制或代理规则，并维护各 VM 独立的对象所有权。
+需要隔离 VM 时，宿主可在此回调中返回 NativeObject 代理，自行定义跨 VM 参数与结果的复制规则。`tests/Import.cpp` 保留代理及跨 VM 拒绝测试。每个 VM 分别注册自己的回调；捕获对象必须覆盖回调的使用期。
 
-## 单 VM 多文件模块扩展
+适配器注册无 payload 的 NativeSingletonType。恢复快照前须在目标 VM 为相同模块 ID 重新注册回调；导入结果中的其他 Native 对象也须注册自己的类型。快照不会自动递归保存代理背后的另一个 VM 或外部状态。
 
-新增 `export var/def`、私有模块全局表和 ModuleNamespace 的规范见 `SPEC-multimodule.md`。`RegisterModuleImport(vm, moduleId, callback)` 在指定模块中注册同名的普通 `import` 函数；空 moduleId 指主模块。回调类型为 `Value(callerModuleId, specifier)`，由宿主根据调用方身份解析来源、装入及初始化 Feather 模块，再返回 VM 内部的模块对象或其他 Value。这个适配器允许返回同一 VM 的 ScriptObject/FunctionObject；`Vm::ValidateOwnedValue` 仍在结果进入栈时拒绝跨 VM 脚本值。旧 `RegisterImport` 保留原有“只返回基础值或宿主代理”的窄边界。
+同一 VM 的 export、模块私有全局和 ModuleNamespace 见 `SPEC-multimodule.md`。
 
 ## 独立运行程序的文件解析器
 

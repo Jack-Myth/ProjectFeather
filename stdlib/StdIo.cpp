@@ -1,4 +1,5 @@
 #include <Feather/StdIo.hpp>
+#include <Feather/ByteBuffer.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -24,7 +25,6 @@ using Method = std::function<Value(const std::vector<Value>&)>;
 
 class Function final : public NativeObject {
 public:
-    explicit Function(Method Body) : Body(std::move(Body)) {}
     Function(NativeObjectType& Type, Method Body)
         : NativeObject(Type), Body(std::move(Body)) {}
     ObjectType GetObjectType() const override { return ObjectType::Host; }
@@ -39,12 +39,8 @@ private:
 
 class Namespace final : public NativeObject {
 public:
-    Namespace() = default;
     explicit Namespace(NativeObjectType& Type) : NativeObject(Type) {}
     ObjectType GetObjectType() const override { return ObjectType::Host; }
-    void Add(std::string Name, Method Body) {
-        Members.emplace(std::move(Name), Value::FromObject(std::make_shared<Function>(std::move(Body))));
-    }
     void AddValue(std::string Name, Value Input) {
         Members.emplace(std::move(Name), std::move(Input));
     }
@@ -58,7 +54,7 @@ private:
 };
 
 bool Integer(const Value& Input, std::uint64_t& Result, std::uint64_t Limit) {
-    if (Input.GetType() != ValueType::Number) return false;
+    if (!Input.IsNumeric()) return false;
     double Number = Input.AsNumber();
     if (!std::isfinite(Number) || Number < 0 || Number > static_cast<double>(Limit) ||
         std::trunc(Number) != Number) return false;
@@ -67,7 +63,7 @@ bool Integer(const Value& Input, std::uint64_t& Result, std::uint64_t Limit) {
 }
 
 bool Offset(const Value& Input, std::int64_t& Result) {
-    if (Input.GetType() != ValueType::Number) return false;
+    if (!Input.IsNumeric()) return false;
     double Number = Input.AsNumber();
     constexpr double MaxExact = 9007199254740991.0;
     if (!std::isfinite(Number) || Number < -MaxExact || Number > MaxExact ||
@@ -76,135 +72,8 @@ bool Offset(const Value& Input, std::int64_t& Result) {
     return true;
 }
 
-class BufferMethodType;
-
-class ByteBuffer final : public NativeObject {
-public:
-    explicit ByteBuffer(std::string Bytes)
-        : Bytes(std::make_shared<const std::string>(std::move(Bytes))) {}
-    ByteBuffer(NativeObjectType& Type, std::string Input,
-               BufferMethodType* InputMethodType)
-        : NativeObject(Type), Bytes(std::make_shared<const std::string>(std::move(Input))),
-          MethodType(InputMethodType) {}
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    const std::string& Data() const { return *Bytes; }
-    Value GetMember(const Value& Key) override;
-private:
-    std::shared_ptr<const std::string> Bytes;
-    BufferMethodType* MethodType = nullptr;
-};
-
-enum class BufferOperation : std::uint8_t { ToString, Get };
-
-class BufferMethod final : public NativeObject {
-public:
-    BufferMethod(NativeObjectType& Type, std::shared_ptr<const std::string> Bytes,
-                 BufferOperation Operation)
-        : NativeObject(Type), Bytes(std::move(Bytes)), Operation(Operation) {}
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    bool IsCallable() const override { return true; }
-    Value Call(const std::vector<Value>& A) override {
-        if (Operation == BufferOperation::ToString) {
-            if (!A.empty()) return Error("ByteBuffer.ToString expects no arguments");
-            try { return Value::String(*Bytes); }
-            catch (const std::invalid_argument&) { return Error("buffer is not valid UTF-8"); }
-        }
-        std::uint64_t Index = 0;
-        if (A.size() != 1 || !Integer(A[0], Index, Bytes->size()) || Index == Bytes->size())
-            return Error("ByteBuffer.Get expects an in-range byte index");
-        return Value::Number(static_cast<unsigned char>((*Bytes)[static_cast<std::size_t>(Index)]));
-    }
-    const std::string& Data() const { return *Bytes; }
-    BufferOperation GetOperation() const { return Operation; }
-private:
-    std::shared_ptr<const std::string> Bytes;
-    BufferOperation Operation;
-};
-
-class BufferMethodType final : public NativeObjectType {
-public:
-    explicit BufferMethodType(Vm& Machine)
-        : NativeObjectType(Machine, StdIoModuleGuid, "ByteBuffer.Method") {}
-    std::shared_ptr<BufferMethod> Create(std::shared_ptr<const std::string> Bytes,
-                                         BufferOperation Operation) {
-        return CreateObject<BufferMethod>(std::move(Bytes), Operation);
-    }
-    std::vector<std::uint8_t> Serialize(const NativeObject& Input) const override {
-        auto* Method = dynamic_cast<const BufferMethod*>(&Input);
-        if (!Method || Method->GetNativeObjectType() != this)
-            throw std::invalid_argument("invalid ByteBuffer method object");
-        std::vector<std::uint8_t> Result;
-        Result.reserve(Method->Data().size() + 1);
-        Result.push_back(static_cast<std::uint8_t>(Method->GetOperation()));
-        Result.insert(Result.end(), Method->Data().begin(), Method->Data().end());
-        return Result;
-    }
-    std::shared_ptr<NativeObject> Deserialize(
-        std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
-        if (Version != 1 || Payload.empty() || Payload[0] > 1)
-            throw std::invalid_argument("invalid ByteBuffer method payload");
-        auto Bytes = std::make_shared<const std::string>(
-            reinterpret_cast<const char*>(Payload.data() + 1), Payload.size() - 1);
-        return Create(std::move(Bytes), static_cast<BufferOperation>(Payload[0]));
-    }
-};
-
-class ByteBufferType final : public NativeObjectType {
-public:
-    ByteBufferType(Vm& Machine, BufferMethodType& MethodType)
-        : NativeObjectType(Machine, StdIoModuleGuid, "ByteBuffer"), MethodType(MethodType) {}
-    std::shared_ptr<ByteBuffer> Create(std::string Bytes) {
-        return CreateObject<ByteBuffer>(std::move(Bytes), &MethodType);
-    }
-    std::vector<std::uint8_t> Serialize(const NativeObject& Input) const override {
-        auto* Buffer = dynamic_cast<const ByteBuffer*>(&Input);
-        if (!Buffer || Buffer->GetNativeObjectType() != this)
-            throw std::invalid_argument("invalid ByteBuffer object");
-        return {Buffer->Data().begin(), Buffer->Data().end()};
-    }
-    std::shared_ptr<NativeObject> Deserialize(
-        std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
-        if (Version != 1) throw std::invalid_argument("unsupported ByteBuffer version");
-        std::string Bytes;
-        if (!Payload.empty())
-            Bytes.assign(reinterpret_cast<const char*>(Payload.data()), Payload.size());
-        return Create(std::move(Bytes));
-    }
-private:
-    BufferMethodType& MethodType;
-};
-
-Value ByteBuffer::GetMember(const Value& Key) {
-    if (Key.GetType() != ValueType::String) return Error("member name must be a string");
-    if (Key.AsString() == "Length") return Value::Number(static_cast<double>(Bytes->size()));
-    if (Key.AsString() == "ToString") {
-        if (MethodType)
-            return Value::FromObject(MethodType->Create(Bytes, BufferOperation::ToString));
-        auto Content = Bytes;
-        return Value::FromObject(std::make_shared<Function>([Content = std::move(Content)](const std::vector<Value>& A) {
-            if (!A.empty()) return Error("ByteBuffer.ToString expects no arguments");
-            try { return Value::String(*Content); }
-            catch (const std::invalid_argument&) { return Error("buffer is not valid UTF-8"); }
-        }));
-    }
-    if (Key.AsString() == "Get") {
-        if (MethodType)
-            return Value::FromObject(MethodType->Create(Bytes, BufferOperation::Get));
-        auto Content = Bytes;
-        return Value::FromObject(std::make_shared<Function>([Content = std::move(Content)](const std::vector<Value>& A) {
-            std::uint64_t Index = 0;
-            if (A.size() != 1 || !Integer(A[0], Index, Content->size()) || Index == Content->size())
-                return Error("ByteBuffer.Get expects an in-range byte index");
-            return Value::Number(static_cast<unsigned char>((*Content)[static_cast<std::size_t>(Index)]));
-        }));
-    }
-    return Error("unknown ByteBuffer member");
-}
-
 class FileHandle final : public NativeObject {
 public:
-    FileHandle(std::FILE* File, std::shared_ptr<void> Owner, bool Readable, bool Writable)
-        : File(File), Owner(std::move(Owner)), Readable(Readable), Writable(Writable) {}
     FileHandle(NativeObjectType& Type, std::FILE* File, std::shared_ptr<void> Owner,
                std::string Path, std::string Mode, bool Readable, bool Writable)
         : NativeObject(Type), File(File), Owner(std::move(Owner)), Path(std::move(Path)),
@@ -394,6 +263,7 @@ std::string Display(const Value& Input) {
     case ValueType::Null: return "null";
     case ValueType::Bool: return Input.AsBool() ? "true" : "false";
     case ValueType::String: return Input.AsString();
+    case ValueType::Byte: return std::to_string(Input.AsByte());
     case ValueType::Number: {
         std::ostringstream Text;
         Text.imbue(std::locale::classic());
@@ -413,39 +283,22 @@ struct StdIoLibrary::State {
     std::ostream& Output;
 };
 
-StdIoLibrary::StdIoLibrary(std::istream& Input, std::ostream& Output)
-    : StdIoLibrary(nullptr, Input, Output) {}
-
 StdIoLibrary::StdIoLibrary(Vm& Machine, std::istream& Input, std::ostream& Output)
-    : StdIoLibrary(&Machine, Input, Output) {}
-
-StdIoLibrary::StdIoLibrary(Vm* Machine, std::istream& Input, std::ostream& Output)
     : Shared(std::make_shared<State>(Input, Output)) {
     auto MakeNamespace = [&](std::string Name) {
-        if (!Machine) return std::make_shared<Namespace>();
-        auto& Type = Machine->CreateNativeObjectType<NativeSingletonType>(
+        auto& Type = Machine.CreateNativeObjectType<NativeSingletonType>(
             StdIoModuleGuid, std::move(Name));
         return Type.Create<Namespace>();
     };
     auto AddMethod = [&](const std::shared_ptr<Namespace>& Target, std::string TypeName,
                          std::string Name, Method Body) {
-        if (!Machine) {
-            Target->Add(std::move(Name), std::move(Body));
-            return;
-        }
-        auto& Type = Machine->CreateNativeObjectType<NativeSingletonType>(
+        auto& Type = Machine.CreateNativeObjectType<NativeSingletonType>(
             StdIoModuleGuid, std::move(TypeName));
         Target->AddValue(std::move(Name), Value::FromObject(Type.Create<Function>(std::move(Body))));
     };
-    BufferMethodType* BufferMethods = nullptr;
-    ByteBufferType* Buffers = nullptr;
-    FileHandleType* Files = nullptr;
-    if (Machine) {
-        BufferMethods = &Machine->CreateNativeObjectType<BufferMethodType>();
-        Buffers = &Machine->CreateNativeObjectType<ByteBufferType>(*BufferMethods);
-        Files = &Machine->CreateNativeObjectType<FileHandleType>(
-            std::static_pointer_cast<void>(Shared));
-    }
+    ByteBufferLibrary Buffers(Machine);
+    auto* Files = &Machine.CreateNativeObjectType<FileHandleType>(
+        std::static_pointer_cast<void>(Shared));
 
     auto ConsoleNamespace = MakeNamespace("Console");
     AddMethod(ConsoleNamespace, "Console.Print", "Print", [State = Shared](const std::vector<Value>& A) {
@@ -481,10 +334,8 @@ StdIoLibrary::StdIoLibrary(Vm* Machine, std::istream& Input, std::ostream& Outpu
         auto Path = AbsolutePath(A[0].AsString());
         std::FILE* File = Open(Path, Mode + "b");
         if (!File) return Error("cannot open file");
-        if (Files)
-            return Value::FromObject(Files->Create(
-                File, std::move(Path), Mode, Readable, Writable));
-        return Value::FromObject(std::make_shared<FileHandle>(File, Owner, Readable, Writable));
+        return Value::FromObject(Files->Create(
+            File, std::move(Path), Mode, Readable, Writable));
     });
     AddMethod(IONamespace, "IO.CloseFile", "CloseFile", [Owner](const std::vector<Value>& A) {
         if (A.size() != 1) return Error("IO.CloseFile expects one handle");
@@ -526,19 +377,23 @@ StdIoLibrary::StdIoLibrary(Vm* Machine, std::istream& Input, std::ostream& Outpu
         auto ReadCount = std::fread(Bytes.data(), 1, Bytes.size(), File->Get());
         if (std::ferror(File->Get())) return Error("file read failed");
         Bytes.resize(ReadCount);
-        if (Buffers) return Value::FromObject(Buffers->Create(std::move(Bytes)));
-        return Value::FromObject(std::make_shared<ByteBuffer>(std::move(Bytes)));
+        return Buffers.Create(std::move(Bytes));
     });
     AddMethod(IONamespace, "IO.Write", "Write", [Owner](const std::vector<Value>& A) {
-        if (A.size() != 2) return Error("IO.Write expects handle and string or ByteBuffer");
+        if (A.size() != 2) return Error("IO.Write expects handle and byte, string or ByteBuffer");
         auto* File = Handle(A, Owner);
         if (!File || !File->CanWrite()) return Error("invalid, closed, or unwritable file handle");
+        std::string SingleByte;
         const std::string* Bytes = nullptr;
+        if (A[1].GetType() == ValueType::Byte) {
+            SingleByte.assign(1, static_cast<char>(A[1].AsByte()));
+            Bytes = &SingleByte;
+        }
         if (A[1].GetType() == ValueType::String) Bytes = &A[1].AsString();
         else if (A[1].GetType() == ValueType::Object && !A[1].IsScriptObject()) {
-            if (auto* Buffer = dynamic_cast<ByteBuffer*>(A[1].AsObject())) Bytes = &Buffer->Data();
+            Bytes = ByteBufferData(A[1]);
         }
-        if (!Bytes) return Error("IO.Write expects a string or ByteBuffer");
+        if (!Bytes) return Error("IO.Write expects a byte, string or ByteBuffer");
         auto Written = std::fwrite(Bytes->data(), 1, Bytes->size(), File->Get());
         if (Written != Bytes->size()) return Error("file write failed");
         return Value::Number(static_cast<double>(Written));

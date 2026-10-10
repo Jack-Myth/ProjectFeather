@@ -9,7 +9,7 @@ namespace {
 
 constexpr std::uint8_t Magic[8] = {'F', 'T', 'H', 'R', 'S', 'Y', 0, 0};
 constexpr std::uint16_t FormatVersion = 3;
-constexpr std::uint16_t InstructionVersion = 1;
+constexpr std::uint16_t InstructionVersion = 2;
 constexpr std::uint32_t MaxFunctions = 65'536;
 
 [[noreturn]] void Invalid(const char* Message) { throw std::invalid_argument(Message); }

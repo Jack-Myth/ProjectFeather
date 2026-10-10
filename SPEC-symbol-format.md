@@ -10,10 +10,10 @@
 |---|---|---|
 | magic | 8 bytes | `FTHRSY` 后接两个零字节 |
 | format version | u16 | 3 |
-| instruction version | u16 | 1，与 `.fbc` 的指令版本一致 |
+| instruction version | u16 | 2，与 `.fbc` 的指令版本一致 |
 | payload size | u32 | 从头部结束到文件末尾的精确字节数，含校验和 |
 | bytecode size | u32 | 对应 `.fbc` 的总字节数 |
-| bytecode fingerprint | u64 | 完整、确定性 v3 `.fbc` 字节的 FNV-1a 64 位指纹 |
+| bytecode fingerprint | u64 | 完整、确定性 v4 `.fbc` 字节的 FNV-1a 64 位指纹 |
 | function count | u32 | 模块中的函数常量数，最多 65536 |
 | functions | 逐个 | 按常量索引升序编码，见下文 |
 | CRC32 | u32 | 前面所有字节的 IEEE CRC32 |

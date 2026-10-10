@@ -13,10 +13,12 @@ namespace Feather {
 namespace {
 constexpr std::size_t MinimumCollectionGrowth = 1024;
 
-Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Value>& Args) {
+Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Value>& Args,
+                std::uint64_t InvocationId) {
     const auto& Body = Function->GetBody();
     Frame Next;
     Next.Function = std::move(Function);
+    Next.InvocationId = InvocationId;
     Next.Locals.resize(Body.LocalCount);
     for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
         if (I < Args.size()) Next.Locals[I] = Args[I];
@@ -25,17 +27,21 @@ Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Valu
     return Next;
 }
 struct ActiveRunGuard {
-    explicit ActiveRunGuard(std::uint32_t& Count) : Count(Count) { ++Count; }
-    ~ActiveRunGuard() { --Count; }
+    explicit ActiveRunGuard(std::uint32_t& Count, std::function<void()> Finish = {})
+        : Count(Count), Finish(std::move(Finish)) { ++Count; }
+    ~ActiveRunGuard() { --Count; if (Finish) Finish(); }
     std::uint32_t& Count;
+    std::function<void()> Finish;
 };
 Value Error(std::string Message) { return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message))); }
 bool Equal(const Value& Left, const Value& Right) {
+    if (Left.IsNumeric() && Right.IsNumeric()) return Left.AsNumber() == Right.AsNumber();
     if (Left.GetType() != Right.GetType()) return false;
     switch (Left.GetType()) {
     case ValueType::Null: return true;
     case ValueType::Bool: return Left.AsBool() == Right.AsBool();
     case ValueType::Number: return Left.AsNumber() == Right.AsNumber();
+    case ValueType::Byte: return Left.AsByte() == Right.AsByte();
     case ValueType::String: return Left.AsString() == Right.AsString();
     case ValueType::Object: return Left.AsObject() == Right.AsObject();
     }
@@ -49,6 +55,7 @@ std::uint32_t ReadU32(const std::vector<std::uint8_t>& Code, std::size_t& Pc) {
 Value ConstantValue(const Constant& Item, const std::shared_ptr<Object>& Function) {
     switch (Item.Type) {
     case Constant::Kind::Number: return Value::Number(Item.Numeric);
+    case Constant::Kind::Byte: return Value::Byte(Item.ByteValue);
     case Constant::Kind::String: return Value::String(Item.Text);
     case Constant::Kind::Function: return Value::FromObject(Function);
     }
@@ -74,6 +81,16 @@ bool IsIdentifier(std::string_view Name) {
     return true;
 }
 } // namespace
+
+struct Vm::CheckpointState {
+    struct SavedFrame {
+        std::shared_ptr<FunctionObject> Function;
+        std::uint64_t InvocationId = 0;
+        std::size_t Pc = 0;
+        std::vector<Value> Stack;
+    };
+    std::vector<SavedFrame> Frames;
+};
 
 Value ModuleNamespace::GetMember(const Value& Key) {
     auto Instance = Owner.lock();
@@ -352,6 +369,80 @@ std::string Vm::GetActiveModuleId() const {
     return Found->second->Id;
 }
 
+std::uint64_t Vm::CaptureCheckpoint() {
+    constexpr std::uint64_t MaxExactScriptInteger = 9'007'199'254'740'991ull;
+    constexpr std::size_t MaxCheckpoints = 256;
+    constexpr std::size_t MaxSavedStackValues = 65'536;
+    if (ActiveRuns != 1 || ActiveNativeCalls != 1 || !ActiveExecution ||
+        !ActiveExecution->PendingCallResult || ActiveExecution->Frames.empty())
+        throw std::logic_error("checkpoint capture requires a direct script call");
+    if (Checkpoints.size() >= MaxCheckpoints)
+        throw std::length_error("too many active checkpoints");
+    if (NextCheckpointId > MaxExactScriptInteger)
+        throw std::overflow_error("checkpoint ID space exhausted");
+
+    auto State = std::make_unique<CheckpointState>();
+    State->Frames.reserve(ActiveExecution->Frames.size());
+    std::size_t SavedValues = 0;
+    for (const auto& Current : ActiveExecution->Frames) {
+        if (Current.InvocationId == 0)
+            throw std::logic_error("active frame has no invocation identity");
+        if (Current.Stack.size() > MaxSavedStackValues - SavedValues)
+            throw std::length_error("checkpoint operand stacks are too large");
+        SavedValues += Current.Stack.size();
+        State->Frames.push_back({Current.Function, Current.InvocationId,
+                                 Current.Pc, Current.Stack});
+    }
+    auto Id = NextCheckpointId++;
+    Checkpoints.emplace(Id, std::move(State));
+    return Id;
+}
+
+void Vm::RequestCheckpointRestore(std::uint64_t Id) {
+    if (ActiveRuns != 1 || ActiveNativeCalls != 1 || !ActiveExecution ||
+        !ActiveExecution->PendingCallResult || ActiveExecution->Frames.empty())
+        throw std::logic_error("checkpoint restore requires a direct script call");
+    if (ActiveExecution->PendingCheckpointRestore)
+        throw std::logic_error("checkpoint restore is already pending");
+    auto Found = Checkpoints.find(Id);
+    if (Found == Checkpoints.end()) throw std::invalid_argument("unknown checkpoint ID");
+    const auto& Saved = Found->second->Frames;
+    if (ActiveExecution->Frames.size() < Saved.size())
+        throw std::invalid_argument("checkpoint stack is no longer active");
+    for (std::size_t I = 0; I < Saved.size(); ++I) {
+        const auto& Current = ActiveExecution->Frames[I];
+        if (Current.InvocationId != Saved[I].InvocationId ||
+            Current.Function != Saved[I].Function)
+            throw std::invalid_argument("checkpoint stack is no longer active");
+    }
+    ActiveExecution->PendingCheckpointRestore = Id;
+}
+
+bool Vm::UnloadCheckpoint(std::uint64_t Id) {
+    if (ActiveRuns != 1 || ActiveNativeCalls != 1 || !ActiveExecution ||
+        !ActiveExecution->PendingCallResult)
+        throw std::logic_error("checkpoint unload requires a direct script call");
+    return Checkpoints.erase(Id) != 0;
+}
+
+void Vm::ApplyCheckpointRestore(ExecutionState& Execution, std::uint64_t Id) {
+    auto Found = Checkpoints.find(Id);
+    if (Found == Checkpoints.end()) throw std::logic_error("pending checkpoint disappeared");
+    const auto& Saved = Found->second->Frames;
+    if (Execution.Frames.size() < Saved.size())
+        throw std::logic_error("pending checkpoint stack changed");
+    Execution.Frames.resize(Saved.size());
+    for (std::size_t I = 0; I < Saved.size(); ++I) {
+        auto& Current = Execution.Frames[I];
+        if (Current.InvocationId != Saved[I].InvocationId ||
+            Current.Function != Saved[I].Function)
+            throw std::logic_error("pending checkpoint stack changed");
+        Current.Pc = Saved[I].Pc;
+        Current.Stack = Saved[I].Stack;
+    }
+    Execution.Frames.back().Stack.push_back(Value::Number(static_cast<double>(Id)));
+}
+
 ScriptObject* Vm::AllocateScriptObject(ScriptObject* MetaObject) {
     MaybeCollectGarbage();
     if (ScriptHeap.size() >= ScriptObjectLimit) throw std::bad_alloc();
@@ -530,6 +621,9 @@ std::size_t Vm::CollectGarbageImpl() {
             for (const auto& Entry : Current.Locals) MarkValue(Entry);
             for (const auto& Entry : Current.Stack) MarkValue(Entry);
         }
+    for (const auto& [_, Checkpoint] : Checkpoints)
+        for (const auto& Current : Checkpoint->Frames)
+            for (const auto& Entry : Current.Stack) MarkValue(Entry);
     for (auto It = NativeRegistry.begin(); It != NativeRegistry.end();) {
         if (auto Native = It->lock()) {
             if (SeenNative.insert(Native.get()).second) NativeWork.push_back(std::move(Native));
@@ -585,8 +679,60 @@ Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Argument
     for (const auto& Input : Arguments) ValidateOwnedValue(Input);
     ExecutionState Execution;
     Execution.Frames.push_back(MakeFrame(
-        std::static_pointer_cast<FunctionObject>(Functions[FunctionConstant]), Arguments));
+        std::static_pointer_cast<FunctionObject>(Functions[FunctionConstant]), Arguments,
+        NextFrameInvocationId++));
     return Execute(Execution);
+}
+
+bool Vm::IsCallable(const Value& Input) const {
+    Value Target = Input;
+    for (unsigned Depth = 0; Depth < 64; ++Depth) {
+        ValidateOwnedValue(Target);
+        if (Target.GetType() != ValueType::Object) return false;
+        if (Target.IsScriptObject()) {
+            auto* Meta = Target.AsScriptObject()->GetMetaObject();
+            auto Method = Meta ? Meta->GetRaw(Value::String("__call")) : std::nullopt;
+            if (!Method) return false;
+            Target = *Method;
+        } else {
+            auto* Native = dynamic_cast<NativeObject*>(Target.AsObject());
+            return Native && Native->IsCallable();
+        }
+    }
+    return false;
+}
+Value Vm::Call(Value Target, std::vector<Value> Arguments) {
+    if (ActiveRuns >= 64) throw std::runtime_error("VM reentrant call depth exceeded");
+    std::vector<RootHandle> Roots;
+    Roots.push_back(AddToRoot(Target));
+    for (const auto& Argument : Arguments) Roots.push_back(AddToRoot(Argument));
+    for (unsigned Depth = 0; Depth < 64; ++Depth) {
+        ValidateOwnedValue(Target);
+        if (Target.GetType() != ValueType::Object) return Error("value is not callable");
+        if (Target.IsScriptObject()) {
+            auto* Meta = Target.AsScriptObject()->GetMetaObject();
+            auto Method = Meta ? Meta->GetRaw(Value::String("__call")) : std::nullopt;
+            if (!Method) return Error("__call is missing");
+            Arguments.insert(Arguments.begin(), Target);
+            Target = *Method;
+            Roots.push_back(AddToRoot(Target));
+            continue;
+        }
+        auto* Native = dynamic_cast<NativeObject*>(Target.AsObject());
+        if (!Native || !Native->IsCallable()) return Error("value is not callable");
+        if (Native->GetObjectType() == ObjectType::Function) {
+            ExecutionState Execution;
+            Execution.Frames.push_back(MakeFrame(
+                std::static_pointer_cast<FunctionObject>(Target.AsNativeObject()), Arguments,
+                NextFrameInvocationId++));
+            return Execute(Execution);
+        }
+        ActiveRunGuard Guard(ActiveNativeCalls);
+        auto Result = Native->Call(Arguments);
+        ValidateOwnedValue(Result);
+        return Result;
+    }
+    return Error("MetaObject call cycle");
 }
 
 Value Vm::RunModule(std::string_view Id, std::uint32_t FunctionConstant,
@@ -600,7 +746,8 @@ Value Vm::RunModule(std::string_view Id, std::uint32_t FunctionConstant,
     for (const auto& Input : Arguments) ValidateOwnedValue(Input);
     ExecutionState Execution;
     Execution.Frames.push_back(MakeFrame(
-        std::static_pointer_cast<FunctionObject>(ModuleFunctions[FunctionConstant]), Arguments));
+        std::static_pointer_cast<FunctionObject>(ModuleFunctions[FunctionConstant]), Arguments,
+        NextFrameInvocationId++));
     return Execute(Execution);
 }
 
@@ -654,7 +801,8 @@ Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t F
 
     ExecutionState Evaluation;
     Evaluation.Frames.push_back(MakeFrame(
-        std::static_pointer_cast<FunctionObject>(Instance->Functions[FunctionConstant]), Arguments));
+        std::static_pointer_cast<FunctionObject>(Instance->Functions[FunctionConstant]), Arguments,
+        NextFrameInvocationId++));
     auto Result = Execute(Evaluation);
     if (Result.GetType() == ValueType::Object && Result.GetObjectType() == ObjectType::Function) {
         auto* Function = dynamic_cast<FunctionObject*>(Result.AsObject());
@@ -711,8 +859,15 @@ Value Vm::Execute(ExecutionState& Execution) {
             else ++It;
         }
     }
-    if (ActiveRuns == 0) InstructionsRemaining = InstructionLimit;
-    ActiveRunGuard Guard(ActiveRuns);
+    const bool OuterRun = ActiveRuns == 0;
+    if (OuterRun) {
+        InstructionsRemaining = InstructionLimit;
+        Checkpoints.clear();
+    }
+    for (auto& Item : Execution.Frames)
+        if (Item.InvocationId == 0) Item.InvocationId = NextFrameInvocationId++;
+    ActiveRunGuard Guard(ActiveRuns, OuterRun ?
+        std::function<void()>([this] { Checkpoints.clear(); }) : std::function<void()>{});
     HasRun = true;
     auto* PreviousExecution = ActiveExecution;
     ActiveExecution = &Execution;
@@ -725,7 +880,7 @@ Value Vm::Execute(ExecutionState& Execution) {
     auto PushFrame = [&](const std::shared_ptr<FunctionObject>& Function,
                          const std::vector<Value>& Args) {
         if (Frames.size() >= 1024) throw std::runtime_error("VM call depth exceeded");
-        Frames.push_back(MakeFrame(Function, Args));
+        Frames.push_back(MakeFrame(Function, Args, NextFrameInvocationId++));
     };
     const FunctionPrototype* FaultBody = nullptr;
     std::size_t FaultPc = 0;
@@ -850,7 +1005,7 @@ Value Vm::Execute(ExecutionState& Execution) {
                 Right.GetType() == ValueType::String) {
                 Push(Value::String(Left.AsString() + Right.AsString())); break;
             }
-            if (Left.GetType() != ValueType::Number || Right.GetType() != ValueType::Number) {
+            if (!Left.IsNumeric() || !Right.IsNumeric()) {
                 Push(Error("invalid operands"), DebugErrorOrigin::Operation); break;
             }
             double A = Left.AsNumber(), B = Right.AsNumber();
@@ -871,9 +1026,21 @@ Value Vm::Execute(ExecutionState& Execution) {
             }
             break;
         }
+        case Op::ToByte: {
+            auto Input = Pop();
+            if (!Input.IsNumeric()) {
+                Push(Error("byte requires a numeric value"), DebugErrorOrigin::Operation);
+            } else {
+                try { Push(Value::Byte(Input.AsNumber())); }
+                catch (const std::invalid_argument& Failure) {
+                    Push(Error(Failure.what()), DebugErrorOrigin::Operation);
+                }
+            }
+            break;
+        }
         case Op::Negate: {
             auto Input = Pop();
-            if (Input.GetType() == ValueType::Number) Push(Value::Number(-Input.AsNumber()));
+            if (Input.IsNumeric()) Push(Value::Number(-Input.AsNumber()));
             else Push(Error("invalid operand"), DebugErrorOrigin::Operation);
             break;
         }
@@ -894,6 +1061,11 @@ Value Vm::Execute(ExecutionState& Execution) {
             Execution.PendingCallResult = true;
             DispatchCall(std::move(Target), std::move(Args), 0, false);
             Execution.PendingCallResult = false;
+            if (Execution.PendingCheckpointRestore) {
+                auto Id = *Execution.PendingCheckpointRestore;
+                Execution.PendingCheckpointRestore.reset();
+                ApplyCheckpointRestore(Execution, Id);
+            }
             break;
         }
         case Op::Return: {
@@ -921,7 +1093,7 @@ Value Vm::Execute(ExecutionState& Execution) {
             }
             auto ObjectValue = Target.AsObject();
             if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue)) {
-                if ((Key.GetType() != ValueType::String && Key.GetType() != ValueType::Number) ||
+                if ((Key.GetType() != ValueType::String && !Key.IsNumeric()) ||
                     (Key.GetType() == ValueType::Number && std::isnan(Key.AsNumber()))) {
                     Push(Error("invalid ScriptObject key"), DebugErrorOrigin::Operation); break;
                 }

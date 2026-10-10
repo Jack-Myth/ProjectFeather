@@ -1,7 +1,7 @@
 # 脚本语言工程进度
 
 更新日期：2026-09-20
-设计依据：`SPEC-runtime-design.md`、`SPEC-syntax.md`、`SPEC-snapshot.md`、`SPEC-bytecode-format.md`、`SPEC-symbol-format.md`、`SPEC-multimodule.md`、`SPEC-import.md`、`SPEC-native-modules.md`、`SPEC-stdio.md`、`SPEC-time.md`、`SPEC-render2d.md`、`SPEC-debug-protocol.md`、`SPEC-debugger-cli.md`、`SPEC-dap-adapter.md`；实施记录见 `ROADMAP-multimodule.md` 和 `ROADMAP-runtime-diagnostics.md`，工程结构见 `ENGINEERING.md`。本文件只跟踪进度和待决事项；语义以设计规范为准。
+设计依据：`SPEC-runtime-design.md`、`SPEC-syntax.md`、`SPEC-snapshot.md`、`SPEC-checkpoint.md`、`SPEC-bytecode-format.md`、`SPEC-symbol-format.md`、`SPEC-multimodule.md`、`SPEC-import.md`、`SPEC-native-modules.md`、`SPEC-stdio.md`、`SPEC-time.md`、`SPEC-render2d.md`、`SPEC-debug-protocol.md`、`SPEC-debugger-cli.md`、`SPEC-dap-adapter.md`；实施记录见 `ROADMAP-multimodule.md` 和 `ROADMAP-runtime-diagnostics.md`，工程结构见 `ENGINEERING.md`。本文件只跟踪进度和待决事项；语义以设计规范为准。
 
 ## 当前状态
 
@@ -10,6 +10,8 @@
 `render2d.felib` 首版已接入 SDL3 + bgfx：脚本通过粗粒度命令创建窗口、逐帧绘制图片和文字并读取事件；不暴露底层图形句柄，不提供自定义 Shader。RenderContext 快照恢复时重建窗口，Texture/Font 保存路径并惰性重载，打开帧期间拒绝快照。标准配置默认构建该模块，轻量配置可用 `-Drender2d=disabled` 显式裁剪。
 
 `time.felib` 已提供单调时间、Unix 时间、同步 Sleep、deadline 等待和可快照 Clock；Clock 恢复时重建单调时间基准，不把存档离线时间计入帧 delta。构建产物统一收在 `build/<配置>/`，Render2D 现随标准配置默认构建，也可用 `-Drender2d=disabled` 裁剪。
+
+`checkpoint.felib` 已提供当前 VM、当前最外层 `Run` 内的轻量控制流回退。它按方案 B 恢复帧 PC 与表达式栈、保留当前局部变量，不复制堆或全局状态；ID 可重复恢复、显式卸载，并在创建帧失效或运行结束后拒绝使用。
 
 ### 已确定的主要方向
 
@@ -23,7 +25,7 @@
 
 `feather run <program.fe|program.fbc>`、`featherc <source.fe> -o <program.fbc>` 和精简的 `feathervm <program.fbc>` 均已加入。源码运行会优先使用不早于 `.fe` 的同名、有效 `.fbc`，源码调试仍总是重新编译；`feathervm` 不链接编译器和调试实现。运行入口先执行顶层语句，再调用可选的无参数 `main`；独立程序未注册快捷函数，会明确拒绝快捷行。嵌入式宿主可在初始化前用 `RegisterNativeFunction` 注入 `__QuickOperator…`，用 `SetGlobal` 注入一般宿主对象；编译器保留快捷行标记供加载后使用。
 
-`RegisterImport` 只校验并转发普通全局调用；宿主自行解析来源、创建子 VM、代理导出值并管理缓存。CLI 宿主从可执行文件旁的 `modules/` 搜索裸名，Native 动态库优先于同名 Feather 文件；`stdio.felib` 返回 Console/IO，`snapshot.felib` 返回 Checkpoint/Restore，`time.felib` 返回时钟与等待函数，均只通过显式 `import` 取得。解释器与 Native 库分别静态链接同一套 runtime 源码，不要求旁置 Feather DLL。跨 VM ScriptObject/Function 不通过旧适配器返回。
+`RegisterModuleImport` 只校验并转发普通全局调用；宿主自行解析来源、创建子 VM、代理导出值并管理缓存。CLI 宿主从可执行文件旁的 `modules/` 搜索裸名，Native 动态库优先于同名 Feather 文件；`stdio.felib` 返回 Console/IO，`snapshot.felib` 返回 Capture/Restore，`checkpoint.felib` 返回运行期 Capture/Restore/Unload，`time.felib` 返回时钟与等待函数，均只通过显式 `import` 取得。解释器与 Native 库分别静态链接同一套 runtime 源码，不要求旁置 Feather DLL。跨 VM ScriptObject/Function 不通过旧适配器返回。
 
 ## 阶段 0 已讨论的事项与实施前检查
 

@@ -1,0 +1,8 @@
+var stdio = import("stdio");
+def echo(value = byte(255)) { return value; }
+def main() {
+    var packet = object();
+    packet[byte(0)] = echo();
+    stdio.Console.PrintLine(packet[0]);     // 255, byte
+    stdio.Console.PrintLine(packet[0] + 1); // 256, number
+}

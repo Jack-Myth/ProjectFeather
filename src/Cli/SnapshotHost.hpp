@@ -23,7 +23,7 @@ class CliSnapshotHost final : public SnapshotHost {
 public:
     CliSnapshotHost(ModuleLoader& Loader, NativeModules& Native)
         : Loader(Loader), Native(Native) {}
-    Value Checkpoint(Vm& Machine, std::string_view Path) override;
+    Value Capture(Vm& Machine, std::string_view Path) override;
     Value Restore(std::string_view Path) override;
 
 private:

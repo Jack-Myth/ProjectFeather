@@ -15,7 +15,7 @@ namespace {
 enum class TokenKind {
     End, Name, Number, String, Def, Var, Export, Return, If, Else, While, Break,
     Continue, Null,
-    True, False, Object, LeftParen, RightParen, LeftBrace, RightBrace,
+    True, False, Byte, Object, LeftParen, RightParen, LeftBrace, RightBrace,
     LeftBracket, RightBracket, Comma, Dot, Semicolon, Assign, Equal, NotEqual,
     Less, Plus, Minus, Star, Slash, QuickHash, QuickDollar,
     QuickAmpersand, QuickRightAngle
@@ -117,7 +117,7 @@ public:
                     {"if", TokenKind::If}, {"else", TokenKind::Else}, {"while", TokenKind::While},
                     {"break", TokenKind::Break}, {"continue", TokenKind::Continue},
                     {"null", TokenKind::Null}, {"true", TokenKind::True}, {"false", TokenKind::False},
-                    {"object", TokenKind::Object}};
+                    {"object", TokenKind::Object}, {"byte", TokenKind::Byte}};
                 auto Found = Keywords.find(Start.Text);
                 Start.Kind = Found == Keywords.end() ? TokenKind::Name : Found->second;
             } else if (Digit(C)) {
@@ -206,7 +206,7 @@ private:
     std::size_t Position = 0, Line = 1, Column = 1;
 };
 
-enum class NodeKind { Literal, Name, Object, Member, Call, Unary, Binary, Assign,
+enum class NodeKind { Literal, Name, Byte, Object, Member, Call, Unary, Binary, Assign,
     Var, Return, If, While, Break, Continue, Block, Expression };
 struct Node {
     NodeKind Kind;
@@ -270,6 +270,14 @@ private:
     Value ParseLiteral() {
         Token Item = Tokens[Position++];
         switch (Item.Kind) {
+        case TokenKind::Byte: {
+            Expect(TokenKind::LeftParen, "expected '(' after byte");
+            if (!Check(TokenKind::Number)) Fail(Peek(), "byte default requires a numeric literal");
+            auto Input = ParseLiteral();
+            Expect(TokenKind::RightParen, "expected ')' after byte literal");
+            try { return Value::Byte(Input.AsNumber()); }
+            catch (const std::invalid_argument& Failure) { Fail(Item, Failure.what()); }
+        }
         case TokenKind::Null: return {};
         case TokenKind::True: return Value::Bool(true);
         case TokenKind::False: return Value::Bool(false);
@@ -452,6 +460,13 @@ private:
         if (Match(TokenKind::Name)) {
             auto Result = Make(NodeKind::Name, At); Result->Name = At.Text; return Result;
         }
+        if (Match(TokenKind::Byte)) {
+            Expect(TokenKind::LeftParen, "expected '(' after byte");
+            auto Result = Make(NodeKind::Byte, At);
+            Result->Children.push_back(ParseExpression());
+            Expect(TokenKind::RightParen, "byte() takes exactly one argument");
+            return Result;
+        }
         if (Match(TokenKind::Object)) {
             Expect(TokenKind::LeftParen, "expected '(' after object");
             Expect(TokenKind::RightParen, "object() takes no arguments");
@@ -536,6 +551,7 @@ private:
     std::uint32_t ConstantFor(const Value& Input, const Token& At) {
         if (Program.Constants.size() >= 65'536) Fail(At, "too many constants");
         if (Input.GetType() == ValueType::Number) return Program.AddNumber(Input.AsNumber());
+        if (Input.GetType() == ValueType::Byte) return Program.AddByte(Input.AsByte());
         if (Input.GetType() == ValueType::String) return Program.AddString(Input.AsString());
         Fail(At, "internal nonconstant literal");
     }
@@ -648,11 +664,24 @@ private:
             switch (Expression.Literal.GetType()) {
             case ValueType::Null: Emit(Op::Null); break;
             case ValueType::Bool: Emit(Expression.Literal.AsBool() ? Op::True : Op::False); break;
-            case ValueType::Number: case ValueType::String:
+            case ValueType::Byte: case ValueType::Number: case ValueType::String:
                 EmitU32(Op::Const, ConstantFor(Expression.Literal, Expression.At)); break;
             default: Fail(Expression.At, "invalid literal");
             }
             break;
+        case NodeKind::Byte: {
+            const auto& Input = *Expression.Children[0];
+            if (Input.Kind == NodeKind::Literal && Input.Literal.IsNumeric()) {
+                std::optional<Value> ConstantByte;
+                try { ConstantByte = Value::Byte(Input.Literal.AsNumber()); }
+                catch (const std::invalid_argument&) {} // Invalid conversions remain runtime Error values.
+                if (ConstantByte) {
+                    EmitU32(Op::Const, ConstantFor(*ConstantByte, Expression.At));
+                    break;
+                }
+            }
+            EmitExpression(Input); Emit(Op::ToByte); break;
+        }
         case NodeKind::Name: {
             auto Local = FindLocal(Expression.Name);
             if (Local) EmitU32(Op::GetLocal, *Local);

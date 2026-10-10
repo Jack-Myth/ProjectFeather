@@ -11,3 +11,6 @@ option(
   value : 'enabled',
   description : 'Build the SDL3 + bgfx render2d Native module',
 )
+
+option('network', type : 'boolean', value : true,
+  description : 'Build the optional TCP/UDP network Native module')

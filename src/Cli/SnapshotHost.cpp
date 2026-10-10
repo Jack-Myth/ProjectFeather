@@ -211,7 +211,7 @@ void AtomicWrite(const std::filesystem::path& Target, std::span<const std::uint8
 
 } // namespace
 
-Value CliSnapshotHost::Checkpoint(Vm& Machine, std::string_view Path) {
+Value CliSnapshotHost::Capture(Vm& Machine, std::string_view Path) {
     try {
         SnapshotArchive Archive{Native.LoadedIdentities(), Loader.LoadedFiles(),
                                 Machine.CaptureSnapshot()};

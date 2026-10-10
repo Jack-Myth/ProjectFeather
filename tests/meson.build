@@ -12,6 +12,9 @@ M5Tests = executable('m5-tests', 'M5.cpp', dependencies : FeatherDependency)
 test('m5', M5Tests)
 QuickTests = executable('quick-tests', 'Quick.cpp', dependencies : FeatherDependency)
 test('quick', QuickTests)
+CheckpointTests = executable('checkpoint-tests', 'Checkpoint.cpp',
+  '../stdlib/Checkpoint.cpp', dependencies : FeatherDependency)
+test('checkpoint', CheckpointTests)
 
 test('cli-run', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-ok.fe'])
@@ -88,6 +91,9 @@ test('time-core', TimeTests)
 test('cli-time-import', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-time-import.fe'],
   depends : TimeNativeModule)
+test('cli-checkpoint-import', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/cli-checkpoint.fe'],
+  depends : CheckpointNativeModule)
 if get_option('render2d').enabled()
   test('cli-render2d-import', FeatherCli,
     args : ['run', meson.current_source_dir() / 'fixtures/cli-render2d-import.fe'],
@@ -153,3 +159,27 @@ endif
 
 MultimoduleTests = executable('multimodule-tests', 'Multimodule.cpp', dependencies : FeatherDependency)
 test('multimodule', MultimoduleTests)
+
+ByteTests = executable('byte-tests', 'Byte.cpp', '../stdlib/StdIo.cpp',
+  '../stdlib/Checkpoint.cpp', dependencies : FeatherDependency)
+test('byte', ByteTests, args : [meson.project_source_root() / '.work/byte-test.bin'])
+
+IdleTests = executable('idle-tests', 'Idle.cpp', dependencies : FeatherDependency)
+test('idle', IdleTests)
+
+if get_option('network')
+  NetworkTests = executable('network-tests', 'Network.cpp', NetworkSources,
+    '../stdlib/StdIo.cpp', '../modules/time/Time.cpp',
+    include_directories : include_directories('../modules/network'),
+    dependencies : NetworkDependencies)
+  test('network-loopback', NetworkTests, timeout : 30)
+endif
+
+if get_option('network')
+  test('cli-network-udp', FeatherCli,
+    args : ['run', meson.current_source_dir() / 'fixtures/network-udp.fe'],
+    depends : [NetworkNativeModule, TimeNativeModule, StdioNativeModule])
+  test('cli-network-tcp', FeatherCli,
+    args : ['run', meson.current_source_dir() / 'fixtures/network-tcp.fe'],
+    depends : [NetworkNativeModule, TimeNativeModule, StdioNativeModule])
+endif

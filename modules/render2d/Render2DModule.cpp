@@ -8,9 +8,8 @@ Feather::Value Create(const Feather::NativeModuleContext& Context) {
 }
 }
 
-extern "C" FEATHER_NATIVE_EXPORT const Feather::NativeModuleDescriptor* FeatherNativeModuleV2() {
+extern "C" FEATHER_NATIVE_EXPORT const Feather::NativeModuleDescriptor* FeatherNativeModule() {
     static const Feather::NativeModuleDescriptor Descriptor{
-        Feather::NativeModuleInterfaceVersion,
         Feather::Render2DModuleGuid,
         "render2d", &Create};
     return &Descriptor;

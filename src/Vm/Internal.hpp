@@ -46,6 +46,7 @@ private:
 
 struct Frame {
     std::shared_ptr<FunctionObject> Function;
+    std::uint64_t InvocationId = 0;
     std::size_t Pc = 0;
     std::vector<Value> Locals;
     std::vector<Value> Stack;
@@ -54,6 +55,7 @@ struct Frame {
 struct ExecutionState {
     std::vector<Frame> Frames;
     bool PendingCallResult = false;
+    std::optional<std::uint64_t> PendingCheckpointRestore;
 };
 
 } // namespace Feather

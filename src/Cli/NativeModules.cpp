@@ -71,7 +71,7 @@ NativeModuleEntry GetEntry(void* Handle) {
 #else
     auto* Symbol = dlsym(Handle, NativeModuleEntryName);
 #endif
-    if (!Symbol) throw std::runtime_error("Native module has no FeatherNativeModuleV2 entry");
+    if (!Symbol) throw std::runtime_error("Native module has no FeatherNativeModule entry");
     return reinterpret_cast<NativeModuleEntry>(Symbol);
 }
 
@@ -112,8 +112,7 @@ std::optional<Value> NativeModules::Resolve(Vm& Machine, std::string_view Name) 
         bool AnyGuidByte = false;
         if (Descriptor)
             for (auto Byte : Descriptor->Id.Bytes) AnyGuidByte = AnyGuidByte || Byte != 0;
-        if (!Descriptor || Descriptor->InterfaceVersion != NativeModuleInterfaceVersion ||
-            !AnyGuidByte || !Descriptor->Name || Name != Descriptor->Name || !Descriptor->Create)
+        if (!Descriptor || !AnyGuidByte || !Descriptor->Name || Name != Descriptor->Name || !Descriptor->Create)
             throw std::runtime_error("Native module descriptor mismatch: " + PathText(Path));
         for (const auto& Library : Libraries)
             if (Library.Id == Descriptor->Id)

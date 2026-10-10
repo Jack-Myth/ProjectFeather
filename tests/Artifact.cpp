@@ -40,7 +40,7 @@ int main() {
     try {
         auto Source = Compile("var base = 2; def score(x = 3) { return base + x; }");
         auto Bytes = SerializeProgram(Source);
-        Check(Bytes.size() > 16 && Bytes[8] == 3 && Bytes[9] == 0,
+        Check(Bytes.size() > 16 && Bytes[8] == 4 && Bytes[9] == 0,
               "unexpected current bytecode version");
         Check(Bytes == SerializeProgram(Source), "artifact is not deterministic");
         auto Loaded = DeserializeProgram(Bytes);
@@ -58,7 +58,7 @@ int main() {
         auto ExportLoad = DeserializeProgram(ExportBytes);
         Check(ExportLoad.Exports.size() == 2 && ExportLoad.Exports[0] == "base" &&
               ExportLoad.Exports[1] == "score" && SerializeProgram(ExportLoad) == ExportBytes,
-              "v3 export metadata did not round-trip deterministically");
+              "v4 export metadata did not round-trip deterministically");
 
         auto Quick = DeserializeProgram(SerializeProgram(Compile(">hello")));
         Check(Quick.UsesQuickOperators, "quick operator requirement was lost");
@@ -74,7 +74,7 @@ int main() {
         Reject([&] { (void)DeserializeProgram(Corrupt); }, "bad magic accepted");
         Corrupt = Bytes; Corrupt[8] = 1;
         Reject([&] { (void)DeserializeProgram(Corrupt); }, "unsupported format accepted");
-        Corrupt = Bytes; Corrupt[10] = 2;
+        Corrupt = Bytes; Corrupt[10] = 255;
         Reject([&] { (void)DeserializeProgram(Corrupt); }, "unsupported ISA accepted");
         Corrupt = Bytes; Corrupt[12] ^= 1;
         Reject([&] { (void)DeserializeProgram(Corrupt); }, "bad length accepted");

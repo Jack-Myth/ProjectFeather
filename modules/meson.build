@@ -22,6 +22,14 @@ SnapshotNativeModule = shared_module('snapshot.felib', '../stdlib/Snapshot.cpp',
   install : true,
   install_dir : get_option('bindir') / 'modules')
 
+CheckpointNativeModule = shared_module('checkpoint.felib', '../stdlib/Checkpoint.cpp',
+  '../stdlib/CheckpointModule.cpp',
+  name_prefix : '',
+  name_suffix : NativeModuleSuffix,
+  dependencies : FeatherDependency,
+  install : true,
+  install_dir : get_option('bindir') / 'modules')
+
 subdir('time')
 TimeNativeModule = shared_module('time.felib', TimeModuleSources,
   name_prefix : '',
@@ -54,3 +62,12 @@ HelperBytecode = custom_target('helper-bytecode',
   input : '../tests/fixtures/helper.fe', output : 'helper.fbc',
   command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
   build_by_default : true)
+
+if get_option('network')
+  subdir('network')
+  NetworkNativeModule = shared_module('network.felib', NetworkSources, NetworkEntrySource,
+    name_prefix : '', name_suffix : NativeModuleSuffix,
+    dependencies : NetworkDependencies,
+    install : true, install_dir : get_option('bindir') / 'modules')
+
+endif

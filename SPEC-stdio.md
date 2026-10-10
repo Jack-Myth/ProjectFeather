@@ -1,6 +1,6 @@
 # Feather 标准输入输出库（首版）
 
-`stdio` 是独立于共享 `FeatherCore` 的可选 Native 模块。VM 不自行打开文件，也不创建标准输入输出对象。独立解释器从可执行文件旁的 `modules/` 装载 `stdio.felib.dll`（Linux 为 `.so`），脚本通过 `import("stdio")` 取得根对象。嵌入式宿主可构造 `StdIoLibrary(vm, input, output)`，调用 `GetModule()` 并把返回值接入自己的 `import` 回调；不需要快照时也可使用不带 VM 的兼容重载。根对象、Console/IO、文件句柄都是 `NativeObject`。传入的输入输出流须比这些对象及使用它们的 VM 活得更久。
+`stdio` 是独立于共享 `FeatherCore` 的可选 Native 模块。VM 不自行打开文件，也不创建标准输入输出对象。独立解释器从可执行文件旁的 `modules/` 装载 `stdio.felib.dll`（Linux 为 `.so`），脚本通过 `import("stdio")` 取得根对象。嵌入式宿主可构造 `StdIoLibrary(vm, input, output)`，调用 `GetModule()` 并把返回值接入自己的 `import` 回调；根对象、Console/IO、文件句柄都是 `NativeObject`。传入的输入输出流须比这些对象及使用它们的 VM 活得更久。
 
 独立运行程序 `feather` 与 `feathervm` 给模块创建入口提供进程的 `std::cin` 和 `std::cout`。`featherc` 只编译源码，不装载本模块。`GetModule()` 返回一个只读根对象，其 `Console` 与 `IO` 成员分别是控制台和文件对象。本模块不会覆盖已有的 `import`，也不会注入 `Console` 或 `IO` 全局名。搜索、缓存和动态库生命周期见 `SPEC-native-modules.md`。
 
@@ -14,7 +14,7 @@
 | `stdio.Console.PrintLine(value)` | 同上，随后写入 `\n`；成功返回 `null`。 |
 | `stdio.Console.InputLine()` | 读取一行，去掉行尾换行；EOF 返回 `null`，正常行返回 UTF-8 `string`。 |
 
-输出支持 `null`、bool、number 和 string。对象、错误参数个数、输出失败或无效 UTF-8 输入返回 Error 值。number 使用经典 locale 的十进制表示；此显示格式只用于人类阅读，不承诺与 Feather 字面量或文件格式相同。`InputLine` 不打印提示；可先调用 `Print`。
+输出支持 `null`、bool、number、byte 和 string。对象、错误参数个数、输出失败或无效 UTF-8 输入返回 Error 值。number 使用经典 locale 的十进制表示；此显示格式只用于人类阅读，不承诺与 Feather 字面量或文件格式相同。`InputLine` 不打印提示；可先调用 `Print`。
 
 ## IO
 
@@ -27,10 +27,12 @@
 | `stdio.IO.Seek(handle, offset, origin)` | `origin` 为 `start`、`current`、`end`；返回移动后的字节位置。 |
 | `stdio.IO.Tell(handle)` | 返回当前字节位置。 |
 | `stdio.IO.Read(handle, count)` | 最多读取 `count` 字节，返回 `ByteBuffer`；EOF 返回空缓冲区。单次 `count` 不超过 16 MiB。 |
-| `stdio.IO.Write(handle, data)` | `data` 是 string（UTF-8 字节）或 `ByteBuffer`；完整写入时返回写入字节数。 |
+| `stdio.IO.Write(handle, data)` | `data` 是 byte（一个原始字节）、string（UTF-8 字节）或 `ByteBuffer`；完整写入时返回写入字节数。 |
 
 `offset`、`count` 和位置是整数，精确表示范围为双精度数值的 ±(2^53−1)；`count` 非负。读写共享一个文件位置；同一个 `+` 句柄在读写方向之间切换时，先调用 `Seek`。`Read` 不将任意二进制数据误作 UTF-8 字符串，也不会在 EOF 自动关闭句柄。
 
-`ByteBuffer.Length` 是字节数；`ByteBuffer.Get(index)` 返回 0–255 的字节数值；`ByteBuffer.ToString()` 在全部字节合法 UTF-8 时返回 string，否则返回 Error。缓冲区不可从脚本修改。需要把任意文件内容交给宿主时，直接传递这个宿主对象；跨 VM 使用仍由宿主代理边界决定。
+`ByteBuffer.Length` 是字节数；`ByteBuffer.Get(index)` 返回 0–255 的 byte 类型值；`ByteBuffer.ToString()` 在全部字节合法 UTF-8 时返回 string，否则返回 Error。缓冲区不可从脚本修改。需要把任意文件内容交给宿主时，直接传递这个宿主对象；跨 VM 使用仍由宿主代理边界决定。
 
-用 `StdIoLibrary(Vm&, input, output)` 构造时，本库会为模块、Console/IO 命名空间及静态方法注册无 payload 的规范类型；恢复前在新 VM 上重新构造库后，这些对象绑定到新的输入输出流。`ByteBuffer` 及其已取出的 `Get`/`ToString` 方法保存字节内容。打开的文件句柄在首次打开时把路径解析为规范化绝对 UTF-8 路径，快照保存该路径、脚本打开模式和当前位置；保存前刷新可写流，恢复时避免用 `w` 再次截断文件，然后重开并定位。文件已删除、权限改变、无法刷新或定位时，整个快照操作明确失败；关闭的句柄恢复为关闭状态。旧的 `StdIoLibrary(input, output)` 重载保留为不绑定 VM 的非快照用法。
+用 `StdIoLibrary(Vm&, input, output)` 构造时，本库会为模块、Console/IO 命名空间及静态方法注册无 payload 的规范类型；恢复前在新 VM 上重新构造库后，这些对象绑定到新的输入输出流。`ByteBuffer` 及其已取出的 `Get`/`ToString` 方法保存字节内容。打开的文件句柄在首次打开时把路径解析为规范化绝对 UTF-8 路径，快照保存该路径、脚本打开模式和当前位置；保存前刷新可写流，恢复时避免用 `w` 再次截断文件，然后重开并定位。文件已删除、权限改变、无法刷新或定位时，整个快照操作明确失败；关闭的句柄恢复为关闭状态。库只提供绑定 VM 的构造方式。
+
+byte 控制台输出为十进制 0～255，不作为字符打印。IO 的整数参数接受 byte 或符合原范围要求的 number；`IO.Write(handle, byte(255))` 恰写一个 0xFF 字节。ByteBuffer 仍不可变，`Get` 同时支持 byte/number 索引。

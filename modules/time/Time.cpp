@@ -26,6 +26,7 @@ public:
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>& Arguments) override {
         try { return Body(Arguments); }
+        catch (const IdleCallbackFault&) { throw; }
         catch (const std::exception& Failure) { return Error(Failure.what()); }
     }
 private:
@@ -49,7 +50,7 @@ private:
 };
 
 double Duration(const Value& Input, const char* Call) {
-    if (Input.GetType() != ValueType::Number || !std::isfinite(Input.AsNumber()) ||
+    if (!Input.IsNumeric() || !std::isfinite(Input.AsNumber()) ||
         Input.AsNumber() < 0)
         throw std::invalid_argument(std::string(Call) + " expects a finite non-negative number of seconds");
     return Input.AsNumber();
@@ -152,15 +153,15 @@ TimeLibrary::TimeLibrary(Vm& Machine, std::shared_ptr<TimeHost> InputHost)
         if (!A.empty()) return Error("UnixTime expects no arguments");
         return Value::Number(Clock->UnixTime());
     });
-    Add("Sleep", [Clock = Host](const std::vector<Value>& A) {
+    Add("Sleep", [Clock = Host, &Machine](const std::vector<Value>& A) {
         if (A.size() != 1) return Error("Sleep expects one duration in seconds");
-        Clock->Sleep(Duration(A[0], "Sleep"));
-        return Value{};
+        return Machine.Idle(Duration(A[0], "Sleep"), [Clock] { return Clock->Monotonic(); },
+            [Clock](double Seconds) { Clock->Sleep(Seconds); });
     });
-    Add("SleepUntil", [Clock = Host](const std::vector<Value>& A) {
+    Add("SleepUntil", [Clock = Host, &Machine](const std::vector<Value>& A) {
         if (A.size() != 1) return Error("SleepUntil expects one monotonic deadline");
-        Clock->SleepUntil(Duration(A[0], "SleepUntil"));
-        return Value{};
+        return Machine.Idle(std::max(0.0, Duration(A[0], "SleepUntil") - Clock->Monotonic()),
+            [Clock] { return Clock->Monotonic(); }, [Clock](double Seconds) { Clock->Sleep(Seconds); });
     });
     Add("CreateClock", [&Clocks](const std::vector<Value>& A) {
         if (!A.empty()) return Error("CreateClock expects no arguments");

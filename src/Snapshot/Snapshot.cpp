@@ -92,6 +92,7 @@ void WritePrimitive(Writer& Output, const Value& Input) {
     switch (Input.GetType()) {
     case ValueType::Null: Output.U8(0); break;
     case ValueType::Bool: Output.U8(Input.AsBool() ? 2 : 1); break;
+    case ValueType::Byte: Output.U8(6); Output.U8(Input.AsByte()); break;
     case ValueType::Number:
         Output.U8(3); Output.U64(std::bit_cast<std::uint64_t>(Input.AsNumber())); break;
     case ValueType::String: Output.U8(4); Output.String(Input.AsString()); break;
@@ -105,6 +106,8 @@ std::vector<std::uint8_t> ModuleImage(const Module& Program, std::size_t Limit) 
     Output.U32(static_cast<std::uint32_t>(Program.Constants.size()));
     for (const auto& Item : Program.Constants) {
         switch (Item.Type) {
+        case Constant::Kind::Byte:
+            Output.U8(3); Output.U8(Item.ByteValue); break;
         case Constant::Kind::Number:
             Output.U8(0); Output.U64(std::bit_cast<std::uint64_t>(Item.Numeric)); break;
         case Constant::Kind::String: Output.U8(1); Output.String(Item.Text); break;
@@ -158,6 +161,7 @@ std::uint64_t FunctionKey(FunctionId Input) {
 struct EncodedValue {
     std::uint8_t Tag = 0;
     double Number = 0;
+    std::uint8_t Byte = 0;
     std::string Text;
     std::uint32_t ObjectId = 0;
 };
@@ -166,6 +170,7 @@ EncodedValue ReadValue(Reader& Input, std::uint32_t ObjectCount) {
     EncodedValue Result; Result.Tag = Input.U8();
     switch (Result.Tag) {
     case 0: case 1: case 2: break;
+    case 6: Result.Byte = Input.U8(); break;
     case 3: Result.Number = std::bit_cast<double>(Input.U64()); break;
     case 4: Result.Text = Input.String(); break;
     case 5:
@@ -230,7 +235,7 @@ std::vector<int> StackDepths(const FunctionPrototype& Function) {
         case Op::Null: case Op::True: case Op::False: case Op::NewObject:
             Produces = 1; break;
         case Op::Pop: case Op::Return: Consumes = 1; break;
-        case Op::Negate: Consumes = 1; Produces = 1; break;
+        case Op::ToByte: case Op::Negate: Consumes = 1; Produces = 1; break;
         case Op::GetMember: case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
         case Op::Equal: case Op::Less: Consumes = 2; Produces = 1; break;
         case Op::SetMember: Consumes = 3; Produces = 1; break;
@@ -423,7 +428,7 @@ std::vector<std::uint8_t> Vm::CaptureSnapshot(std::size_t MaxBytes) const {
 
     Writer Output(MaxBytes);
     Output.U8('F'); Output.U8('T'); Output.U8('H'); Output.U8('S');
-    Output.U16(4); Output.U16(0);
+    Output.U16(5); Output.U16(0);
     auto ModuleBytes = ModuleSetImage(*Program, Ordered, MaxBytes);
     Output.Blob(ModuleBytes);
     Output.Blob(ObjectBytes.Bytes());
@@ -474,7 +479,7 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
     if (Input.U8() != 'F' || Input.U8() != 'T' || Input.U8() != 'H' || Input.U8() != 'S')
         Invalid("invalid snapshot magic");
     auto Major = Input.U16(), Minor = Input.U16();
-    if (Major != 4 || Minor != 0) Invalid("unsupported snapshot version");
+    if (Major != 5 || Minor != 0) Invalid("unsupported snapshot version");
     Reader ChecksumInput(std::span<const std::uint8_t>(Bytes.data() + Bytes.size() - 4, 4));
     if (ChecksumInput.U32() != SnapshotChecksum(Content)) Invalid("snapshot checksum mismatch");
     auto SavedModule = Input.Blob();
@@ -659,6 +664,7 @@ Value Vm::ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
             case 0: return {};
             case 1: return Value::Bool(false);
             case 2: return Value::Bool(true);
+            case 6: return Value::Byte(InputValue.Byte);
             case 3: return Value::Number(InputValue.Number);
             case 4: return Value::String(InputValue.Text);
             case 5: return Decoded[InputValue.ObjectId];
