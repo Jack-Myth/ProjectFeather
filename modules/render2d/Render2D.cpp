@@ -360,14 +360,28 @@ Resource& ResourceArgument(const Value& Input, std::uint64_t ContextId, const ch
     return *Result;
 }
 
+Value MetricsValue(Vm& Machine, const Render2DWindowMetrics& M) {
+    auto* Result = Machine.CreateScriptObject();
+    auto Number = [&](const char* Name, double N) { Result->SetRaw(Value::String(Name), Value::Number(N)); };
+    Number("WindowWidth", M.WindowWidth); Number("WindowHeight", M.WindowHeight);
+    Number("PixelWidth", M.PixelWidth); Number("PixelHeight", M.PixelHeight);
+    Number("PixelDensity", M.PixelDensity); Number("DisplayScale", M.DisplayScale);
+    Result->SetRaw(Value::String("Minimized"), Value::Bool(M.Minimized));
+    return Value::FromScript(Result);
+}
 Value EventValue(Vm& Machine, const std::optional<Render2DEvent>& Event) {
     if (!Event) return {};
     auto* Result = Machine.CreateScriptObject();
     Result->SetRaw(Value::String("Type"), Value::String(Event->Type));
+    auto Root = Machine.AddToRoot(Value::FromScript(Result));
+    if (Event->Metrics) Result->SetRaw(Value::String("Metrics"), MetricsValue(Machine, *Event->Metrics));
     if (!Event->Key.empty()) Result->SetRaw(Value::String("Key"), Value::String(Event->Key));
     if (Event->Type == "PointerDown" || Event->Type == "PointerUp" || Event->Type == "PointerMove") {
         Result->SetRaw(Value::String("X"), Value::Number(Event->X));
         Result->SetRaw(Value::String("Y"), Value::Number(Event->Y));
+        Result->SetRaw(Value::String("WindowX"), Value::Number(Event->WindowX));
+        Result->SetRaw(Value::String("WindowY"), Value::Number(Event->WindowY));
+        Result->SetRaw(Value::String("InsideViewport"), Value::Bool(Event->InsideViewport));
     }
     return Value::FromScript(Result);
 }
@@ -404,6 +418,36 @@ Render2DLibrary::Render2DLibrary(Vm& Machine, std::shared_ptr<Render2DHost> Host
         if (A.size() != 1) return Error("IsOpen expects one RenderContext");
         return Value::Bool(ContextArgument(A[0]).IsOpen());
     });
+    Add("GetWindowMetrics", [State](const std::vector<Value>& A) {
+        if (A.size() != 1) return Error("GetWindowMetrics expects context");
+        return MetricsValue(State->Machine, ContextArgument(A[0]).RequireOpen().GetWindowMetrics());
+    });
+    Add("SetViewport", [](const std::vector<Value>& A) {
+        if (A.size() != 2 && A.size() != 5) return Error("SetViewport expects context, null or x,y,width,height");
+        auto& Context = ContextArgument(A[0]);
+        if (Context.IsFrameOpen()) return Error("SetViewport must precede BeginRender");
+        std::optional<Render2DRect> View;
+        if (A.size() == 2) {
+            if (A[1].GetType() != ValueType::Null) return Error("viewport reset requires null");
+        } else {
+            View = Render2DRect{FiniteFloat(A[1], "x"), FiniteFloat(A[2], "y"),
+                               FiniteFloat(A[3], "width"), FiniteFloat(A[4], "height")};
+            if (View->X < 0 || View->Y < 0 || View->Width < 0 || View->Height < 0)
+                return Error("viewport values must be non-negative");
+        }
+        Context.RequireOpen().SetViewport(View);
+        return Value{};
+    });
+    Add("WindowToCanvas", [State](const std::vector<Value>& A) {
+        if (A.size() != 3) return Error("WindowToCanvas expects context,x,y");
+        auto P = ContextArgument(A[0]).RequireOpen().WindowToCanvas(
+            FiniteFloat(A[1], "x"), FiniteFloat(A[2], "y"));
+        auto* Result = State->Machine.CreateScriptObject();
+        Result->SetRaw(Value::String("X"), Value::Number(P.X));
+        Result->SetRaw(Value::String("Y"), Value::Number(P.Y));
+        Result->SetRaw(Value::String("InsideViewport"), Value::Bool(P.Inside));
+        return Value::FromScript(Result);
+    });
     Add("LoadTexture", [&Textures](const std::vector<Value>& A) {
         if (A.size() != 2 || A[1].GetType() != ValueType::String)
             return Error("LoadTexture expects RenderContext and path");
@@ -431,6 +475,17 @@ Render2DLibrary::Render2DLibrary(Vm& Machine, std::shared_ptr<Render2DHost> Host
         Render2DRect Rect{FiniteFloat(A[2], "x"), FiniteFloat(A[3], "y"),
                           FiniteFloat(A[4], "width"), FiniteFloat(A[5], "height")};
         Context.RequireOpen().DrawTexture(*Loaded, Rect, Color(A, 6));
+        return Value::Bool(true);
+    });
+    Add("DrawLine", [](const std::vector<Value>& A) {
+        if (A.size() != 10) return Error("DrawLine expects context, x1,y1,x2,y2,width, and RGBA");
+        auto& Context = ContextArgument(A[0]);
+        if (!Context.IsFrameOpen()) return Error("DrawLine requires an open render frame");
+        const float X1 = FiniteFloat(A[1], "x1"), Y1 = FiniteFloat(A[2], "y1");
+        const float X2 = FiniteFloat(A[3], "x2"), Y2 = FiniteFloat(A[4], "y2");
+        const float Width = FiniteFloat(A[5], "width");
+        if (Width <= 0) return Error("line width must be positive");
+        Context.RequireOpen().DrawLine(X1, Y1, X2, Y2, Width, Color(A, 6));
         return Value::Bool(true);
     });
     Add("DrawText", [](const std::vector<Value>& A) {

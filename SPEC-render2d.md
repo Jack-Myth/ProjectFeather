@@ -37,3 +37,37 @@ RenderContext 保存创建参数、稳定 context ID 和打开/关闭状态；�
 快照只允许在完整帧之间创建。若可达的 RenderContext 正处于 Begin/End 之间，其 `Serialize` 必须拒绝保存。绘制命令、事件队列、当前 backbuffer 内容和未提交帧不进入快照。恢复后剧情循环重新绘制下一帧。
 
 资源对象与 context 的恢复顺序没有约定，因此资源反序列化不得要求图形设备已经存在。关闭并重新创建 context 会取得新的 context ID；旧资源不能用于新 context。Snapshot 恢复则保留原 ID，使恢复出的资源重新绑定到恢复出的 context。
+
+## 窗口尺寸与布局
+
+`GetWindowMetrics(context)` 返回 `WindowWidth/WindowHeight`（窗口客户区逻辑单位）、`PixelWidth/PixelHeight`（drawable 实际像素）、`PixelDensity`（SDL 像素密度）、`DisplayScale`（SDL 建议内容缩放系数）和 `Minimized`。这两个缩放系数不是物理 DPI 数值，不应重复乘到绘制坐标。初始布局可直接查询，无需等待事件。
+
+`PollEvent` / `WaitEvent` 增加 `WindowResized`、`PixelSizeChanged`、`DisplayScaleChanged`、`Minimized`、`Restored`。事件携带 `Metrics`，为处理事件时查询的当前尺寸（连续 resize 可能已合并到更新的状态）。这些事件由窗口轮询推进，Sleep 不代替轮询窗口事件。
+
+`SetViewport(context, x, y, width, height)` 在 BeginRender 之前设置窗口逻辑单位的目标区域，将固定 RenderWidth/RenderHeight 画布映射到该区域；纹理与文字共用投影，区域外绘制被裁剪，整窗使用 BeginRender 的清屏色。`SetViewport(context, null)` 恢复默认整窗拉伸，不改变现有程序的默认效果。viewport 是临时显示状态，窗口尺寸变化和恢复快照后由脚本重新计算；不序列化。
+
+`WindowToCanvas(context, windowX, windowY)` 返回画布坐标 `X/Y` 和 `InsideViewport`。鼠标事件同样携带画布 `X/Y`、原始逻辑窗口 `WindowX/WindowY` 和 `InsideViewport`；留边外坐标不钳制，由标志判定是否响应。事件使用当时设置的 viewport；如同轮事件中修改布局，可用 WindowX/WindowY 重新换算。最小化、零 drawable 或零 viewport 不提交绘制，逆变换安全返回 (0,0,false)，Begin/End 仍须配对。
+
+等比缩放留边由 Feather 层决定，例如每帧绘制前：
+
+```feather
+var m = render.GetWindowMetrics(context);
+var scale = m.WindowWidth / 1600;
+if (m.WindowHeight / 900 < scale) { scale = m.WindowHeight / 900; }
+render.SetViewport(context,
+    (m.WindowWidth - 1600 * scale) / 2,
+    (m.WindowHeight - 900 * scale) / 2,
+    1600 * scale, 900 * scale);
+```
+
+上述示例对应 RenderWidth=1600、RenderHeight=900；尺寸/DPI 变化不改变棋盘的逻辑坐标。文字沿用现有按虚拟字号缓存的字形，极高倍率下的清晰度增强不属于本次接口补齐。
+
+关闭 context 会在 bgfx shutdown 之前释放该设备登记的图片纹理和字体字形纹理。脚本仍可持有资源包装对象；之后析构不再次释放 GPU 句柄，也不会误释放新 context 复用的句柄。正常先释放资源和重复 Close 同样安全。真实设备测试为 graphics suite，需要可用桌面/GPU；无图形环境可用 `meson test --no-suite graphics`。
+
+### DrawLine
+
+`DrawLine(context, x1, y1, x2, y2, width, r, g, b, a)` 在 BeginRender/EndRender
+之间画直线，成功返回 true。坐标、线宽为画布单位，RGBA 沿用现有绘制参数规则。
+实现为两个三角形组成的平头矩形，与纹理/文字共享投影、viewport 裁剪与 alpha 混合，
+不依赖 GPU 宽线支持。线宽必须为正且有限；非有限坐标、无法表示的几何边界返回 Error。
+相同起终点成功但不画任何像素。独立线段不提供额外端点或折线连接样式。

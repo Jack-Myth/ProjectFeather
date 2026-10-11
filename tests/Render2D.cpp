@@ -1,4 +1,5 @@
 #include "Render2D.hpp"
+#include "LineGeometry.hpp"
 #include <Feather/Compiler.hpp>
 #include <Feather/Import.hpp>
 
@@ -19,6 +20,12 @@ struct Font final : Render2DFont {};
 
 struct Context final : Render2DContext {
     bool IsOpen() const override { return Open; }
+    Render2DWindowMetrics GetWindowMetrics() const override { return {800, 600, 1600, 1200, 2, 2, false}; }
+    void SetViewport(std::optional<Render2DRect> V) override { View = V; }
+    Render2DPoint WindowToCanvas(double X, double Y) const override {
+        return Render2DMapPoint(X, Y, View.value_or(Render2DRect{0,0,800,600}), 1600, 900);
+    }
+    std::optional<Render2DRect> View;
     void Close() override { Open = false; Frame = false; }
     void BeginRender(Render2DColor) override {
         if (!Open || Frame) throw std::logic_error("bad begin");
@@ -35,12 +42,20 @@ struct Context final : Render2DContext {
         ++FontLoads; return std::make_shared<Font>();
     }
     void DrawTexture(Render2DTexture&, Render2DRect, Render2DColor) override { ++Textures; }
+    void DrawLine(float X1, float Y1, float X2, float Y2, float Width, Render2DColor C) override {
+        ++Lines; LastLine = {X1, Y1, X2, Y2, Width}; LineColor = C;
+    }
+    std::array<float, 5> LastLine{};
+    Render2DColor LineColor;
+    int Lines = 0;
     void DrawText(Render2DFont&, std::string_view, float, float, float,
                   Render2DColor) override { ++Texts; }
     std::optional<Render2DEvent> PollEvent() override {
+        if (NextEvent) { auto E = NextEvent; NextEvent.reset(); return E; }
         return Render2DEvent{"PointerDown", 12, 34, {}};
     }
     std::optional<Render2DEvent> WaitEvent(std::int32_t) override { return std::nullopt; }
+    std::optional<Render2DEvent> NextEvent;
     bool Open = true;
     bool Frame = false;
     int Begins = 0, Ends = 0, TextureLoads = 0, FontLoads = 0;
@@ -99,6 +114,7 @@ private:
 };
 
 Value Member(const Value& Object, const char* Name) {
+    if (Object.IsScriptObject()) return Object.AsScriptObject()->GetRaw(Value::String(Name)).value_or(Value{});
     return dynamic_cast<NativeObject*>(Object.AsObject())->GetMember(Value::String(Name));
 }
 
@@ -136,6 +152,62 @@ int main() {
         Check(Call(ModuleValue, "CreateRenderContext", {Value::FromScript(Config)}).IsError(),
               "second active context was accepted");
 
+        auto Metrics = Call(ModuleValue, "GetWindowMetrics", {ContextValue});
+        Check(Member(Metrics, "WindowWidth").AsNumber() == 800 &&
+              Member(Metrics, "PixelWidth").AsNumber() == 1600 &&
+              Member(Metrics, "DisplayScale").AsNumber() == 2, "window units lost");
+        auto SetView = [&](double X, double Y, double W, double H) {
+            return Call(ModuleValue, "SetViewport", {ContextValue, Value::Number(X),
+                Value::Number(Y), Value::Number(W), Value::Number(H)});
+        };
+        Check(!SetView(0, 75, 800, 450).IsError(), "viewport setup");
+        auto Point = Call(ModuleValue, "WindowToCanvas", {ContextValue, Value::Number(400), Value::Number(300)});
+        Check(Member(Point, "X").AsNumber() == 800 && Member(Point, "Y").AsNumber() == 450 &&
+              Member(Point, "InsideViewport").AsBool(), "viewport inverse mapping");
+        Point = Call(ModuleValue, "WindowToCanvas", {ContextValue, Value::Number(400), Value::Number(50)});
+        Check(!Member(Point, "InsideViewport").AsBool(), "letterbox accepted pointer");
+        Check(SetView(0, 0, -1, 10).IsError(), "negative viewport accepted");
+        Check(!SetView(0, 0, 0, 0).IsError(), "zero viewport rejected");
+        Point = Call(ModuleValue, "WindowToCanvas", {ContextValue, Value::Number(0), Value::Number(0)});
+        Check(!Member(Point, "InsideViewport").AsBool() && Member(Point, "X").AsNumber() == 0,
+              "zero viewport divided by zero");
+        Check(!Call(ModuleValue, "SetViewport", {ContextValue, Value{}}).IsError(), "reset viewport");
+        Point = Call(ModuleValue, "WindowToCanvas", {ContextValue, Value::Number(400), Value::Number(300)});
+        Check(Member(Point, "X").AsNumber() == 800 && Member(Point, "Y").AsNumber() == 450,
+              "default stretch changed");
+        for (auto Type : {"WindowResized", "PixelSizeChanged", "DisplayScaleChanged", "Minimized", "Restored"}) {
+            Render2DEvent E{Type}; E.Metrics = HostBackend->Last->GetWindowMetrics();
+            HostBackend->Last->NextEvent = E;
+            auto Event = Call(ModuleValue, "PollEvent", {ContextValue});
+            Check(Member(Event, "Type").AsString() == Type &&
+                  Member(Member(Event, "Metrics"), "PixelHeight").AsNumber() == 1200,
+                  "window event metrics lost");
+        }
+
+        // Geometry uses flat-ended quads, including stable diagonals and degenerate lines.
+        const auto H = *Render2DLineQuad(0, 0, 10, 0, 4);
+        Check(H[0].X == 0 && H[0].Y == 2 && H[2].X == 10 && H[2].Y == -2, "horizontal quad");
+        const auto V = *Render2DLineQuad(0, 0, 0, 10, 4);
+        Check(V[0].X == -2 && V[0].Y == 0 && V[2].X == 2 && V[2].Y == 10, "vertical quad");
+        const auto D = *Render2DLineQuad(0, 0, 3, 4, 10);
+        Check(std::abs(D[0].X + 4) < 1e-9 && std::abs(D[0].Y - 3) < 1e-9, "diagonal perpendicular width");
+        Check(!Render2DLineQuad(2, 3, 2, 3, 1), "zero-length line must draw nothing");
+        const auto Huge = *Render2DLineQuad(-3e38f, 0, 3e38f, 0, 1);
+        Check(std::isfinite(Huge[0].Y), "large endpoint difference overflowed");
+        bool Rejected = false;
+        try { (void)Render2DLineQuad(0, 0, 1, 1, 0); } catch (const std::invalid_argument&) { Rejected = true; }
+        Check(Rejected, "zero width accepted");
+        Rejected = false;
+        try { (void)Render2DLineQuad(std::numeric_limits<float>::max(), 0,
+                                   std::numeric_limits<float>::max(), 1,
+                                   std::numeric_limits<float>::max()); }
+        catch (const std::invalid_argument&) { Rejected = true; }
+        Check(Rejected, "unrepresentable quad accepted");
+        std::vector<Value> LineArgs{ContextValue, Value::Number(1), Value::Number(2),
+            Value::Number(31), Value::Number(42), Value::Number(3.5),
+            Value::Number(1), Value::Number(0.25), Value::Number(0), Value::Number(0.5)};
+        Check(Call(ModuleValue, "DrawLine", LineArgs).IsError(), "line outside frame accepted");
+
         auto TextureValue = Call(ModuleValue, "LoadTexture",
             {ContextValue, Value::String("assets/../assets/picture.png")});
         auto FontValue = Call(ModuleValue, "LoadFont",
@@ -150,6 +222,26 @@ int main() {
             "draw outside a frame was accepted");
         Check(!Call(ModuleValue, "BeginRender", {ContextValue, Value::Number(0), Value::Number(0),
             Value::Number(0), Value::Number(1)}).IsError(), "begin failed");
+        Check(Call(ModuleValue, "DrawLine", LineArgs).AsBool(), "DrawLine failed");
+        Check(HostBackend->Last->Lines == 1 && HostBackend->Last->LastLine ==
+              std::array<float,5>{1,2,31,42,3.5f} && HostBackend->Last->LineColor.Alpha == 0.5f,
+              "line geometry/color not passed to backend");
+        Check(Call(ModuleValue, "DrawLine", {ContextValue}).IsError(), "bad line arity");
+        for (auto Bad : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                          std::numeric_limits<double>::quiet_NaN()}) {
+            auto Args = LineArgs; Args[5] = Value::Number(Bad);
+            Check(Call(ModuleValue, "DrawLine", Args).IsError(), "bad line width accepted");
+        }
+        for (int At : {1,2,3,4,6,7,8,9}) {
+            auto Args = LineArgs; Args[At] = Value::Number(std::numeric_limits<double>::infinity());
+            Check(Call(ModuleValue, "DrawLine", Args).IsError(), "nonfinite line parameter accepted");
+        }
+        auto BadColor = LineArgs; BadColor[9] = Value::Number(1.1);
+        Check(Call(ModuleValue, "DrawLine", BadColor).IsError(), "invalid alpha accepted");
+        auto BadType = LineArgs; BadType[1] = Value::String("1");
+        Check(Call(ModuleValue, "DrawLine", BadType).IsError(), "string coordinate accepted");
+        Check(Call(ModuleValue, "SetViewport", {ContextValue, Value{}}).IsError(),
+              "viewport changed inside frame");
         Check(!Call(ModuleValue, "DrawTexture", {ContextValue, TextureValue,
             Value::Number(0), Value::Number(0), Value::Number(10), Value::Number(10),
             Value::Number(1), Value::Number(1), Value::Number(1), Value::Number(1)}).IsError(),

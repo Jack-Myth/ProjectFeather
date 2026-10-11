@@ -183,3 +183,19 @@ if get_option('network')
     args : ['run', meson.current_source_dir() / 'fixtures/network-tcp.fe'],
     depends : [NetworkNativeModule, TimeNativeModule, StdioNativeModule])
 endif
+
+# Requires a desktop/GPU; run this suite in graphical validation environments.
+if get_option('render2d').enabled()
+  Render2DDeviceTests = executable('render2d-device-tests', 'Render2DDevice.cpp',
+    '../modules/render2d/Render2DBgfx.cpp',
+    include_directories : Render2DModuleIncludes,
+    cpp_args : Render2DModuleCppArgs,
+    dependencies : Render2DModuleDependencies)
+  test('render2d-device', Render2DDeviceTests,
+    args : [meson.project_source_root() / 'assets/feather-logo.png',
+            meson.project_source_root() / 'subprojects/bgfx-cmake/bgfx/examples/runtime/font/droidsans.ttf'],
+    suite : 'graphics', is_parallel : false, timeout : 60)
+endif
+
+GetTypeTests = executable('get-type-tests', 'GetType.cpp', dependencies : FeatherDependency)
+test('get-type', GetTypeTests)

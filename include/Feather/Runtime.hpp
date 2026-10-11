@@ -492,6 +492,7 @@ private:
     ScriptObject* RootMetaObject = nullptr;
     std::vector<std::unique_ptr<ScriptObject>> ScriptHeap;
     std::unordered_set<ScriptObject*> ScriptObjects;
+    Value BuiltinGetType;
     std::unordered_map<std::string, Value> Globals;
     std::unordered_map<std::string, std::shared_ptr<ModuleInstance>> LoadedModules;
     std::unordered_map<const Module*, std::shared_ptr<ModuleInstance>> ModuleByProgram;

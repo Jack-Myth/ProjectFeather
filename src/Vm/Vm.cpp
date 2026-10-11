@@ -34,6 +34,34 @@ struct ActiveRunGuard {
     std::function<void()> Finish;
 };
 Value Error(std::string Message) { return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message))); }
+// Core builtins have stable identities for ordinary native snapshot restoration.
+constexpr NativeModuleGuid CoreBuiltinsGuid{{0x46,0x65,0x61,0x74,0x68,0x65,0x72,0x00,
+                                             0xb1,0x17,0x49,0x81,0x96,0x27,0xa5,0x01}};
+class GetTypeFunction final : public NativeObject {
+public:
+    explicit GetTypeFunction(NativeObjectType& Type) : NativeObject(Type) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        if (Arguments.size() != 1) return Error("get_type requires exactly one argument");
+        const auto& Input = Arguments.front();
+        switch (Input.GetType()) {
+        case ValueType::Null: return Value::String("null");
+        case ValueType::Bool: return Value::String("bool");
+        case ValueType::Byte: return Value::String("byte");
+        case ValueType::Number: return Value::String("number");
+        case ValueType::String: return Value::String("string");
+        case ValueType::Object:
+            switch (Input.GetObjectType()) {
+            case ObjectType::Script: return Value::String("ScriptObject");
+            case ObjectType::Function: return Value::String("Function");
+            case ObjectType::Error: return Value::String("Error");
+            case ObjectType::Host: return Value::String("NativeObject");
+            }
+        }
+        return Error("unrecognized value type");
+    }
+};
 bool Equal(const Value& Left, const Value& Right) {
     if (Left.IsNumeric() && Right.IsNumeric()) return Left.AsNumber() == Right.AsNumber();
     if (Left.GetType() != Right.GetType()) return false;
@@ -272,6 +300,9 @@ Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
     SourceProgram = Input;
     RootMetaObject = AllocateScriptObject(nullptr);
     UpdateCollectionThreshold();
+    auto& Type = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "get_type");
+    BuiltinGetType = Value::FromObject(Type.Create<GetTypeFunction>());
+    Globals.emplace("get_type", BuiltinGetType);
     // Freeze the mutable builder's module before any execution.
     Program = std::make_shared<Module>(*Input);
     for (auto& Item : Program->Constants) {
@@ -307,6 +338,7 @@ void Vm::LoadModule(std::string Id, std::shared_ptr<Module> Source,
     if (LoadedModules.size() >= 65'536) throw std::invalid_argument("too many loaded modules");
     Source->Validate();
     auto Instance = std::make_shared<ModuleInstance>();
+    Instance->Globals.emplace("get_type", BuiltinGetType);
     Instance->Id = Id;
     Instance->Source = Source;
     Instance->Identity.assign(Identity.begin(), Identity.end());

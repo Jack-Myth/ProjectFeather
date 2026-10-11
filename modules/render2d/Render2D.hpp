@@ -38,11 +38,32 @@ struct Render2DRect {
     float Height = 0.0f;
 };
 
+struct Render2DWindowMetrics {
+    int WindowWidth = 0, WindowHeight = 0;
+    int PixelWidth = 0, PixelHeight = 0;
+    float PixelDensity = 1, DisplayScale = 1;
+    bool Minimized = false;
+};
+struct Render2DPoint {
+    double X = 0, Y = 0;
+    bool Inside = false;
+};
+// Viewport coordinates are window logical units; canvas coordinates use RenderWidth/Height.
+inline Render2DPoint Render2DMapPoint(double X, double Y, Render2DRect View,
+                                    double CanvasWidth, double CanvasHeight) {
+    if (View.Width <= 0 || View.Height <= 0) return {};
+    return {(X - View.X) * CanvasWidth / View.Width,
+            (Y - View.Y) * CanvasHeight / View.Height,
+            X >= View.X && Y >= View.Y && X < View.X + View.Width && Y < View.Y + View.Height};
+}
 struct Render2DEvent {
     std::string Type;
     double X = 0.0;
     double Y = 0.0;
     std::string Key;
+    double WindowX = 0, WindowY = 0;
+    bool InsideViewport = false;
+    std::optional<Render2DWindowMetrics> Metrics;
 };
 
 class Render2DTexture {
@@ -60,12 +81,17 @@ public:
     virtual ~Render2DContext() = default;
     virtual bool IsOpen() const = 0;
     virtual void Close() = 0;
+    virtual Render2DWindowMetrics GetWindowMetrics() const = 0;
+    virtual void SetViewport(std::optional<Render2DRect> Viewport) = 0;
+    virtual Render2DPoint WindowToCanvas(double X, double Y) const = 0;
     virtual void BeginRender(Render2DColor Clear) = 0;
     virtual void EndRender() = 0;
     virtual std::shared_ptr<Render2DTexture> LoadTexture(std::string_view Path) = 0;
     virtual std::shared_ptr<Render2DFont> LoadFont(std::string_view Path) = 0;
     virtual void DrawTexture(Render2DTexture& Texture, Render2DRect Destination,
                              Render2DColor Color) = 0;
+    virtual void DrawLine(float X1, float Y1, float X2, float Y2, float Width,
+                          Render2DColor Color) = 0;
     virtual void DrawText(Render2DFont& Font, std::string_view Text, float X, float Y,
                           float Size, Render2DColor Color) = 0;
     virtual std::optional<Render2DEvent> PollEvent() = 0;

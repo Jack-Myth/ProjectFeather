@@ -77,3 +77,17 @@ literal       = "null" | "true" | "false" | NUMBER | STRING ;
 `byte` 是保留字，`byte(expression)` 是单参数内建转换，一般映射为 `ToByte`，合法的常量转换直接编码为 byte 常量，无需宿主注册。十进制字面量仍为 number；`byte(255)` 产生 byte，`byte(256)`、`byte(-1)`、`byte(1.5)` 与非数值输入在执行时产生 Error，与动态类型检查一致。空参数、多个参数或缺少括号属于编译错误。
 
 默认参数另外允许常量形式 `byte(NUMBER)`，例如 `def send(x = byte(255))`；编译时检查范围和整数性。默认值不允许计算表达式或嵌套转换。普通转换可嵌套；`byte(byte(1))` 保留 byte。运行时运算提升和存储规则见运行时规范的 byte 条目。
+
+### 类型查询
+
+每个脚本模块默认提供普通全局函数 `get_type(value)`，必须恰好传入一个参数。
+它返回 `null`、`bool`、`byte`、`number`、`string`、`ScriptObject`、`Function`、
+`Error` 或 `NativeObject` 字符串。原生函数也属于 `NativeObject`；类型查询不会调用
+对象元方法。该名称不是关键字，可在当前模块内遮蔽。
+
+```feather
+var value = byte(256);
+if (get_type(value) == "Error") {
+    // value.message 提供错误消息。
+}
+```

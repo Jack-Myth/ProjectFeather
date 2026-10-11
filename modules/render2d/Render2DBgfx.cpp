@@ -1,3 +1,4 @@
+#include "LineGeometry.hpp"
 #include "Render2D.hpp"
 
 #include <SDL3/SDL.h>
@@ -14,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -49,6 +51,7 @@ struct Vertex {
 
 struct DeviceState {
     bool Alive = false;
+    std::unordered_set<std::uint16_t> Textures;
     bgfx::VertexLayout Layout;
     bgfx::ProgramHandle Program = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle Sampler = BGFX_INVALID_HANDLE;
@@ -129,12 +132,20 @@ class Texture final : public Render2DTexture {
 public:
     Texture(std::weak_ptr<DeviceState> Device, bgfx::TextureHandle Handle,
             std::uint16_t Width, std::uint16_t Height)
-        : Device(std::move(Device)), Handle(Handle), Width(Width), Height(Height) {}
+        : Device(std::move(Device)), Handle(Handle), Width(Width), Height(Height) {
+        auto Owner = this->Device.lock();
+        if (!Owner || !Owner->Alive) throw std::runtime_error("render device is closed");
+        Owner->Textures.insert(Handle.idx);
+    }
     ~Texture() override {
-        if (auto Owner = Device.lock(); Owner && Owner->Alive && bgfx::isValid(Handle))
+        if (auto Owner = Device.lock(); Owner && Owner->Alive && Owner->Textures.erase(Handle.idx))
             bgfx::destroy(Handle);
     }
-    bgfx::TextureHandle GetHandle() const { return Handle; }
+    bgfx::TextureHandle GetHandle() const {
+        auto Owner = Device.lock();
+        if (!Owner || !Owner->Alive) throw std::runtime_error("render device is closed");
+        return Handle;
+    }
     std::uint16_t GetWidth() const { return Width; }
     std::uint16_t GetHeight() const { return Height; }
 private:
@@ -143,6 +154,16 @@ private:
     std::uint16_t Width;
     std::uint16_t Height;
 };
+
+// Adopt a newly created GPU handle, including allocation-failure cleanup.
+std::shared_ptr<Texture> AdoptTexture(std::weak_ptr<DeviceState> Device, bgfx::TextureHandle Handle,
+                                      std::uint16_t Width, std::uint16_t Height) {
+    try { return std::make_shared<Texture>(Device, Handle, Width, Height); }
+    catch (...) {
+        if (auto Owner = Device.lock(); Owner && Owner->Alive) bgfx::destroy(Handle);
+        throw;
+    }
+}
 
 struct Glyph {
     std::shared_ptr<Texture> Image;
@@ -160,9 +181,9 @@ public:
     Glyph& GetGlyph(std::uint32_t Codepoint, float Size) {
         auto SizeKey = static_cast<std::uint32_t>(std::lround(Size * 64.0f));
         auto Key = (std::uint64_t(SizeKey) << 32) | Codepoint;
-        if (auto Found = Glyphs.find(Key); Found != Glyphs.end()) return Found->second;
         auto DeviceOwner = Device.lock();
         if (!DeviceOwner || !DeviceOwner->Alive) throw std::runtime_error("render device is closed");
+        if (auto Found = Glyphs.find(Key); Found != Glyphs.end()) return Found->second;
         float Scale = stbtt_ScaleForPixelHeight(&Info, Size);
         int Advance = 0, Bearing = 0;
         stbtt_GetCodepointHMetrics(&Info, static_cast<int>(Codepoint), &Advance, &Bearing);
@@ -187,7 +208,7 @@ public:
                 stbtt_FreeBitmap(Bitmap, nullptr);
                 throw std::runtime_error("cannot create font glyph texture");
             }
-            Result.Image = std::make_shared<Texture>(Device, Handle,
+            Result.Image = AdoptTexture(Device, Handle,
                 static_cast<std::uint16_t>(Width), static_cast<std::uint16_t>(Height));
         }
         if (Bitmap) stbtt_FreeBitmap(Bitmap, nullptr);
@@ -240,6 +261,10 @@ public:
     bool IsOpen() const override { return Window && WindowOpen; }
     void Close() override {
         if (Device && Device->Alive) {
+            // Release images and cached font glyphs before shutting down bgfx.
+            // Wrappers can outlive the context; their later destructors see Alive=false.
+            for (auto Id : Device->Textures) bgfx::destroy(bgfx::TextureHandle{Id});
+            Device->Textures.clear();
             if (bgfx::isValid(Device->Program)) bgfx::destroy(Device->Program);
             if (bgfx::isValid(Device->Sampler)) bgfx::destroy(Device->Sampler);
             if (bgfx::isValid(Device->White)) bgfx::destroy(Device->White);
@@ -252,11 +277,48 @@ public:
         WindowOpen = false;
         FrameOpen = false;
     }
+    Render2DWindowMetrics GetWindowMetrics() const override {
+        RequireOpen();
+        Render2DWindowMetrics M;
+        if (!SDL_GetWindowSize(Window, &M.WindowWidth, &M.WindowHeight) ||
+            !SDL_GetWindowSizeInPixels(Window, &M.PixelWidth, &M.PixelHeight))
+            throw std::runtime_error("cannot get window dimensions");
+        M.WindowWidth = std::max(0, M.WindowWidth); M.WindowHeight = std::max(0, M.WindowHeight);
+        M.PixelWidth = std::max(0, M.PixelWidth); M.PixelHeight = std::max(0, M.PixelHeight);
+        M.PixelDensity = SDL_GetWindowPixelDensity(Window);
+        M.DisplayScale = SDL_GetWindowDisplayScale(Window);
+        M.Minimized = (SDL_GetWindowFlags(Window) & SDL_WINDOW_MINIMIZED) != 0;
+        return M;
+    }
+    Render2DRect EffectiveViewport(const Render2DWindowMetrics& M) const {
+        return Viewport.value_or(Render2DRect{0, 0, static_cast<float>(M.WindowWidth),
+                                                  static_cast<float>(M.WindowHeight)});
+    }
+    void SetViewport(std::optional<Render2DRect> Input) override {
+        RequireOpen();
+        if (FrameOpen) throw std::logic_error("SetViewport must precede BeginRender");
+        if (Input && (!std::isfinite(Input->X) || !std::isfinite(Input->Y) ||
+            !std::isfinite(Input->Width) || !std::isfinite(Input->Height) ||
+            Input->X < 0 || Input->Y < 0 || Input->Width < 0 || Input->Height < 0))
+            throw std::invalid_argument("invalid viewport rectangle");
+        Viewport = Input;
+    }
+    Render2DPoint WindowToCanvas(double X, double Y) const override {
+        auto M = GetWindowMetrics();
+        if (M.Minimized || M.WindowWidth <= 0 || M.WindowHeight <= 0 ||
+            M.PixelWidth <= 0 || M.PixelHeight <= 0) return {};
+        auto P = Render2DMapPoint(X, Y, EffectiveViewport(M), Config.RenderWidth, Config.RenderHeight);
+        P.Inside = P.Inside && X >= 0 && Y >= 0 && X < M.WindowWidth && Y < M.WindowHeight;
+        return P;
+    }
     void BeginRender(Render2DColor Clear) override {
         RequireOpen();
-        int Width = 0, Height = 0;
-        if (!SDL_GetWindowSizeInPixels(Window, &Width, &Height) || Width <= 0 || Height <= 0)
-            throw std::runtime_error("cannot get window drawable size");
+        auto M = GetWindowMetrics();
+        int Width = M.PixelWidth, Height = M.PixelHeight;
+        auto V = EffectiveViewport(M);
+        SkipFrame = M.Minimized || Width <= 0 || Height <= 0 ||
+                    M.WindowWidth <= 0 || M.WindowHeight <= 0 || V.Width <= 0 || V.Height <= 0;
+        if (SkipFrame) { FrameOpen = true; return; }
         if (Width != BackbufferWidth || Height != BackbufferHeight) {
             BackbufferWidth = Width; BackbufferHeight = Height;
             bgfx::SwapChain SwapChain;
@@ -269,12 +331,23 @@ public:
                           static_cast<std::uint16_t>(std::min(Height, 65535)));
         float View[16], Projection[16];
         bx::mtxIdentity(View);
-        bx::mtxOrtho(Projection, 0.0f, static_cast<float>(Config.RenderWidth),
-            static_cast<float>(Config.RenderHeight), 0.0f, 0.0f, 100.0f, 0.0f,
+        float SX = Config.RenderWidth / V.Width, SY = Config.RenderHeight / V.Height;
+        bx::mtxOrtho(Projection, -V.X * SX, (M.WindowWidth - V.X) * SX,
+            (M.WindowHeight - V.Y) * SY, -V.Y * SY, 0.0f, 100.0f, 0.0f,
             bgfx::getCaps()->homogeneousDepth);
+        for (float Component : Projection)
+            if (!std::isfinite(Component)) throw std::invalid_argument("viewport projection is not finite");
         bgfx::setViewTransform(MainView, View, Projection);
         bgfx::setViewMode(MainView, bgfx::ViewMode::Sequential);
         bgfx::touch(MainView);
+        auto PX = static_cast<double>(Width) / M.WindowWidth;
+        auto PY = static_cast<double>(Height) / M.WindowHeight;
+        auto Edge = [](double N, int Limit) { return static_cast<std::uint16_t>(
+            std::clamp(std::round(N), 0.0, static_cast<double>(std::min(Limit, 65535)))); };
+        ClipX = Edge(V.X * PX, Width); ClipY = Edge(V.Y * PY, Height);
+        ClipW = Edge((static_cast<double>(V.X) + V.Width) * PX, Width) - ClipX;
+        ClipH = Edge((static_cast<double>(V.Y) + V.Height) * PY, Height) - ClipY;
+        SkipFrame = ClipW == 0 || ClipH == 0;
         FrameOpen = true;
     }
     void EndRender() override {
@@ -314,6 +387,12 @@ public:
         auto* Image = dynamic_cast<Texture*>(&Input);
         if (!Image) throw std::invalid_argument("texture belongs to another render backend");
         Submit(Image->GetHandle(), Destination, Color);
+    }
+    void DrawLine(float X1, float Y1, float X2, float Y2, float Width,
+                  Render2DColor Color) override {
+        RequireFrame();
+        const auto Quad = Render2DLineQuad(X1, Y1, X2, Y2, Width);
+        if (Quad) SubmitQuad(Device->White, *Quad, Color);
     }
     void DrawText(Render2DFont& Input, std::string_view Text, float X, float Y,
                   float Size, Render2DColor Color) override {
@@ -401,9 +480,16 @@ private:
             throw std::runtime_error("cannot create render2d built-in resources");
     }
     void Submit(bgfx::TextureHandle Texture, Render2DRect Rect, Render2DColor Color) {
+        if (SkipFrame) return;
         if (Rect.Width < 0 || Rect.Height < 0)
             throw std::invalid_argument("draw width and height must be non-negative");
         if (Rect.Width == 0 || Rect.Height == 0) return;
+        SubmitQuad(Texture, {{{Rect.X, Rect.Y}, {Rect.X + Rect.Width, Rect.Y},
+            {Rect.X + Rect.Width, Rect.Y + Rect.Height}, {Rect.X, Rect.Y + Rect.Height}}}, Color);
+    }
+    void SubmitQuad(bgfx::TextureHandle Texture, const std::array<Render2DPoint, 4>& Quad,
+                    Render2DColor Color) {
+        if (SkipFrame) return;
         if (bgfx::getAvailTransientVertexBuffer(4, Device->Layout) < 4 ||
             bgfx::getAvailTransientIndexBuffer(6) < 6)
             throw std::runtime_error("render2d transient buffer exhausted");
@@ -413,16 +499,17 @@ private:
         bgfx::allocTransientIndexBuffer(&Indices, 6);
         auto Packed = PackColor(Color);
         auto* V = reinterpret_cast<Vertex*>(Vertices.data);
-        V[0] = {Rect.X, Rect.Y, 0, Packed, 0, 0};
-        V[1] = {Rect.X + Rect.Width, Rect.Y, 0, Packed, 1, 0};
-        V[2] = {Rect.X + Rect.Width, Rect.Y + Rect.Height, 0, Packed, 1, 1};
-        V[3] = {Rect.X, Rect.Y + Rect.Height, 0, Packed, 0, 1};
+        V[0] = {float(Quad[0].X), float(Quad[0].Y), 0, Packed, 0, 0};
+        V[1] = {float(Quad[1].X), float(Quad[1].Y), 0, Packed, 1, 0};
+        V[2] = {float(Quad[2].X), float(Quad[2].Y), 0, Packed, 1, 1};
+        V[3] = {float(Quad[3].X), float(Quad[3].Y), 0, Packed, 0, 1};
         auto* I = reinterpret_cast<std::uint16_t*>(Indices.data);
         const std::uint16_t Values[] = {0, 1, 2, 0, 2, 3};
         std::copy(std::begin(Values), std::end(Values), I);
         bgfx::setVertexBuffer(0, &Vertices);
         bgfx::setIndexBuffer(&Indices);
         bgfx::setTexture(0, Device->Sampler, Texture);
+        bgfx::setScissor(ClipX, ClipY, ClipW, ClipH);
         bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_BLEND_ALPHA);
         bgfx::submit(MainView, Device->Program);
     }
@@ -437,13 +524,25 @@ private:
         case SDL_EVENT_MOUSE_MOTION: {
             float X = Event.type == SDL_EVENT_MOUSE_MOTION ? Event.motion.x : Event.button.x;
             float Y = Event.type == SDL_EVENT_MOUSE_MOTION ? Event.motion.y : Event.button.y;
-            int Width = 0, Height = 0;
-            SDL_GetWindowSize(Window, &Width, &Height);
-            if (Width > 0) X *= static_cast<float>(Config.RenderWidth) / Width;
-            if (Height > 0) Y *= static_cast<float>(Config.RenderHeight) / Height;
+            auto Point = WindowToCanvas(X, Y);
             auto Type = Event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? "PointerDown" :
                         Event.type == SDL_EVENT_MOUSE_BUTTON_UP ? "PointerUp" : "PointerMove";
-            return Render2DEvent{Type, X, Y, {}};
+            Render2DEvent Result{Type, Point.X, Point.Y, {}};
+            Result.WindowX = X; Result.WindowY = Y; Result.InsideViewport = Point.Inside;
+            return Result;
+        }
+        case SDL_EVENT_WINDOW_RESIZED:
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+        case SDL_EVENT_WINDOW_MINIMIZED:
+        case SDL_EVENT_WINDOW_RESTORED: {
+            const char* Type = Event.type == SDL_EVENT_WINDOW_RESIZED ? "WindowResized" :
+                Event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ? "PixelSizeChanged" :
+                Event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED ? "DisplayScaleChanged" :
+                Event.type == SDL_EVENT_WINDOW_MINIMIZED ? "Minimized" : "Restored";
+            Render2DEvent Result{Type};
+            Result.Metrics = GetWindowMetrics();
+            return Result;
         }
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP:
@@ -459,6 +558,9 @@ private:
     bool SdlInitialized = false;
     bool WindowOpen = true;
     bool FrameOpen = false;
+    bool SkipFrame = false;
+    std::optional<Render2DRect> Viewport;
+    std::uint16_t ClipX = 0, ClipY = 0, ClipW = 0, ClipH = 0;
     int BackbufferWidth = 0;
     int BackbufferHeight = 0;
 };
