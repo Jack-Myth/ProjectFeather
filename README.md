@@ -18,6 +18,20 @@ meson compile -C build/debug
 meson test -C build/debug --print-errorlogs
 ```
 
+**收集运行制品**
+
+构建完成后单独运行（只复制已有产物，不触发构建）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\collect-dist.ps1
+# 可选：指定构建目录与输出目录
+powershell -ExecutionPolicy Bypass -File scripts\collect-dist.ps1 -BuildDirectory build\debug -OutputDirectory .work\debug-dist
+```
+
+默认从 `build/release` 收集到 `dist/`：产品 EXE 在根目录，当前配置启用的原生 DLL 在 `modules/`，另有文件校验清单。测试程序、导入库、符号和中间文件不会复制。重复收集会用新目录替换旧包，旧包完整保留为同级 `.dist-backup-*`（自定义输出使用对应目录名）；不会自动删除备份，也拒绝覆盖没有本脚本清单的已有目录。失败的 `.dist-stage-*` 可检查后自行清理。自定义输出建议放 `.work` 或项目外。
+
+当前 SDL3/bgfx 静态链接、着色器内嵌，无需复制其 DLL 或构建资源；应用自己的脚本、图片、字体需另行携带。目标机器仍需对应架构的 Windows 系统组件及构建所用的 MSVC/UCRT 运行库；脚本不复制系统 DLL。Debug 构建的调试运行库不适合普通机器分发。脚本当前仅支持 Windows；修改 Meson 配置后须先完成相应构建。
+
 优化的 Release 构建使用三级优化、LTO 与 `NDEBUG`，并在构建后自动运行测试：
 
 ```powershell

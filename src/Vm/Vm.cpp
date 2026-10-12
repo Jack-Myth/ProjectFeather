@@ -26,6 +26,42 @@ Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Valu
     }
     return Next;
 }
+Frame MakeFrameFromStack(std::shared_ptr<FunctionObject> Function,
+                         std::vector<Value>& Stack, std::size_t Count,
+                         std::uint64_t InvocationId) {
+    const auto& Body = Function->GetBody();
+    const auto Start = Stack.size() - Count;
+    Frame Next;
+    Next.Function = std::move(Function);
+    Next.InvocationId = InvocationId;
+    Next.Locals.resize(Body.LocalCount);
+    for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
+        if (I < Count) Next.Locals[I] = std::move(Stack[Start + I]);
+        else if (Body.Defaults[I]) Next.Locals[I] = *Body.Defaults[I];
+    }
+    // Drop the target and all arguments, including unused extra arguments.
+    Stack.resize(Start - 1);
+    return Next;
+}
+Value NumericResult(Op Instruction, double A, double B) {
+    switch (Instruction) {
+    case Op::Add: return Value::Number(A + B);
+    case Op::Sub: return Value::Number(A - B);
+    case Op::Mul: return Value::Number(A * B);
+    case Op::Div:
+        // Preserve explicit IEEE-754 behavior with host divide-by-zero traps.
+        if (B == 0) {
+            if (A == 0 || std::isnan(A))
+                return Value::Number(std::numeric_limits<double>::quiet_NaN());
+            return Value::Number(std::copysign(std::numeric_limits<double>::infinity(),
+                A * std::copysign(1.0, B)));
+        }
+        return Value::Number(A / B);
+    case Op::Less: return Value::Bool(A < B);
+    case Op::Equal: return Value::Bool(A == B);
+    default: throw std::logic_error("invalid arithmetic opcode");
+    }
+}
 struct ActiveRunGuard {
     explicit ActiveRunGuard(std::uint32_t& Count, std::function<void()> Finish = {})
         : Count(Count), Finish(std::move(Finish)) { ++Count; }
@@ -76,8 +112,12 @@ bool Equal(const Value& Left, const Value& Right) {
     return false;
 }
 std::uint32_t ReadU32(const std::vector<std::uint8_t>& Code, std::size_t& Pc) {
-    std::uint32_t Result = 0;
-    for (unsigned I = 0; I < 4; ++I) Result |= std::uint32_t(Code[Pc++]) << (I * 8);
+    const auto At = Pc;
+    const auto Result = std::uint32_t(Code[At]) |
+        (std::uint32_t(Code[At + 1]) << 8) |
+        (std::uint32_t(Code[At + 2]) << 16) |
+        (std::uint32_t(Code[At + 3]) << 24);
+    Pc = At + 4;
     return Result;
 }
 Value ConstantValue(const Constant& Item, const std::shared_ptr<Object>& Function) {
@@ -924,7 +964,9 @@ Value Vm::Execute(ExecutionState& Execution) {
         Frame& Next = Frames.back();
         FaultBody = &Next.Function->GetBody();
         FaultPc = Next.Pc;
-        auto FrameOwner = Next.Function->GetOwner();
+        // The module function table retains this heap object across frame moves/pops.
+        // Borrow its owner only for this instruction.
+        const auto& FrameOwner = Next.Function->GetOwner();
         ModuleInstance* FrameInstance = nullptr;
         if (FrameOwner != Program) {
             auto Found = ModuleByProgram.find(FrameOwner.get());
@@ -969,8 +1011,8 @@ Value Vm::Execute(ExecutionState& Execution) {
             if (DebugOrigin && Current.Stack.back().IsError())
                 ReachDebugError(Execution, Current.Stack.back(), *DebugOrigin, InstructionStart);
         };
-        std::function<void(Value, std::vector<Value>, unsigned, bool)> DispatchCall;
-        DispatchCall = [&](Value Target, std::vector<Value> Args, unsigned Depth, bool MetaCall) {
+        auto DispatchCall = [&](auto&& Self, Value Target, std::vector<Value> Args,
+                                unsigned Depth, bool MetaCall) -> void {
             if (Depth >= 64) {
                 Push(Error("MetaObject call cycle"), DebugErrorOrigin::Operation); return;
             }
@@ -984,7 +1026,7 @@ Value Vm::Execute(ExecutionState& Execution) {
                 auto Method = Meta ? Meta->GetRaw(Value::String("__call")) : std::nullopt;
                 if (!Method) { Push(Error("__call is missing"), DebugErrorOrigin::Operation); return; }
                 Args.insert(Args.begin(), Target);
-                DispatchCall(*Method, std::move(Args), Depth + 1, true);
+                Self(Self, *Method, std::move(Args), Depth + 1, true);
                 return;
             }
             auto Native = dynamic_cast<NativeObject*>(ObjectValue);
@@ -1031,6 +1073,17 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
         case Op::Equal: case Op::Less: {
+            const auto Size = Current.Stack.size();
+            if (Size >= 2 && Current.Stack[Size - 2].IsNumeric() &&
+                Current.Stack[Size - 1].IsNumeric()) {
+                const double A = Current.Stack[Size - 2].AsNumber();
+                const double B = Current.Stack[Size - 1].AsNumber();
+                // Numeric/bool results cannot need ownership or Error hooks;
+                // replacing two values with one also cannot exceed the stack limit.
+                Current.Stack[Size - 2] = NumericResult(Instruction, A, B);
+                Current.Stack.pop_back();
+                break;
+            }
             auto Right = Pop(); auto Left = Pop();
             if (Instruction == Op::Equal) { Push(Value::Bool(Equal(Left, Right))); break; }
             if (Instruction == Op::Add && Left.GetType() == ValueType::String &&
@@ -1040,22 +1093,7 @@ Value Vm::Execute(ExecutionState& Execution) {
             if (!Left.IsNumeric() || !Right.IsNumeric()) {
                 Push(Error("invalid operands"), DebugErrorOrigin::Operation); break;
             }
-            double A = Left.AsNumber(), B = Right.AsNumber();
-            switch (Instruction) {
-            case Op::Add: Push(Value::Number(A + B)); break;
-            case Op::Sub: Push(Value::Number(A - B)); break;
-            case Op::Mul: Push(Value::Number(A * B)); break;
-            case Op::Div: {
-                // Explicit IEEE-754 behavior even when the host FP environment traps divide-by-zero.
-                if (B == 0) {
-                    if (A == 0 || std::isnan(A)) Push(Value::Number(std::numeric_limits<double>::quiet_NaN()));
-                    else Push(Value::Number(std::copysign(std::numeric_limits<double>::infinity(), A * std::copysign(1.0, B))));
-                } else Push(Value::Number(A / B));
-                break;
-            }
-            case Op::Less: Push(Value::Bool(A < B)); break;
-            default: throw std::logic_error("invalid arithmetic opcode");
-            }
+            Push(NumericResult(Instruction, Left.AsNumber(), Right.AsNumber()));
             break;
         }
         case Op::ToByte: {
@@ -1087,11 +1125,27 @@ Value Vm::Execute(ExecutionState& Execution) {
             std::uint16_t Count = std::uint16_t(Code[Current.Pc]) |
                                   (std::uint16_t(Code[Current.Pc + 1]) << 8);
             Current.Pc += 2;
+            if (Current.Stack.size() > Count && Frames.size() < 1024) {
+                const auto& Target = Current.Stack[Current.Stack.size() - Count - 1];
+                auto* Function = Target.GetType() == ValueType::Object ?
+                    dynamic_cast<FunctionObject*>(Target.AsObject()) : nullptr;
+                // Extra arguments keep the general path's destruction order.
+                if (Function && Count <= Function->GetBody().ParameterCount &&
+                    (Function->GetOwner() == Program ||
+                                 ModuleByProgram.contains(Function->GetOwner().get()))) {
+                    auto Owner = std::static_pointer_cast<FunctionObject>(Target.AsNativeObject());
+                    auto NewFrame = MakeFrameFromStack(std::move(Owner), Current.Stack,
+                                                      Count, NextFrameInvocationId++);
+                    // Appending can relocate Frames; do not use Current afterward.
+                    Frames.push_back(std::move(NewFrame));
+                    break;
+                }
+            }
             std::vector<Value> Args(Count);
             for (std::size_t I = Count; I > 0; --I) Args[I - 1] = Pop();
             Value Target = Pop();
             Execution.PendingCallResult = true;
-            DispatchCall(std::move(Target), std::move(Args), 0, false);
+            DispatchCall(DispatchCall, std::move(Target), std::move(Args), 0, false);
             Execution.PendingCallResult = false;
             if (Execution.PendingCheckpointRestore) {
                 auto Id = *Execution.PendingCheckpointRestore;
@@ -1136,7 +1190,7 @@ Value Vm::Execute(ExecutionState& Execution) {
                 if (!Method) {
                     Push(Error("member does not exist"), DebugErrorOrigin::Operation); break;
                 }
-                DispatchCall(*Method, {Target, Key}, 0, true);
+                DispatchCall(DispatchCall, *Method, {Target, Key}, 0, true);
             } else if (auto Native = dynamic_cast<NativeObject*>(ObjectValue))
                 Push(Native->GetMember(Key), DebugErrorOrigin::Operation);
             else Push(Error("value has no members"), DebugErrorOrigin::Operation);

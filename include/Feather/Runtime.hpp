@@ -83,6 +83,7 @@ private:
     explicit Value(ValueType NewType);
     void Destroy();
     void CopyFrom(const Value& Other);
+    void MoveFrom(Value& Other) noexcept;
     ValueType Type = ValueType::Null;
     bool ScriptReference = false;
     union Storage {

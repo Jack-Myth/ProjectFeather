@@ -32,13 +32,13 @@ bool IsValidUtf8(std::string_view Input) {
 Value::Value() = default;
 Value::Value(ValueType NewType) : Type(NewType) {}
 Value::Value(const Value& Other) { CopyFrom(Other); }
-Value::Value(Value&& Other) noexcept { CopyFrom(Other); Other.Destroy(); }
+Value::Value(Value&& Other) noexcept { MoveFrom(Other); }
 Value& Value::operator=(const Value& Other) {
     if (this != &Other) { Value Copy(Other); *this = std::move(Copy); }
     return *this;
 }
 Value& Value::operator=(Value&& Other) noexcept {
-    if (this != &Other) { Destroy(); CopyFrom(Other); Other.Destroy(); }
+    if (this != &Other) { Destroy(); MoveFrom(Other); }
     return *this;
 }
 Value::~Value() { Destroy(); }
@@ -63,6 +63,25 @@ void Value::CopyFrom(const Value& Other) {
         else new (&Data.Reference) std::shared_ptr<Object>(Other.Data.Reference);
         break;
     }
+}
+void Value::MoveFrom(Value& Other) noexcept {
+    Type = Other.Type;
+    ScriptReference = Other.ScriptReference;
+    switch (Type) {
+    case ValueType::Null: break;
+    case ValueType::Bool: Data.Boolean = Other.Data.Boolean; break;
+    case ValueType::Number: Data.Numeric = Other.Data.Numeric; break;
+    case ValueType::Byte: Data.ByteValue = Other.Data.ByteValue; break;
+    case ValueType::String:
+        new (&Data.Text) std::shared_ptr<const std::string>(std::move(Other.Data.Text));
+        break;
+    case ValueType::Object:
+        if (ScriptReference) Data.Script = Other.Data.Script;
+        else new (&Data.Reference) std::shared_ptr<Object>(std::move(Other.Data.Reference));
+        break;
+    }
+    // Destroy the now-empty shared_ptr union member before changing its tag.
+    Other.Destroy();
 }
 Value Value::Bool(bool Input) { Value Result(ValueType::Bool); Result.Data.Boolean = Input; return Result; }
 Value Value::Number(double Input) { Value Result(ValueType::Number); Result.Data.Numeric = Input; return Result; }
