@@ -2,6 +2,7 @@
 
 #include <Feather/Runtime.hpp>
 
+#include <array>
 #include <unordered_set>
 
 namespace Feather {
@@ -54,6 +55,9 @@ struct Frame {
 
 struct ExecutionState {
     std::vector<Frame> Frames;
+    // Empty frames retain only bounded vector capacity, never script values.
+    std::array<Frame, 16> FreeFrames;
+    std::size_t FreeFrameCount = 0;
     bool PendingCallResult = false;
     std::optional<std::uint64_t> PendingCheckpointRestore;
 };

@@ -13,12 +13,33 @@ namespace Feather {
 namespace {
 constexpr std::size_t MinimumCollectionGrowth = 1024;
 
+Frame TakeFreeFrame(ExecutionState& Execution) {
+    if (Execution.FreeFrameCount == 0) return {};
+    return std::move(Execution.FreeFrames[--Execution.FreeFrameCount]);
+}
+void RecycleTopFrame(ExecutionState& Execution) {
+    auto& Current = Execution.Frames.back();
+    constexpr std::size_t MaximumRetainedSlots = 4096;
+    if (Execution.FreeFrameCount < Execution.FreeFrames.size() &&
+        Current.Locals.capacity() <= MaximumRetainedSlots &&
+        Current.Stack.capacity() <= MaximumRetainedSlots - Current.Locals.capacity()) {
+        // Match Frame destruction order, releasing every value before reuse.
+        Current.Stack.clear();
+        Current.Locals.clear();
+        Current.Function.reset();
+        Current.Pc = 0;
+        Current.InvocationId = 0;
+        Execution.FreeFrames[Execution.FreeFrameCount++] = std::move(Current);
+    }
+    Execution.Frames.pop_back();
+}
+
 Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Value>& Args,
-                std::uint64_t InvocationId) {
+                std::uint64_t InvocationId, Frame Next = {}) {
     const auto& Body = Function->GetBody();
-    Frame Next;
     Next.Function = std::move(Function);
     Next.InvocationId = InvocationId;
+    Next.Pc = 0;
     Next.Locals.resize(Body.LocalCount);
     for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
         if (I < Args.size()) Next.Locals[I] = Args[I];
@@ -28,12 +49,12 @@ Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Valu
 }
 Frame MakeFrameFromStack(std::shared_ptr<FunctionObject> Function,
                          std::vector<Value>& Stack, std::size_t Count,
-                         std::uint64_t InvocationId) {
+                         std::uint64_t InvocationId, Frame Next = {}) {
     const auto& Body = Function->GetBody();
     const auto Start = Stack.size() - Count;
-    Frame Next;
     Next.Function = std::move(Function);
     Next.InvocationId = InvocationId;
+    Next.Pc = 0;
     Next.Locals.resize(Body.LocalCount);
     for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
         if (I < Count) Next.Locals[I] = std::move(Stack[Start + I]);
@@ -503,7 +524,7 @@ void Vm::ApplyCheckpointRestore(ExecutionState& Execution, std::uint64_t Id) {
     const auto& Saved = Found->second->Frames;
     if (Execution.Frames.size() < Saved.size())
         throw std::logic_error("pending checkpoint stack changed");
-    Execution.Frames.resize(Saved.size());
+    while (Execution.Frames.size() > Saved.size()) RecycleTopFrame(Execution);
     for (std::size_t I = 0; I < Saved.size(); ++I) {
         auto& Current = Execution.Frames[I];
         if (Current.InvocationId != Saved[I].InvocationId ||
@@ -952,7 +973,8 @@ Value Vm::Execute(ExecutionState& Execution) {
     auto PushFrame = [&](const std::shared_ptr<FunctionObject>& Function,
                          const std::vector<Value>& Args) {
         if (Frames.size() >= 1024) throw std::runtime_error("VM call depth exceeded");
-        Frames.push_back(MakeFrame(Function, Args, NextFrameInvocationId++));
+        Frames.push_back(MakeFrame(Function, Args, NextFrameInvocationId++,
+                                   TakeFreeFrame(Execution)));
     };
     const FunctionPrototype* FaultBody = nullptr;
     std::size_t FaultPc = 0;
@@ -1135,7 +1157,8 @@ Value Vm::Execute(ExecutionState& Execution) {
                                  ModuleByProgram.contains(Function->GetOwner().get()))) {
                     auto Owner = std::static_pointer_cast<FunctionObject>(Target.AsNativeObject());
                     auto NewFrame = MakeFrameFromStack(std::move(Owner), Current.Stack,
-                                                      Count, NextFrameInvocationId++);
+                                                      Count, NextFrameInvocationId++,
+                                                      TakeFreeFrame(Execution));
                     // Appending can relocate Frames; do not use Current afterward.
                     Frames.push_back(std::move(NewFrame));
                     break;
@@ -1158,7 +1181,7 @@ Value Vm::Execute(ExecutionState& Execution) {
             auto Result = Pop();
             if (Result.IsError())
                 ReachDebugError(Execution, Result, DebugErrorOrigin::FunctionReturn, InstructionStart);
-            Frames.pop_back();
+            RecycleTopFrame(Execution);
             if (Frames.empty()) {
                 if (ActiveRuns == 1) {
                     FaultLocation.reset(); FaultException = {}; FaultObject = nullptr;
