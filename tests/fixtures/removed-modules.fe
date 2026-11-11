@@ -1,0 +1,5 @@
+def main() {
+    if (get_type(import("snapshot")) != "Error") { return byte(-1); }
+    if (get_type(import("checkpoint")) != "Error") { return byte(-1); }
+    return null;
+}

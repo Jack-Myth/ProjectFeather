@@ -219,6 +219,11 @@ public:
         stbtt_GetFontVMetrics(&Info, &Ascent, &Descent, &Gap);
         return Ascent * stbtt_ScaleForPixelHeight(&Info, Size);
     }
+    float Advance(std::uint32_t Codepoint, float Size) const {
+        int A = 0, B = 0;
+        stbtt_GetCodepointHMetrics(&Info, static_cast<int>(Codepoint), &A, &B);
+        return A * stbtt_ScaleForPixelHeight(&Info, Size);
+    }
     float Kerning(std::uint32_t Left, std::uint32_t Right, float Size) const {
         return stbtt_GetCodepointKernAdvance(&Info, static_cast<int>(Left),
             static_cast<int>(Right)) * stbtt_ScaleForPixelHeight(&Info, Size);
@@ -313,6 +318,7 @@ public:
     }
     void BeginRender(Render2DColor Clear) override {
         RequireOpen();
+        ClipEmpty = false;
         auto M = GetWindowMetrics();
         int Width = M.PixelWidth, Height = M.PixelHeight;
         auto V = EffectiveViewport(M);
@@ -347,6 +353,7 @@ public:
         ClipX = Edge(V.X * PX, Width); ClipY = Edge(V.Y * PY, Height);
         ClipW = Edge((static_cast<double>(V.X) + V.Width) * PX, Width) - ClipX;
         ClipH = Edge((static_cast<double>(V.Y) + V.Height) * PY, Height) - ClipY;
+        ViewClipX = ClipX; ViewClipY = ClipY; ViewClipW = ClipW; ViewClipH = ClipH;
         SkipFrame = ClipW == 0 || ClipH == 0;
         FrameOpen = true;
     }
@@ -415,6 +422,47 @@ public:
             PenX += Glyph.Advance;
             Previous = Codepoint;
         }
+    }
+    Render2DTextMetrics MeasureText(Render2DFont& Input, std::string_view Text, float Size) override {
+        RequireOpen();
+        auto* Typeface = dynamic_cast<Font*>(&Input);
+        if (!Typeface) throw std::invalid_argument("font belongs to another render backend");
+        double Pen = 0, Width = 0, Lines = 1;
+        std::uint32_t Previous = 0;
+        for (auto Codepoint : DecodeUtf8(Text)) {
+            if (Codepoint == '\n') { Width = std::max(Width, Pen); Pen = 0; ++Lines; Previous = 0; continue; }
+            if (Previous) Pen += Typeface->Kerning(Previous, Codepoint, Size);
+            Pen += Typeface->Advance(Codepoint, Size); Previous = Codepoint;
+        }
+        return {std::max(Width, Pen), Lines * Size, Typeface->Baseline(Size), Size};
+    }
+    void FillRect(Render2DRect Rect, Render2DColor Color) override {
+        RequireFrame(); Submit(Device->White, Rect, Color);
+    }
+    void SetClipRect(std::optional<Render2DRect> Rect) override {
+        RequireFrame();
+        ClipX = ViewClipX; ClipY = ViewClipY; ClipW = ViewClipW; ClipH = ViewClipH;
+        ClipEmpty = false;
+        if (!Rect || SkipFrame) return;
+        auto M = GetWindowMetrics(); auto V = EffectiveViewport(M);
+        auto PX = static_cast<double>(M.PixelWidth) / M.WindowWidth;
+        auto PY = static_cast<double>(M.PixelHeight) / M.WindowHeight;
+        auto Edge = [](double N) { return std::clamp(std::round(N), 0.0, 65535.0); };
+        auto X = Edge((V.X + double(Rect->X) * V.Width / Config.RenderWidth) * PX);
+        auto Y = Edge((V.Y + double(Rect->Y) * V.Height / Config.RenderHeight) * PY);
+        auto R = Edge((V.X + (double(Rect->X) + Rect->Width) * V.Width / Config.RenderWidth) * PX);
+        auto B = Edge((V.Y + (double(Rect->Y) + Rect->Height) * V.Height / Config.RenderHeight) * PY);
+        auto Left = std::max(X, double(ViewClipX)), Top = std::max(Y, double(ViewClipY));
+        auto Right = std::min(R, double(ViewClipX) + ViewClipW);
+        auto Bottom = std::min(B, double(ViewClipY) + ViewClipH);
+        ClipEmpty = Right <= Left || Bottom <= Top;
+        ClipX = static_cast<std::uint16_t>(Left); ClipY = static_cast<std::uint16_t>(Top);
+        ClipW = static_cast<std::uint16_t>(std::max(0.0, Right - Left));
+        ClipH = static_cast<std::uint16_t>(std::max(0.0, Bottom - Top));
+    }
+    void CaptureMouse(bool Enabled) override {
+        RequireOpen();
+        if (!SDL_CaptureMouse(Enabled)) throw std::runtime_error(SDL_GetError());
     }
     std::optional<Render2DEvent> PollEvent() override {
         RequireOpen();
@@ -489,7 +537,7 @@ private:
     }
     void SubmitQuad(bgfx::TextureHandle Texture, const std::array<Render2DPoint, 4>& Quad,
                     Render2DColor Color) {
-        if (SkipFrame) return;
+        if (SkipFrame || ClipEmpty) return;
         if (bgfx::getAvailTransientVertexBuffer(4, Device->Layout) < 4 ||
             bgfx::getAvailTransientIndexBuffer(6) < 6)
             throw std::runtime_error("render2d transient buffer exhausted");
@@ -529,8 +577,13 @@ private:
                         Event.type == SDL_EVENT_MOUSE_BUTTON_UP ? "PointerUp" : "PointerMove";
             Render2DEvent Result{Type, Point.X, Point.Y, {}};
             Result.WindowX = X; Result.WindowY = Y; Result.InsideViewport = Point.Inside;
+            if (Event.type != SDL_EVENT_MOUSE_MOTION) Result.Button = Event.button.button;
             return Result;
         }
+        case SDL_EVENT_WINDOW_FOCUS_LOST: return Render2DEvent{"FocusLost"};
+        case SDL_EVENT_WINDOW_FOCUS_GAINED: return Render2DEvent{"FocusGained"};
+        case SDL_EVENT_WINDOW_MOUSE_LEAVE: return Render2DEvent{"PointerLeave"};
+        case SDL_EVENT_WINDOW_MOUSE_ENTER: return Render2DEvent{"PointerEnter"};
         case SDL_EVENT_WINDOW_RESIZED:
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
@@ -559,8 +612,10 @@ private:
     bool WindowOpen = true;
     bool FrameOpen = false;
     bool SkipFrame = false;
+    bool ClipEmpty = false;
     std::optional<Render2DRect> Viewport;
     std::uint16_t ClipX = 0, ClipY = 0, ClipW = 0, ClipH = 0;
+    std::uint16_t ViewClipX = 0, ViewClipY = 0, ViewClipW = 0, ViewClipH = 0;
     int BackbufferWidth = 0;
     int BackbufferHeight = 0;
 };

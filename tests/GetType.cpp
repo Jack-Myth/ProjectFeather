@@ -5,19 +5,6 @@ using namespace Feather;
 void Check(bool Good, const char* Message) {
     if (!Good) throw std::runtime_error(Message);
 }
-class Capture final : public NativeObject {
-public:
-    Capture(NativeObjectType& Type, Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObject(Type), Machine(Machine), Saved(Saved) {}
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    bool IsCallable() const override { return true; }
-    Value Call(const std::vector<Value>&) override {
-        Saved = Machine.CaptureSnapshot(); return {};
-    }
-private:
-    Vm& Machine;
-    std::vector<std::uint8_t>& Saved;
-};
 int main() {
     try {
         auto Program = Compile(R"(
@@ -54,22 +41,6 @@ int main() {
         Child.InitializeModule(Machine, "child");
         auto Fn = Machine.GetModuleGlobal("child", "inspect");
         Check(Machine.Call(Fn, {}).AsString() == "byte", "module builtin isolated from root shadow");
-        auto SnapshotProgram = Compile(R"(
-            var alias = get_type;
-            def main() { capture(); return alias(byte(255)); }
-        )");
-        std::vector<std::uint8_t> Saved;
-        Vm Original(SnapshotProgram.Program);
-        auto& CaptureType = Original.CreateNativeObjectType<NativeSingletonType>(
-            NativeModuleGuid{{0x71}}, "TypeTestCapture");
-        Original.RegisterNativeFunction("capture", CaptureType.Create<Capture>(Original, Saved));
-        SnapshotProgram.Initialize(Original);
-        Check(Original.Run(SnapshotProgram.Functions.at("main")).AsString() == "byte", "capture");
-        Vm Restored(SnapshotProgram.Program);
-        auto& RestoredType = Restored.CreateNativeObjectType<NativeSingletonType>(
-            NativeModuleGuid{{0x71}}, "TypeTestCapture");
-        Restored.RegisterNativeFunction("capture", RestoredType.Create<Capture>(Restored, Saved));
-        Check(Restored.ResumeSnapshot(Saved).AsString() == "byte", "restored builtin alias");
         auto Loaded = DeserializeProgram(SerializeProgram(Program));
         Vm BytecodeMachine(Loaded.Program);
         Loaded.Initialize(BytecodeMachine);

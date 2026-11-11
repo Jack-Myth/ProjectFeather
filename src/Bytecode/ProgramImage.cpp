@@ -11,7 +11,7 @@ namespace Feather {
 namespace {
 
 constexpr std::uint8_t Magic[8] = {'F', 'T', 'H', 'R', 'B', 'C', 0, 0};
-constexpr std::uint16_t FormatVersion = 4;
+constexpr std::uint16_t FormatVersion = 5;
 constexpr std::uint16_t InstructionVersion = 2;
 constexpr std::size_t HeaderSize = 16;
 constexpr std::uint32_t MaxEntries = 65'536;
@@ -166,6 +166,8 @@ std::vector<std::uint8_t> SerializeProgram(const CompiledProgram& Input,
     Output.U32(static_cast<std::uint32_t>(Input.Program->Constants.size()));
     for (const auto& Item : Input.Program->Constants) {
         switch (Item.Type) {
+        case Constant::Kind::Buffer:
+            Output.U8(4); Output.Blob({reinterpret_cast<const std::uint8_t*>(Item.Text.data()), Item.Text.size()}); break;
         case Constant::Kind::Byte:
             Output.U8(3); Output.U8(Item.ByteValue); break;
         case Constant::Kind::Number:
@@ -220,6 +222,7 @@ CompiledProgram DeserializeProgram(std::span<const std::uint8_t> Bytes,
     for (std::uint32_t I = 0; I < ConstantCount; ++I) {
         switch (Input.U8()) {
         case 3: Result.Program->AddByte(Input.U8()); break;
+        case 4: { auto Bytes = Input.Blob(); Result.Program->AddBuffer(std::string(Bytes.begin(), Bytes.end())); break; }
         case 0: Result.Program->AddNumber(std::bit_cast<double>(Input.U64())); break;
         case 1: Result.Program->AddString(Input.String()); break;
         case 2: {

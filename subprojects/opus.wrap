@@ -1,0 +1,6 @@
+[wrap-file]
+directory = opus-1.4
+source_url = https://codeload.github.com/xiph/opus/tar.gz/refs/tags/v1.4
+source_filename = opus-v1.4.tar.gz
+source_hash = 659e6b223e42a51b0a898632b9a5f406ccd5c2e00aa526ddd1264789774b94e5
+method = cmake

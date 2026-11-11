@@ -13,51 +13,7 @@ void Check(bool Good, const char* Message) {
     if (!Good) throw std::runtime_error(Message);
 }
 
-class SnapshotCaptureCall final : public NativeObject {
-public:
-    SnapshotCaptureCall(NativeObjectType& Type, Vm& Machine,
-                   std::vector<std::uint8_t>& Saved);
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    bool IsCallable() const override { return true; }
-    Value Call(const std::vector<Value>&) override {
-        Saved = Machine.CaptureSnapshot();
-        return Value::Bool(false);
-    }
-private:
-    Vm& Machine;
-    std::vector<std::uint8_t>& Saved;
-};
-
-constexpr NativeModuleGuid SnapshotTestModule{{
-    0x42, 0x2e, 0x81, 0x13, 0x64, 0xf1, 0x4c, 0x98,
-    0xa7, 0xc5, 0x35, 0xd0, 0x69, 0xa1, 0x77, 0x20}};
-
-class SnapshotCaptureType final : public NativeObjectType {
-public:
-    SnapshotCaptureType(Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObjectType(Machine, SnapshotTestModule, "Capture", 1), Saved(Saved) {}
-    std::shared_ptr<SnapshotCaptureCall> Create() {
-        return CreateObject<SnapshotCaptureCall>(GetVm(), Saved);
-    }
-    std::vector<std::uint8_t> Serialize(const NativeObject& Input) const override {
-        if (!dynamic_cast<const SnapshotCaptureCall*>(&Input))
-            throw std::runtime_error("unexpected multimodule host object");
-        return {};
-    }
-    std::shared_ptr<NativeObject> Deserialize(
-        std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
-        if (Version != 1 || !Payload.empty())
-            throw std::runtime_error("unknown multimodule host record");
-        return Create();
-    }
-private:
-    std::vector<std::uint8_t>& Saved;
-};
-
-SnapshotCaptureCall::SnapshotCaptureCall(NativeObjectType& Type, Vm& Machine,
-                               std::vector<std::uint8_t>& Saved)
-    : NativeObject(Type), Machine(Machine), Saved(Saved) {}
-}
+} // namespace
 
 int main() {
     try {
@@ -146,46 +102,6 @@ int main() {
             Check(std::string_view(Failure.what()) == "circular module initialization",
                   "initialization cycle had the wrong fault");
         }
-
-        auto SnapshotRoot = Compile("def main() { return math.entry() + 1; }");
-        auto SnapshotMath = Compile(
-            "export var shared = object(); shared.value = 41; "
-            "export def entry() { if (captureSnapshot()) { return shared.value; } return 0; }");
-        std::vector<std::uint8_t> Saved;
-        Vm Before(SnapshotRoot.Program);
-        auto& BeforeType = Before.CreateNativeObjectType<SnapshotCaptureType>(Saved);
-        SnapshotMath.LoadInto(Before, "math");
-        Before.SetModuleGlobal("math", "captureSnapshot",
-            Value::FromObject(BeforeType.Create()));
-        Check(!SnapshotMath.InitializeModule(Before, "math").IsError(),
-              "snapshot module initializer failed");
-        Before.SetGlobal("math", Before.GetModuleNamespace("math"));
-        SnapshotRoot.Initialize(Before);
-        Check(Before.Run(SnapshotRoot.Functions.at("main")).AsNumber() == 1 &&
-              Saved.size() > 12 && Saved[4] == 5,
-              "cross-module save point failed");
-
-        Vm After(SnapshotRoot.Program);
-        After.CreateNativeObjectType<SnapshotCaptureType>(Saved);
-        SnapshotMath.LoadInto(After, "math");
-        Check(After.ResumeSnapshot(Saved).AsNumber() == 42,
-              "cross-module frames or globals failed to restore");
-        Check(After.GetModuleGlobal("math", "shared").AsScriptObject() !=
-              Before.GetModuleGlobal("math", "shared").AsScriptObject() &&
-              After.GetGlobal("math").AsObject() == After.GetModuleNamespace("math").AsObject(),
-              "restored module object identity changed");
-        Check(After.CollectGarbage() == 0,
-              "restored module global did not root its ScriptObject");
-        auto DamagedSnapshot = Saved;
-        DamagedSnapshot[20] ^= 1;
-        Vm DamagedTarget(SnapshotRoot.Program);
-        SnapshotMath.LoadInto(DamagedTarget, "math");
-        try { (void)DamagedTarget.ResumeSnapshot(DamagedSnapshot);
-              throw std::runtime_error("damaged multi-module snapshot accepted"); }
-        catch (const std::invalid_argument&) {}
-        Check(DamagedTarget.GetScriptObjectCount() == 1 &&
-              DamagedTarget.GetModuleGlobal("math", "shared").IsError(),
-              "damaged multi-module snapshot mutated target VM");
 
         std::cout << "Multimodule tests passed\n";
         return 0;

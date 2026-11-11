@@ -1,0 +1,6 @@
+[wrap-file]
+directory = opusfile-0.12
+source_url = https://codeload.github.com/xiph/opusfile/tar.gz/refs/tags/v0.12
+source_filename = opusfile-v0.12.tar.gz
+source_hash = a20a1dff1cdf0719d1e995112915e9966debf1470ee26bb31b2f510ccf00ef40
+patch_directory = opusfile

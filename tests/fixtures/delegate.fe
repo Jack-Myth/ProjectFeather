@@ -1,0 +1,21 @@
+var delegate = import("delegate");
+var vm = import("vm");
+
+def validate(self, context = null) {
+    if (self.Name != "receiver") { return false; }
+    if (vm.get_func_argc() == 1) { return context == null; }
+    if (vm.get_func_argc() != 4) { return false; }
+    if (context != "bound") { return false; }
+    if (vm.get_func_argv(2) != null) { return false; }
+    return vm.get_func_argv(3) == 42;
+}
+
+def main() {
+    var receiver = object();
+    receiver.Name = "receiver";
+    var plain = delegate.Create(validate, receiver, null);
+    var bound = delegate.Create(validate, receiver, "bound");
+    if (plain() != true) { return byte(-1); }
+    if (bound(null, 42) != true) { return byte(-1); }
+    return true;
+}

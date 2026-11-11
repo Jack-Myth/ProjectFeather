@@ -21,33 +21,16 @@ std::size_t NativeTypeIdHash::operator()(const NativeTypeId& Input) const noexce
 }
 
 NativeObjectType::NativeObjectType(Vm& InputMachine, NativeModuleGuid Module,
-                                   std::string Name, std::uint32_t InputSnapshotVersion)
-    : Machine(InputMachine), Id{Module, std::move(Name)},
-      SnapshotVersion(InputSnapshotVersion) {
+                                   std::string Name)
+    : Machine(InputMachine), Id{Module, std::move(Name)} {
     if (Id.Name.empty()) throw std::invalid_argument("empty native type name");
     (void)Value::String(Id.Name);
-    if (SnapshotVersion == 0) throw std::invalid_argument("native snapshot version is zero");
-}
-
-std::vector<std::uint8_t> NativeObjectType::Serialize(const NativeObject& Input) const {
-    if (Input.GetNativeObjectType() != this)
-        throw std::invalid_argument("NativeObject belongs to another native type");
-    return {};
 }
 
 void NativeObjectType::RegisterObject(const std::shared_ptr<NativeObject>& Input) {
     if (!Input || Input->GetNativeObjectType() != this)
         throw std::invalid_argument("NativeObject belongs to another native type");
     Machine.RegisterNativeObject(Input);
-}
-
-std::shared_ptr<NativeObject> NativeSingletonType::Deserialize(
-    std::uint32_t StoredVersion, std::span<const std::uint8_t> Payload) {
-    if (StoredVersion != GetSnapshotVersion() || !Payload.empty())
-        throw std::invalid_argument("invalid native singleton payload");
-    auto Result = Canonical.lock();
-    if (!Result) throw std::logic_error("native singleton is unavailable");
-    return Result;
 }
 
 Value NativeObject::Call(const std::vector<Value>&) { return Error("object is not callable"); }
@@ -81,6 +64,16 @@ std::optional<ScriptObject::Key> ScriptObject::ConvertKey(const Value& Input) {
     return std::nullopt;
 }
 std::optional<Value> ScriptObject::GetRaw(const Value& Input) const {
+    if (Elements) {
+        if (Input.GetType() == ValueType::String) {
+            if (Input.AsString() == "Length")
+                return Value::Number(static_cast<double>(GetArrayLength()));
+            return GetArrayMethod(Input.AsString());
+        }
+        const auto Index = GetArrayIndex(Input);
+        if (!Index) return std::nullopt;
+        return (*Elements)[*Index];
+    }
     auto Key = ConvertKey(Input);
     if (!Key) return std::nullopt;
     auto Found = Members.find(*Key);
@@ -88,12 +81,40 @@ std::optional<Value> ScriptObject::GetRaw(const Value& Input) const {
     return Found->second;
 }
 Value ScriptObject::SetRaw(const Value& InputKey, const Value& Input) {
+    if (Elements) return Error("array members are read-only");
     auto Key = ConvertKey(InputKey);
     if (!Key) return Error("invalid ScriptObject key");
     Owner->ValidateOwnedValue(Input);
     Members.insert_or_assign(std::move(*Key), Input);
     return Input;
 }
+std::optional<std::size_t> ScriptObject::GetArrayIndex(const Value& Key) const {
+    if (!Key.IsNumeric()) return std::nullopt;
+    const double Index = Key.AsNumber();
+    if (!std::isfinite(Index) || Index < 0 || Index >= static_cast<double>(Elements->size()) ||
+        std::trunc(Index) != Index)
+        return std::nullopt;
+    return static_cast<std::size_t>(Index);
+}
+
+void ScriptObject::AppendArray(const Value& Input) {
+    if (!Elements) throw std::logic_error("AppendArray requires an array");
+    Owner->ValidateOwnedValue(Input);
+    Elements->push_back(Input);
+}
+
+bool ScriptObject::RemoveArrayAt(std::size_t Index) {
+    if (!Elements) throw std::logic_error("RemoveArrayAt requires an array");
+    if (Index >= Elements->size()) return false;
+    Elements->erase(Elements->begin() + static_cast<std::ptrdiff_t>(Index));
+    return true;
+}
+
+std::size_t ScriptObject::GetArrayLength() const {
+    if (!Elements) throw std::logic_error("GetArrayLength requires an array");
+    return Elements->size();
+}
+
 Value ErrorObject::GetMember(const Value& Key) {
     if (Key.GetType() == ValueType::String && Key.AsString() == "message")
         return Value::String(Message);

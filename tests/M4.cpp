@@ -27,6 +27,32 @@ public:
         return Value::Number(Arguments.at(0).AsNumber() * 2);
     }
 };
+class UpdateArrayNative final : public NativeObject {
+public:
+    explicit UpdateArrayNative(Vm& Machine) : Machine(Machine) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        if (Arguments.empty()) {
+            auto* Array = Machine.CreateArray();
+            Array->AppendArray(Value::Number(10));
+            Array->AppendArray(Value::Number(20));
+            return Value::FromScript(Array);
+        }
+        Check(Arguments.size() == 1 && Arguments.front().IsScriptObject(), "native array argument");
+        auto* Array = Arguments.front().AsScriptObject();
+        Check(Array->IsArray() && Array->GetArrayLength() == 2, "native array type and length");
+        Check(Array->GetArrayElements()[0].AsNumber() == 20 &&
+              Array->GetArrayElements()[1].AsNumber() == 30, "native array element order");
+        Check(!Array->RemoveArrayAt(2) && Array->GetArrayLength() == 2,
+              "native invalid removal leaves array intact");
+        Check(Array->RemoveArrayAt(0), "native RemoveArrayAt");
+        Array->AppendArray(Value::Number(40));
+        return Arguments.front();
+    }
+private:
+    Vm& Machine;
+};
 }
 
 int main() {
@@ -65,6 +91,116 @@ int main() {
               "if false branch");
         Check(Machine.Run(Compiled.Functions.at("implicit")).GetType() == ValueType::Null,
               "implicit return");
+
+        auto Arguments = Compile(R"(
+            def probe(a = 10) {
+                var argc = vm.get_func_argc;
+                var argv = vm.get_func_argv;
+                if (argc() == 0) { return a; }
+                if (argc() == 1) { return argv(0); }
+                a = 99;
+                if (argv(0) != 20) { return false; }
+                if (probe() != 10) { return false; }
+                if (argc() != 2) { return false; }
+                if (get_type(argv(2)) != "Error") { return false; }
+                if (get_type(argv(0.5)) != "Error") { return false; }
+                if (get_type(argv(-1)) != "Error") { return false; }
+                if (get_type(argv("0")) != "Error") { return false; }
+                if (get_type(argv()) != "Error") { return false; }
+                if (get_type(argc(0)) != "Error") { return false; }
+                return argv(byte(1));
+            }
+            def nested() {
+                if (probe(null) != null) { return false; }
+                return probe(20, 30);
+            }
+        )");
+        Vm ArgsVm(Arguments.Program);
+        const auto VmModule = ArgsVm.GetVmModule();
+        ArgsVm.SetGlobal("vm", VmModule);
+        Arguments.Initialize(ArgsVm);
+        Check(ArgsVm.Run(Arguments.Functions.at("nested")).AsNumber() == 30,
+              "script argument count, values and frame isolation");
+        Check(ArgsVm.Run(Arguments.Functions.at("probe"),
+                         {Value::Number(20), Value::Number(30)}).AsNumber() == 30,
+              "host entry argument count and values");
+        const auto Argc = static_cast<NativeObject*>(VmModule.AsObject())->GetMember(
+            Value::String("get_func_argc"));
+        Check(ArgsVm.Call(Argc, {}).IsError(), "argument lookup without a script frame");
+
+        auto ArrayProgram = Compile(R"(
+            def exercise() {
+                var native = update_array();
+                if (native.Length != 2) { return false; }
+                if (native.RemoveAt(0) != true) { return false; }
+                if (native.Add(30) != true) { return false; }
+                if (get_type(native.RemoveAt(2)) != "Error") { return false; }
+                if (get_type(native.Length = 1) != "Error") { return false; }
+                if (get_type(native[2] = 99) != "Error") { return false; }
+                var script = array();
+                script.Add(20);
+                script.Add(30);
+                if (update_array(script) != script) { return false; }
+                if (script[0] != 30) { return false; }
+                if (script[1] != 40) { return false; }
+                if (update_array(native) != native) { return false; }
+                if (native[0] != 30) { return false; }
+                if (native[1] != 40) { return false; }
+                return native.Length == 2;
+            }
+        )");
+        Vm ArrayVm(ArrayProgram.Program);
+        ArrayVm.RegisterNativeFunction("update_array", std::make_shared<UpdateArrayNative>(ArrayVm));
+        ArrayProgram.Initialize(ArrayVm);
+        Check(ArrayVm.Run(ArrayProgram.Functions.at("exercise")).AsBool(), "native array round trip");
+
+        auto InvokeProgram = Compile(R"(
+            var invoke = vm.invoke_function;
+            def inspect(a = 10) {
+                if (vm.get_func_argc() == 0) { return a; }
+                if (invoke(vm.get_func_argc, array()) != 3) { return false; }
+                if (a != null) { return false; }
+                if (vm.get_func_argv(1) != 7) { return false; }
+                return vm.get_func_argv(2);
+            }
+            def forward(n) {
+                if (n == 0) { return 42; }
+                var args = array();
+                args.Add(n - 1);
+                return invoke(forward, args);
+            }
+            def exercise() {
+                if (invoke(inspect, array()) != 10) { return false; }
+                var args = array();
+                args.Add(null);
+                args.Add(7);
+                args.Add(42);
+                if (invoke(inspect, args) != 42) { return false; }
+                var nativeArgs = array();
+                nativeArgs.Add(21);
+                if (invoke(double, nativeArgs) != 42) { return false; }
+                if (get_type(invoke(1, args)) != "Error") { return false; }
+                if (get_type(invoke(inspect, object())) != "Error") { return false; }
+                if (get_type(invoke(inspect)) != "Error") { return false; }
+                var cycle = array();
+                cycle.Add(invoke);
+                cycle.Add(cycle);
+                if (get_type(invoke(invoke, cycle)) != "Error") { return false; }
+                return forward(80) == 42;
+            }
+        )");
+        Vm InvokeVm(InvokeProgram.Program);
+        InvokeVm.SetGlobal("vm", InvokeVm.GetVmModule());
+        InvokeVm.RegisterNativeFunction("double", std::make_shared<DoubleNative>());
+        InvokeProgram.Initialize(InvokeVm);
+        Check(InvokeVm.Run(InvokeProgram.Functions.at("exercise")).AsBool(),
+              "invoke_function forwards arguments with normal call frames");
+        auto* NativeArgs = InvokeVm.CreateArray();
+        NativeArgs->AppendArray(Value::Number(21));
+        Check(InvokeVm.Call(InvokeVm.GetGlobal("invoke"),
+                            {InvokeVm.GetGlobal("double"), Value::FromScript(NativeArgs)}).AsNumber() == 42,
+              "invoke_function called from the host");
+
         auto Item = Machine.Run(Compiled.Functions.at("make"), {Value::Number(41)}).AsScriptObject();
         Check(Item->GetRaw(Value::String("answer"))->AsNumber() == 41, "dot member assignment");
         Check(Item->GetRaw(Value::Number(2))->AsNumber() == 42, "index member assignment");

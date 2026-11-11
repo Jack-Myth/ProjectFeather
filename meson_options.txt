@@ -14,3 +14,6 @@ option(
 
 option('network', type : 'boolean', value : true,
   description : 'Build the optional TCP/UDP network Native module')
+
+option('audio', type : 'boolean', value : true,
+  description : 'Build the WAV and Ogg Opus playback module')

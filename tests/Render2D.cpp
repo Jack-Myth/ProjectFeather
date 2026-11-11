@@ -50,6 +50,16 @@ struct Context final : Render2DContext {
     int Lines = 0;
     void DrawText(Render2DFont&, std::string_view, float, float, float,
                   Render2DColor) override { ++Texts; }
+    Render2DTextMetrics MeasureText(Render2DFont&, std::string_view Text, float Size) override {
+        return {Text.size() * Size / 2, Size, Size * 0.8, Size};
+    }
+    void FillRect(Render2DRect R, Render2DColor) override { ++Fills; LastRect = R; }
+    void SetClipRect(std::optional<Render2DRect> R) override { Clip = R; }
+    void CaptureMouse(bool Enabled) override { Captured = Enabled; }
+    int Fills = 0;
+    Render2DRect LastRect;
+    std::optional<Render2DRect> Clip;
+    bool Captured = false;
     std::optional<Render2DEvent> PollEvent() override {
         if (NextEvent) { auto E = NextEvent; NextEvent.reset(); return E; }
         return Render2DEvent{"PointerDown", 12, 34, {}};
@@ -72,45 +82,6 @@ struct Host final : Render2DHost {
     int Creates = 0;
     Render2DConfig Config;
     std::shared_ptr<Context> Last;
-};
-
-constexpr NativeModuleGuid SnapshotCaptureGuid{{
-    0xba, 0x77, 0x8d, 0x2a, 0xf0, 0x32, 0x4e, 0x54,
-    0x9c, 0x41, 0x66, 0xe1, 0x93, 0x0d, 0x7f, 0xb8}};
-
-class SnapshotCapture final : public NativeObject {
-public:
-    SnapshotCapture(NativeObjectType& Type, Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObject(Type), Machine(Machine), Saved(Saved) {}
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    bool IsCallable() const override { return true; }
-    Value Call(const std::vector<Value>&) override {
-        try { Saved = Machine.CaptureSnapshot(); }
-        catch (const std::exception& Failure) {
-            return Value::FromObject(std::make_shared<ErrorObject>(Failure.what()));
-        }
-        return Value::Bool(false);
-    }
-private:
-    Vm& Machine;
-    std::vector<std::uint8_t>& Saved;
-};
-
-class SnapshotCaptureType final : public NativeObjectType {
-public:
-    SnapshotCaptureType(Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObjectType(Machine, SnapshotCaptureGuid, "Capture"), Saved(Saved) {}
-    std::shared_ptr<SnapshotCapture> Create() {
-        return CreateObject<SnapshotCapture>(GetVm(), Saved);
-    }
-    std::shared_ptr<NativeObject> Deserialize(
-        std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
-        if (Version != 1 || !Payload.empty())
-            throw std::invalid_argument("invalid test snapshot capture");
-        return Create();
-    }
-private:
-    std::vector<std::uint8_t>& Saved;
 };
 
 Value Member(const Value& Object, const char* Name) {
@@ -214,6 +185,21 @@ int main() {
             {ContextValue, Value::String("assets/font.ttf")});
         Check(!TextureValue.IsError() && !FontValue.IsError(),
               "resource objects were not created");
+        auto Measurement = Call(ModuleValue, "MeasureText", {ContextValue, FontValue,
+            Value::String("hello"), Value::Number(24)});
+        Check(Member(Measurement, "Width").AsNumber() == 60 &&
+              std::abs(Member(Measurement, "Baseline").AsNumber() - 19.2) < 1e-9,
+              "text metrics were not forwarded");
+        Check(Call(ModuleValue, "MeasureText", {ContextValue, FontValue,
+            Value::String("hello"), Value::Number(0)}).IsError(), "zero font size accepted");
+        Check(Call(ModuleValue, "SetClipRect", {ContextValue, Value{}}).IsError(),
+              "clip outside frame accepted");
+        Check(Call(ModuleValue, "CaptureMouse", {ContextValue, Value::Bool(true)}).AsBool() &&
+              HostBackend->Last->Captured, "capture not forwarded");
+        Check(Call(ModuleValue, "CaptureMouse", {ContextValue, Value::Bool(false)}).AsBool() &&
+              !HostBackend->Last->Captured, "capture release not forwarded");
+        Check(Call(ModuleValue, "CaptureMouse", {ContextValue, Value::Number(1)}).IsError(),
+              "non-bool capture accepted");
         Check(HostBackend->Last->TextureLoads == 0, "texture was not lazily loaded");
 
         Check(Call(ModuleValue, "DrawTexture", {ContextValue, TextureValue,
@@ -223,6 +209,17 @@ int main() {
         Check(!Call(ModuleValue, "BeginRender", {ContextValue, Value::Number(0), Value::Number(0),
             Value::Number(0), Value::Number(1)}).IsError(), "begin failed");
         Check(Call(ModuleValue, "DrawLine", LineArgs).AsBool(), "DrawLine failed");
+        Check(Call(ModuleValue, "SetClipRect", {ContextValue, Value::Number(-5), Value::Number(7),
+            Value::Number(30), Value::Number(40)}).AsBool() &&
+            HostBackend->Last->Clip->X == -5, "clip not forwarded");
+        Check(Call(ModuleValue, "SetClipRect", {ContextValue, Value::Number(0), Value::Number(0),
+            Value::Number(-1), Value::Number(40)}).IsError(), "negative clip accepted");
+        Check(Call(ModuleValue, "FillRect", {ContextValue, Value::Number(1), Value::Number(2),
+            Value::Number(3), Value::Number(4), Value::Number(1), Value::Number(0),
+            Value::Number(0), Value::Number(1)}).AsBool() && HostBackend->Last->Fills == 1 &&
+            HostBackend->Last->LastRect.Height == 4, "fill not forwarded");
+        Check(Call(ModuleValue, "SetClipRect", {ContextValue, Value{}}).AsBool() &&
+            !HostBackend->Last->Clip, "clip reset failed");
         Check(HostBackend->Last->Lines == 1 && HostBackend->Last->LastLine ==
               std::array<float,5>{1,2,31,42,3.5f} && HostBackend->Last->LineColor.Alpha == 0.5f,
               "line geometry/color not passed to backend");
@@ -259,76 +256,15 @@ int main() {
               Event.AsScriptObject()->GetRaw(Value::String("Type"))->AsString() == "PointerDown" &&
               Event.AsScriptObject()->GetRaw(Value::String("X"))->AsNumber() == 12,
               "event was not converted to a script object");
+        Render2DEvent RightClick{"PointerDown", 1, 2, {}}; RightClick.Button = 3;
+        HostBackend->Last->NextEvent = RightClick;
+        Check(Member(Call(ModuleValue, "PollEvent", {ContextValue}), "Button").AsNumber() == 3,
+              "pointer button was lost");
         Check(Call(ModuleValue, "WaitEvent", {ContextValue, Value::Number(1)}).GetType() == ValueType::Null,
               "empty event wait should return null");
         Check(Call(ModuleValue, "Close", {ContextValue}).AsBool() &&
               !Call(ModuleValue, "IsOpen", {ContextValue}).AsBool(), "close failed");
         Check(Call(ModuleValue, "Close", {ContextValue}).AsBool(), "close was not idempotent");
-
-        auto SnapshotProgram = Compile(
-            "var render = import(\"render2d\"); var context = null; "
-            "var texture = null; var font = null; "
-            "def main() { var config = object(); config.Title = \"Snapshot\"; "
-            "config.WindowWidth = 640; config.WindowHeight = 360; "
-            "context = render.CreateRenderContext(config); "
-            "texture = render.LoadTexture(context, \"assets/picture.png\"); "
-            "font = render.LoadFont(context, \"assets/font.ttf\"); "
-            "render.BeginRender(context, 0, 0, 0, 1); render.EndRender(context); "
-            "if (captureSnapshot()) { render.BeginRender(context, 0, 0, 0, 1); "
-            "render.DrawTexture(context, texture, 0, 0, 10, 10, 1, 1, 1, 1); "
-            "render.DrawText(context, font, \"restored\", 1, 2, 24, 1, 1, 1, 1); "
-            "render.EndRender(context); return render.IsOpen(context); } return false; }");
-        std::vector<std::uint8_t> Saved;
-        {
-            Vm Original(SnapshotProgram.Program);
-            auto OriginalHost = std::make_shared<Host>();
-            Render2DLibrary OriginalLibrary(Original, OriginalHost);
-            RegisterModuleImport(Original, "", [&](std::string_view, std::string_view Name) {
-                return Name == "render2d" ? OriginalLibrary.GetModule() : Value{};
-            });
-            auto& Captures = Original.CreateNativeObjectType<SnapshotCaptureType>(Saved);
-            Original.RegisterNativeFunction("captureSnapshot", Captures.Create());
-            Check(!SnapshotProgram.Initialize(Original).IsError(),
-                  "render2d snapshot initializer failed");
-            Check(!Original.Run(SnapshotProgram.Functions.at("main")).AsBool() && !Saved.empty(),
-                  "render2d snapshot save path failed");
-            Check(OriginalHost->Creates == 1, "original context was not created once");
-        }
-        {
-            Vm Restored(SnapshotProgram.Program);
-            auto RestoredHost = std::make_shared<Host>();
-            Render2DLibrary RestoredLibrary(Restored, RestoredHost);
-            RegisterModuleImport(Restored, "", [&](std::string_view, std::string_view Name) {
-                return Name == "render2d" ? RestoredLibrary.GetModule() : Value{};
-            });
-            Restored.CreateNativeObjectType<SnapshotCaptureType>(Saved);
-            auto Result = Restored.ResumeSnapshot(Saved);
-            Check(Result.GetType() == ValueType::Bool && Result.AsBool(),
-                  "render2d snapshot did not resume after capture");
-            Check(RestoredHost->Creates == 1 && RestoredHost->Config.Title == "Snapshot",
-                  "restored context was not recreated from its config");
-            Check(RestoredHost->Last->TextureLoads == 1 && RestoredHost->Last->FontLoads == 1 &&
-                  RestoredHost->Last->Textures == 1 && RestoredHost->Last->Texts == 1,
-                  "restored resources were not lazily reloaded");
-        }
-
-        auto OpenFrameProgram = Compile(
-            "var render = import(\"render2d\"); "
-            "def main() { var config = object(); var context = render.CreateRenderContext(config); "
-            "render.BeginRender(context, 0, 0, 0, 1); return captureSnapshot(); }");
-        std::vector<std::uint8_t> RejectedSnapshot;
-        Vm OpenFrame(OpenFrameProgram.Program);
-        auto OpenFrameHost = std::make_shared<Host>();
-        Render2DLibrary OpenFrameLibrary(OpenFrame, OpenFrameHost);
-        RegisterModuleImport(OpenFrame, "", [&](std::string_view, std::string_view Name) {
-            return Name == "render2d" ? OpenFrameLibrary.GetModule() : Value{};
-        });
-        auto& OpenFrameCaptures = OpenFrame.CreateNativeObjectType<SnapshotCaptureType>(RejectedSnapshot);
-        OpenFrame.RegisterNativeFunction("captureSnapshot", OpenFrameCaptures.Create());
-        Check(!OpenFrameProgram.Initialize(OpenFrame).IsError(),
-              "open-frame snapshot initializer failed");
-        Check(OpenFrame.Run(OpenFrameProgram.Functions.at("main")).IsError() &&
-              RejectedSnapshot.empty(), "snapshot during an open frame was accepted");
 
         std::cout << "Render2D tests passed\n";
         return 0;

@@ -4,3 +4,7 @@
 /dist/
 /.dist-stage-*/
 /.dist-backup-*/
+/subprojects/packagecache/
+/subprojects/ogg-1.3.6/
+/subprojects/opus-1.4/
+/subprojects/opusfile-0.12/

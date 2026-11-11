@@ -28,6 +28,7 @@ struct ModuleInstance {
     std::shared_ptr<Module> Program;
     std::vector<std::shared_ptr<Object>> Functions;
     std::unordered_map<std::string, Value> Globals;
+    std::unordered_map<std::string, Value>* GlobalScope = nullptr;
     std::unordered_set<std::string> Exports;
     std::shared_ptr<NativeObject> Namespace;
     State Initialization = State::Loaded;
@@ -47,8 +48,8 @@ private:
 
 struct Frame {
     std::shared_ptr<FunctionObject> Function;
-    std::uint64_t InvocationId = 0;
     std::size_t Pc = 0;
+    std::vector<Value> Arguments;
     std::vector<Value> Locals;
     std::vector<Value> Stack;
 };
@@ -58,8 +59,6 @@ struct ExecutionState {
     // Empty frames retain only bounded vector capacity, never script values.
     std::array<Frame, 16> FreeFrames;
     std::size_t FreeFrameCount = 0;
-    bool PendingCallResult = false;
-    std::optional<std::uint64_t> PendingCheckpointRestore;
 };
 
 } // namespace Feather

@@ -32,7 +32,9 @@ Value Error(std::string Message) {
 ModuleLoader::ModuleLoader(Vm& Machine, const std::filesystem::path& EntryPath,
                            ModuleFileKind Kind, NativeModules& Native)
     : Machine(Machine), RootPath(std::filesystem::canonical(EntryPath)),
-      RootDirectory(RootPath.parent_path()), Kind(Kind), Native(Native) {}
+      RootDirectory(RootPath.parent_path()), Kind(Kind), Native(Native) {
+    Machine.SetModulePaths({PathText(Native.DefaultSearchPath())});
+}
 
 void ModuleLoader::InstallRootImport() { InstallModuleImport({}); }
 
@@ -42,21 +44,6 @@ std::vector<std::string> ModuleLoader::LoadedFiles() const {
     for (const auto& [Id, _] : Cache) Result.push_back(Id);
     std::sort(Result.begin(), Result.end());
     return Result;
-}
-
-void ModuleLoader::PrepareSnapshotModules(const std::vector<std::string>& Files) {
-    for (const auto& File : Files) {
-        constexpr std::string_view Prefix = "file:";
-        if (!std::string_view(File).starts_with(Prefix))
-            throw std::invalid_argument("invalid snapshot Feather module ID");
-        auto Relative = Utf8Path(std::string_view(File).substr(Prefix.size()));
-        if (Relative.empty() || Relative.is_absolute())
-            throw std::invalid_argument("invalid snapshot Feather module path");
-        auto Candidate = std::filesystem::canonical(RootDirectory / Relative);
-        if (LogicalId(Candidate) != File)
-            throw std::invalid_argument("snapshot Feather module path mismatch");
-        (void)LoadFile(Candidate, false);
-    }
 }
 
 void ModuleLoader::InstallModuleImport(std::string_view Id) {
@@ -70,9 +57,11 @@ void ModuleLoader::InstallModuleImport(std::string_view Id) {
 Value ModuleLoader::Resolve(std::string_view Caller, std::string_view Specifier) {
     if (!Specifier.starts_with("./") && !Specifier.starts_with("../")) {
         if (!BareName(Specifier)) return Error("invalid module name: " + std::string(Specifier));
-        if (auto Result = Native.Resolve(Machine, Specifier)) return *Result;
+        std::vector<std::filesystem::path> Paths;
+        for (const auto& Directory : Machine.GetModulePaths()) Paths.push_back(Utf8Path(Directory));
+        if (auto Result = Native.Resolve(Machine, Specifier, Paths)) return *Result;
         auto Extension = Kind == ModuleFileKind::Source ? ".fe" : ".fbc";
-        for (const auto& Directory : Native.SearchPaths()) {
+        for (const auto& Directory : Paths) {
             auto Candidate = Directory / (std::string(Specifier) + Extension);
             if (std::filesystem::is_regular_file(Candidate)) return LoadFile(Candidate);
         }

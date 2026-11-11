@@ -6,13 +6,11 @@
 
 namespace Feather {
 
-class SnapshotHost;
 
 struct NativeModuleContext {
     Vm& Machine;
     std::istream* Input = nullptr;
     std::ostream* Output = nullptr;
-    SnapshotHost* Snapshots = nullptr;
 };
 
 struct NativeModuleDescriptor {

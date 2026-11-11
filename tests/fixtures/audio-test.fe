@@ -1,0 +1,44 @@
+var audio = import("audio");
+var delegate = import("delegate");
+var time = import("time");
+var stdio = import("stdio");
+
+def record(self, event, sound) {
+    if (sound != self.Sound) { return byte(-1); }
+    self.Events = self.Events + event;
+}
+
+def exercise(path) {
+    var sound = audio.Open(path);
+    if (get_type(sound) == "Error") { return sound; }
+    var receiver = object();
+    receiver.Sound = sound;
+    receiver.Events = "";
+    sound.onPlay = delegate.Create(record, receiver, "P");
+    sound.OnPaused = delegate.Create(record, receiver, "A");
+    sound.OnStoped = delegate.Create(record, receiver, "S");
+    sound.OnFinished = delegate.Create(record, receiver, "F");
+    if (get_type(sound.OnPlay = 42) != "Error") { return byte(-1); }
+    if (audio.Play(sound) != true) { return byte(-1); }
+    if (audio.Pause(sound) != true) { return byte(-1); }
+    time.Sleep(0.2);
+    if (receiver.Events != "PA") { return byte(-1); }
+    if (audio.Seek(sound, sound.Duration / 2) != true) { return byte(-1); }
+    if (audio.Play(sound) != true) { return byte(-1); }
+    if (audio.Stop(sound) != true) { return byte(-1); }
+    if (get_type(audio.Seek(sound, sound.Duration + 1)) != "Error") { return byte(-1); }
+    if (audio.Play(sound) != true) { return byte(-1); }
+    var result = time.Sleep(0.4);
+    if (get_type(result) == "Error") { return result; }
+    if (receiver.Events != "PAPSPF") { return byte(-1); }
+    if (audio.Close(sound) != true) { return byte(-1); }
+    if (get_type(audio.Play(sound)) != "Error") { return byte(-1); }
+    stdio.Console.PrintLine("PASS " + path);
+    return true;
+}
+
+def main() {
+    var result = exercise("audio-test.wav");
+    if (get_type(result) == "Error") { return result; }
+    return exercise("audio-test.opus");
+}

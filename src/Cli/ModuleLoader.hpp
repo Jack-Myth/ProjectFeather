@@ -16,7 +16,6 @@ public:
                  ModuleFileKind Kind, NativeModules& Native);
     void InstallRootImport();
     std::vector<std::string> LoadedFiles() const;
-    void PrepareSnapshotModules(const std::vector<std::string>& Files);
 
 private:
     Value Resolve(std::string_view Caller, std::string_view Specifier);

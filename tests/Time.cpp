@@ -25,55 +25,12 @@ public:
     double Wall = 1000;
 };
 
-constexpr NativeModuleGuid SnapshotCaptureGuid{{
-    0x38, 0x85, 0x72, 0x1d, 0xce, 0xe5, 0x4b, 0x74,
-    0x9e, 0x0f, 0xa1, 0x8a, 0xc9, 0x67, 0x44, 0x22}};
-
-class SnapshotCapture final : public NativeObject {
-public:
-    SnapshotCapture(NativeObjectType& Type, Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObject(Type), Machine(Machine), Saved(Saved) {}
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    bool IsCallable() const override { return true; }
-    Value Call(const std::vector<Value>&) override {
-        try { Saved = Machine.CaptureSnapshot(); }
-        catch (const std::exception& Failure) {
-            return Value::FromObject(std::make_shared<ErrorObject>(Failure.what()));
-        }
-        return Value::Bool(false);
-    }
-private:
-    Vm& Machine;
-    std::vector<std::uint8_t>& Saved;
-};
-
-class SnapshotCaptureType final : public NativeObjectType {
-public:
-    SnapshotCaptureType(Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObjectType(Machine, SnapshotCaptureGuid, "Capture"), Saved(Saved) {}
-    std::shared_ptr<SnapshotCapture> Create() {
-        return CreateObject<SnapshotCapture>(GetVm(), Saved);
-    }
-    std::shared_ptr<NativeObject> Deserialize(
-        std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
-        if (Version != 1 || !Payload.empty())
-            throw std::invalid_argument("invalid test snapshot capture");
-        return Create();
-    }
-private:
-    std::vector<std::uint8_t>& Saved;
-};
-
-Value Member(const Value& Object, const char* Name) {
-    return dynamic_cast<NativeObject*>(Object.AsObject())->GetMember(Value::String(Name));
-}
-
 Value Call(const Value& Module, const char* Name, std::vector<Value> Arguments = {}) {
-    auto Function = Member(Module, Name);
-    Check(!Function.IsError(), "time function missing");
+    auto Native = dynamic_cast<NativeObject*>(Module.AsObject());
+    auto Function = Native->GetMember(Value::String(Name));
     return dynamic_cast<NativeObject*>(Function.AsObject())->Call(Arguments);
 }
-}
+} // namespace
 
 int main() {
     try {
@@ -98,38 +55,6 @@ int main() {
         Check(Call(Time, "Sleep", {Value::Number(-1)}).IsError(),
               "negative sleep was accepted");
         Check(Call(Time, "Tick", {Value{}}).IsError(), "invalid Clock was accepted");
-
-        auto SnapshotProgram = Compile(
-            "var time = import(\"time\"); var clock = null; var before = 0; "
-            "def main() { clock = time.CreateClock(); time.Sleep(2); "
-            "before = time.Tick(clock); if (captureSnapshot()) { "
-            "time.Sleep(4); return before + time.Tick(clock); } return before; }");
-        std::vector<std::uint8_t> Saved;
-        {
-            Vm Original(SnapshotProgram.Program);
-            auto OriginalHost = std::make_shared<Host>();
-            TimeLibrary OriginalTime(Original, OriginalHost);
-            RegisterModuleImport(Original, "", [&](std::string_view, std::string_view Name) {
-                return Name == "time" ? OriginalTime.GetModule() : Value{};
-            });
-            auto& Captures = Original.CreateNativeObjectType<SnapshotCaptureType>(Saved);
-            Original.RegisterNativeFunction("captureSnapshot", Captures.Create());
-            Check(!SnapshotProgram.Initialize(Original).IsError(), "time snapshot initializer failed");
-            Check(Original.Run(SnapshotProgram.Functions.at("main")).AsNumber() == 2 && !Saved.empty(),
-                  "time snapshot save path failed");
-        }
-        {
-            Vm Restored(SnapshotProgram.Program);
-            auto RestoredHost = std::make_shared<Host>();
-            RestoredHost->Now = 5000;
-            TimeLibrary RestoredTime(Restored, RestoredHost);
-            RegisterModuleImport(Restored, "", [&](std::string_view, std::string_view Name) {
-                return Name == "time" ? RestoredTime.GetModule() : Value{};
-            });
-            Restored.CreateNativeObjectType<SnapshotCaptureType>(Saved);
-            Check(Restored.ResumeSnapshot(Saved).AsNumber() == 6,
-                  "restored Clock counted offline time or lost its new baseline");
-        }
 
         std::cout << "Time tests passed\n";
         return 0;

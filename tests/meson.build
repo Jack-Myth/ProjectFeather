@@ -8,13 +8,8 @@ EmbedTests = executable('embed-tests', 'Embed.cpp', dependencies : FeatherDepend
 test('embed', EmbedTests)
 M4Tests = executable('m4-tests', 'M4.cpp', dependencies : FeatherDependency)
 test('m4', M4Tests)
-M5Tests = executable('m5-tests', 'M5.cpp', dependencies : FeatherDependency)
-test('m5', M5Tests)
 QuickTests = executable('quick-tests', 'Quick.cpp', dependencies : FeatherDependency)
 test('quick', QuickTests)
-CheckpointTests = executable('checkpoint-tests', 'Checkpoint.cpp',
-  '../stdlib/Checkpoint.cpp', dependencies : FeatherDependency)
-test('checkpoint', CheckpointTests)
 
 test('cli-run', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-ok.fe'])
@@ -91,9 +86,6 @@ test('time-core', TimeTests)
 test('cli-time-import', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-time-import.fe'],
   depends : TimeNativeModule)
-test('cli-checkpoint-import', FeatherCli,
-  args : ['run', meson.current_source_dir() / 'fixtures/cli-checkpoint.fe'],
-  depends : CheckpointNativeModule)
 if get_option('render2d').enabled()
   test('cli-render2d-import', FeatherCli,
     args : ['run', meson.current_source_dir() / 'fixtures/cli-render2d-import.fe'],
@@ -109,20 +101,6 @@ StdioBytecode = custom_target('stdio-bytecode',
 test('cli-stdio-bytecode', FeatherVmCli,
   args : [StdioBytecode], depends : StdioNativeModule)
 
-test('cli-snapshot-source', FeatherCli,
-  args : ['run', meson.current_source_dir() / 'fixtures/cli-snapshot-source.fe'],
-  depends : [SnapshotNativeModule, StdioNativeModule])
-SnapshotBytecode = custom_target('snapshot-bytecode',
-  input : 'fixtures/cli-snapshot-bytecode.fe', output : 'cli-snapshot-bytecode.fbc',
-  command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
-  build_by_default : true)
-test('cli-snapshot-bytecode', FeatherVmCli,
-  args : [SnapshotBytecode],
-  depends : [SnapshotNativeModule, StdioNativeModule, SnapshotBytecode, HelperBytecode])
-test('cli-snapshot-missing', FeatherCli,
-  args : ['run', meson.current_source_dir() / 'fixtures/cli-snapshot-missing.fe'],
-  depends : SnapshotNativeModule,
-  expected_fail : true)
 ModuleLoaderTests = executable('module-loader-tests', 'ModuleLoader.cpp',
   '../src/Cli/File.cpp', '../src/Cli/ModuleLoader.cpp', '../src/Cli/NativeModules.cpp',
   cpp_args : '-DFEATHER_CLI_SOURCE_LOADER=1',
@@ -161,7 +139,7 @@ MultimoduleTests = executable('multimodule-tests', 'Multimodule.cpp', dependenci
 test('multimodule', MultimoduleTests)
 
 ByteTests = executable('byte-tests', 'Byte.cpp', '../stdlib/StdIo.cpp',
-  '../stdlib/Checkpoint.cpp', dependencies : FeatherDependency)
+  dependencies : FeatherDependency)
 test('byte', ByteTests, args : [meson.project_source_root() / '.work/byte-test.bin'])
 
 IdleTests = executable('idle-tests', 'Idle.cpp', dependencies : FeatherDependency)
@@ -199,3 +177,32 @@ endif
 
 GetTypeTests = executable('get-type-tests', 'GetType.cpp', dependencies : FeatherDependency)
 test('get-type', GetTypeTests)
+
+CompiledBlockTests = executable('compiled-block-tests', 'CompiledBlock.cpp', dependencies : FeatherDependency)
+test('compiled-block', CompiledBlockTests)
+test('cli-compiled-block', FeatherCli, args : ['run', meson.current_source_dir() / 'fixtures/compiled-block.fe'], depends : StdioNativeModule)
+CompiledBlockBytecode = custom_target('compiled-block-bytecode', input : 'fixtures/compiled-block.fe', output : 'compiled-block.fbc', command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'], build_by_default : true)
+test('cli-compiled-block-bytecode', FeatherVmCli, args : [CompiledBlockBytecode], depends : [StdioNativeModule, CompiledBlockBytecode])
+
+DelegateTestSource = files('fixtures/delegate.fe')
+test('cli-delegate', FeatherCli, args : ['run', DelegateTestSource])
+DelegateTestBytecode = custom_target('delegate-test-bytecode',
+  input : DelegateTestSource, output : 'delegate-test.fbc',
+  command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'], build_by_default : true)
+test('cli-delegate-bytecode', FeatherVmCli, args : [DelegateTestBytecode])
+
+if AudioEnabled
+  configure_file(input : 'fixtures/audio-test.wav', output : 'audio-test.wav', copy : true)
+  configure_file(input : 'fixtures/audio-test.opus', output : 'audio-test.opus', copy : true)
+  AudioTestSource = files('fixtures/audio-test.fe')
+  AudioTestBytecode = custom_target('audio-test-bytecode',
+    input : AudioTestSource, output : 'audio-test.fbc',
+    command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'], build_by_default : true)
+  AudioTestEnv = {'SDL_AUDIO_DRIVER': 'dummy'}
+  test('cli-audio', FeatherCli, args : ['run', AudioTestSource],
+    env : AudioTestEnv, workdir : meson.current_build_dir(), depends : [AudioNativeModule, StdioNativeModule, TimeNativeModule])
+  test('cli-audio-bytecode', FeatherVmCli, args : [AudioTestBytecode],
+    env : AudioTestEnv, workdir : meson.current_build_dir(), depends : [AudioNativeModule, StdioNativeModule, TimeNativeModule])
+endif
+
+test('cli-removed-modules', FeatherCli, args : ['run', meson.current_source_dir() / 'fixtures/removed-modules.fe'])

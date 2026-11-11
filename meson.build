@@ -9,7 +9,7 @@ project(
   ],
 )
 
-if not get_option('render2d').disabled()
+if not get_option('render2d').disabled() or get_option('audio')
   add_languages('c', native : false)
 endif
 
@@ -28,7 +28,6 @@ FeatherSources = files(
   'src/Object/Object.cpp',
   'src/Compiler/Compiler.cpp',
   'src/Embed/Import.cpp',
-  'src/Snapshot/Snapshot.cpp',
 )
 
 if get_option('debugger')
@@ -68,9 +67,9 @@ if get_option('debugger') and host_machine.system() == 'windows'
 endif
 
 FeatherCliSources = files('src/Cli/Main.cpp', 'src/Cli/File.cpp', 'src/Cli/Runner.cpp',
-  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp', 'src/Cli/SnapshotHost.cpp')
+  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp')
 FeatherVmCliSources = files('src/Cli/VmMain.cpp', 'src/Cli/File.cpp', 'src/Cli/Runner.cpp',
-  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp', 'src/Cli/SnapshotHost.cpp')
+  'src/Cli/ModuleLoader.cpp', 'src/Cli/NativeModules.cpp')
 FeatherCliArguments = ['-DFEATHER_CLI_SOURCE_LOADER=1']
 if get_option('debugger')
   FeatherCliSources += files('src/Cli/Socket.cpp', 'src/Cli/DebugHost.cpp')

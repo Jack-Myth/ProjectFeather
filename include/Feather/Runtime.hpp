@@ -127,15 +127,9 @@ class FEATHER_API NativeObjectType : public std::enable_shared_from_this<NativeO
 public:
     virtual ~NativeObjectType() = default;
     const NativeTypeId& GetId() const noexcept { return Id; }
-    std::uint32_t GetSnapshotVersion() const noexcept { return SnapshotVersion; }
     Vm& GetVm() const noexcept { return Machine; }
-    virtual std::vector<std::uint8_t> Serialize(const NativeObject& Input) const;
-    virtual std::shared_ptr<NativeObject> Deserialize(
-        std::uint32_t StoredVersion, std::span<const std::uint8_t> Payload) = 0;
-    virtual void FinalizeRestore(NativeObject&) {}
 protected:
-    NativeObjectType(Vm& Machine, NativeModuleGuid Module, std::string Name,
-                     std::uint32_t SnapshotVersion = 1);
+    NativeObjectType(Vm& Machine, NativeModuleGuid Module, std::string Name);
     template<class ObjectType, class... Arguments>
     std::shared_ptr<ObjectType> CreateObject(Arguments&&... Input) {
         static_assert(std::is_base_of_v<NativeObject, ObjectType>);
@@ -152,14 +146,12 @@ private:
     friend class Vm;
     Vm& Machine;
     NativeTypeId Id;
-    std::uint32_t SnapshotVersion;
 };
 
 class FEATHER_API NativeSingletonType final : public NativeObjectType {
 public:
-    NativeSingletonType(Vm& Machine, NativeModuleGuid Module, std::string Name,
-                        std::uint32_t SnapshotVersion = 1)
-        : NativeObjectType(Machine, Module, std::move(Name), SnapshotVersion) {}
+    NativeSingletonType(Vm& Machine, NativeModuleGuid Module, std::string Name)
+        : NativeObjectType(Machine, Module, std::move(Name)) {}
     template<class Object, class... Arguments>
     std::shared_ptr<Object> Create(Arguments&&... Input) {
         if (!Canonical.expired())
@@ -168,8 +160,6 @@ public:
         Canonical = Result;
         return Result;
     }
-    std::shared_ptr<NativeObject> Deserialize(
-        std::uint32_t StoredVersion, std::span<const std::uint8_t> Payload) override;
 private:
     std::weak_ptr<NativeObject> Canonical;
 };
@@ -179,6 +169,13 @@ public:
     ObjectType GetObjectType() const override { return ObjectType::Script; }
     std::optional<Value> GetRaw(const Value& Key) const;
     Value SetRaw(const Value& Key, const Value& Input);
+    void AppendArray(const Value& Input);
+    bool RemoveArrayAt(std::size_t Index);
+    std::size_t GetArrayLength() const;
+    bool IsArray() const noexcept { return static_cast<bool>(Elements); }
+    std::span<const Value> GetArrayElements() const {
+        return Elements ? std::span<const Value>(*Elements) : std::span<const Value>{};
+    }
     ScriptObject* GetMetaObject() const { return MetaObject; }
 private:
     friend class Vm;
@@ -192,10 +189,14 @@ private:
     };
     struct KeyHash { std::size_t operator()(const Key& Input) const; };
     static std::optional<Key> ConvertKey(const Value& Input);
+    class ArrayMethod;
+    std::optional<std::size_t> GetArrayIndex(const Value& Key) const;
+    std::optional<Value> GetArrayMethod(std::string_view Name) const;
     Vm* Owner;
     ScriptObject* MetaObject;
     bool Marked = false;
     std::unordered_map<Key, Value, KeyHash> Members;
+    std::unique_ptr<std::vector<Value>> Elements;
 };
 
 class FEATHER_API RootHandle final {
@@ -339,7 +340,7 @@ struct FunctionPrototype {
 };
 
 struct FEATHER_API Constant {
-    enum class Kind { Number, String, Function, Byte } Type;
+    enum class Kind { Number, String, Function, Byte, Buffer } Type;
     double Numeric = 0;
     std::uint8_t ByteValue = 0;
     std::string Text;
@@ -347,6 +348,7 @@ struct FEATHER_API Constant {
     static Constant Number(double Input);
     static Constant Byte(double Input);
     static Constant String(std::string Input);
+    static Constant Buffer(std::string Input);
     static Constant FunctionRef(std::shared_ptr<FunctionPrototype> Input);
 };
 
@@ -356,6 +358,7 @@ public:
     std::uint32_t AddNumber(double Input);
     std::uint32_t AddByte(double Input);
     std::uint32_t AddString(std::string Input);
+    std::uint32_t AddBuffer(std::string Input);
     std::uint32_t AddFunction(std::shared_ptr<FunctionPrototype> Input);
     void Validate() const;
 private:
@@ -405,6 +408,10 @@ public:
     // Calls a value using the same callable/metacall rules and current instruction budget.
     bool IsCallable(const Value& Target) const;
     Value Call(Value Target, std::vector<Value> Arguments = {});
+    Value EvalBytecode(const Value& Code, Value Context = {});
+    Value GetVmModule() const { return BuiltinVmModule; }
+    const std::vector<std::string>& GetModulePaths() const;
+    void SetModulePaths(std::vector<std::string> Paths);
     // Hook returns bool (work done) or Error. One invocation must do bounded, nonblocking work.
     std::shared_ptr<IdleRegistration> RegisterIdleHook(std::function<Value(double)> Hook);
     Value Idle(double Seconds,
@@ -422,15 +429,6 @@ public:
     void SetModuleGlobal(std::string_view Id, std::string Name, Value Input);
     Value GetModuleNamespace(std::string_view Id) const;
     std::string GetActiveModuleId() const;
-    std::vector<std::uint8_t> CaptureSnapshot(
-        std::size_t MaxBytes = 64 * 1024 * 1024) const;
-    Value ResumeSnapshot(const std::vector<std::uint8_t>& Bytes,
-                         std::size_t MaxBytes = 64 * 1024 * 1024);
-    // In-memory control-flow checkpoints. They belong to the current outer Run
-    // and intentionally do not restore locals, globals, heap objects, or budgets.
-    std::uint64_t CaptureCheckpoint();
-    void RequestCheckpointRestore(std::uint64_t Id);
-    bool UnloadCheckpoint(std::uint64_t Id);
     template<class Type, class... Arguments>
     Type& CreateNativeObjectType(Arguments&&... Input) {
         static_assert(std::is_base_of_v<NativeObjectType, Type>);
@@ -442,6 +440,7 @@ public:
     bool IsBuiltFrom(const std::shared_ptr<Module>& Source) const { return SourceProgram == Source; }
     ScriptObject* GetRootMetaObject() const { return RootMetaObject; }
     ScriptObject* CreateScriptObject();
+    ScriptObject* CreateArray();
     ScriptObject* CreateMetaObject();
     void SetMetaObject(ScriptObject* Target, ScriptObject* MetaObject);
     Value GetGlobal(const std::string& Name) const;
@@ -480,7 +479,6 @@ private:
                                   std::uint32_t FunctionConstant,
                                   const std::vector<Value>& Arguments);
     Value Execute(ExecutionState& Execution);
-    void ApplyCheckpointRestore(ExecutionState& Execution, std::uint64_t Id);
     void ReachDebugSafePoint(ExecutionState& Execution);
     void ReachDebugError(ExecutionState& Execution, const Value& Error,
                          DebugErrorOrigin Origin, std::size_t InstructionPc);
@@ -494,6 +492,8 @@ private:
     std::vector<std::unique_ptr<ScriptObject>> ScriptHeap;
     std::unordered_set<ScriptObject*> ScriptObjects;
     Value BuiltinGetType;
+    Value BuiltinArray;
+    Value BuiltinVmModule;
     std::unordered_map<std::string, Value> Globals;
     std::unordered_map<std::string, std::shared_ptr<ModuleInstance>> LoadedModules;
     std::unordered_map<const Module*, std::shared_ptr<ModuleInstance>> ModuleByProgram;
@@ -511,15 +511,10 @@ private:
     std::shared_ptr<int> Lifetime = std::make_shared<int>(0);
     std::uint64_t NextRootToken = 1;
     std::uint32_t ActiveRuns = 0;
+    std::uint32_t RootedEvalDepth = 0;
     std::uint32_t ActiveNativeCalls = 0;
     std::uint32_t DebugCallbackSuppression = 0;
     ExecutionState* ActiveExecution = nullptr;
-    bool HasRun = false;
-    mutable bool SnapshotBusy = false;
-    struct CheckpointState;
-    std::unordered_map<std::uint64_t, std::unique_ptr<CheckpointState>> Checkpoints;
-    std::uint64_t NextCheckpointId = 1;
-    std::uint64_t NextFrameInvocationId = 1;
     std::size_t ScriptObjectLimit;
     std::size_t NextCollectionObjectCount = 0;
     std::size_t CollectionCount = 0;

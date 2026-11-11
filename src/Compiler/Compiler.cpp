@@ -18,7 +18,7 @@ enum class TokenKind {
     True, False, Byte, Object, LeftParen, RightParen, LeftBrace, RightBrace,
     LeftBracket, RightBracket, Comma, Dot, Semicolon, Assign, Equal, NotEqual,
     Less, Plus, Minus, Star, Slash, QuickHash, QuickDollar,
-    QuickAmpersand, QuickRightAngle
+    QuickAmpersand, QuickRightAngle, At
 };
 struct Token {
     TokenKind Kind;
@@ -165,6 +165,7 @@ public:
             } else {
                 Advance();
                 switch (C) {
+                case '@': Start.Kind = TokenKind::At; break;
                 case '(': Start.Kind = TokenKind::LeftParen; break;
                 case ')': Start.Kind = TokenKind::RightParen; break;
                 case '{': Start.Kind = TokenKind::LeftBrace; break;
@@ -206,7 +207,7 @@ private:
     std::size_t Position = 0, Line = 1, Column = 1;
 };
 
-enum class NodeKind { Literal, Name, Byte, Object, Member, Call, Unary, Binary, Assign,
+enum class NodeKind { CompiledBlock, Literal, Name, Byte, Object, Member, Call, Unary, Binary, Assign,
     Var, Return, If, While, Break, Continue, Block, Expression };
 struct Node {
     NodeKind Kind;
@@ -457,6 +458,15 @@ private:
             --Position;
             auto Result = Make(NodeKind::Literal, At); Result->Literal = ParseLiteral(); return Result;
         }
+        if (Match(TokenKind::At)) {
+            DepthGuard Guard(Depth, At);
+            auto SavedLoopDepth = LoopDepth;
+            LoopDepth = 0;
+            auto Result = Make(NodeKind::CompiledBlock, At);
+            Result->Children.push_back(ParseBlock());
+            LoopDepth = SavedLoopDepth;
+            return Result;
+        }
         if (Match(TokenKind::Name)) {
             auto Result = Make(NodeKind::Name, At); Result->Name = At.Text; return Result;
         }
@@ -660,6 +670,36 @@ private:
         DepthGuard Guard(Depth, Expression.At);
         SourceGuard Source(CurrentAt, Expression.At);
         switch (Expression.Kind) {
+        case NodeKind::CompiledBlock: {
+            CompiledProgram Block;
+            Block.Program = std::make_shared<Module>();
+            auto Prototype = std::make_shared<FunctionPrototype>();
+            Prototype->ParameterCount = 1;
+            Prototype->Defaults.push_back(std::nullopt);
+            auto Entry = Block.Program->AddFunction(Prototype);
+            Block.Functions.emplace("__compiled_block", Entry);
+            auto Init = std::make_shared<FunctionPrototype>();
+            Init->Code = {static_cast<std::uint8_t>(Op::Null), static_cast<std::uint8_t>(Op::Return)};
+            Block.Initializer = Block.Program->AddFunction(Init);
+            FunctionAst Function;
+            Function.At = Expression.At;
+            Function.Name = "<compiled-block>";
+            Function.Parameters.push_back("context");
+            Function.Body = nullptr;
+            Emitter Output(*Block.Program, Expression.At);
+            Output.AddParameters(Function);
+            Output.EmitBlock(*Expression.Children[0], false);
+            Output.Emit(Op::Null); Output.Emit(Op::Return);
+            Prototype->DebugName = Function.Name;
+            Prototype->LocalCount = Output.GetLocalCount();
+            Prototype->LocalVariables = Output.FinishLocalVariables();
+            Prototype->Code = Output.Finish();
+            Prototype->Locations = Output.FinishLocations();
+            auto Bytes = SerializeProgram(Block);
+            if (Program.Constants.size() >= 65'536) Fail(Expression.At, "too many constants");
+            EmitU32(Op::Const, Program.AddBuffer(std::string(Bytes.begin(), Bytes.end())));
+            break;
+        }
         case NodeKind::Literal:
             switch (Expression.Literal.GetType()) {
             case ValueType::Null: Emit(Op::Null); break;
@@ -759,7 +799,37 @@ CompiledProgram Compile(std::string_view Source) {
         if (Token.Kind == TokenKind::QuickHash || Token.Kind == TokenKind::QuickDollar ||
             Token.Kind == TokenKind::QuickAmpersand || Token.Kind == TokenKind::QuickRightAngle)
             UsesQuickOperators = true;
+    // A script may provide its own shortcut handlers. Only unresolved handlers
+    // require host injection; preserve the existing CLI rejection otherwise.
+    std::vector<std::string> QuickHandlers;
+    for (std::size_t I = 0; I < Tokens.size(); ++I) {
+        const auto& Token = Tokens[I];
+        // Quoted statements are data until eval_bytecode runs them. They must
+        // not make the enclosing initializer require a shortcut handler.
+        if (Token.Kind == TokenKind::At) {
+            std::size_t Braces = 0;
+            while (++I < Tokens.size()) {
+                if (Tokens[I].Kind == TokenKind::LeftBrace) ++Braces;
+                if (Tokens[I].Kind == TokenKind::RightBrace && Braces != 0 && --Braces == 0) break;
+            }
+            continue;
+        }
+        switch (Token.Kind) {
+        case TokenKind::QuickHash: QuickHandlers.emplace_back("__QuickOperatorHash"); break;
+        case TokenKind::QuickDollar: QuickHandlers.emplace_back("__QuickOperatorDollar"); break;
+        case TokenKind::QuickAmpersand: QuickHandlers.emplace_back("__QuickOperatorAmpersand"); break;
+        case TokenKind::QuickRightAngle: QuickHandlers.emplace_back("__QuickOperatorRightAngleBucket"); break;
+        default: break;
+        }
+    }
     auto Ast = Parser(std::move(Tokens)).Parse();
+    UsesQuickOperators = false;
+    for (const auto& Handler : QuickHandlers) {
+        bool Defined = false;
+        for (const auto& Function : Ast.Functions)
+            if (Function.Name == Handler) Defined = true;
+        if (!Defined) UsesQuickOperators = true;
+    }
     CompiledProgram Result;
     Result.UsesQuickOperators = UsesQuickOperators;
     Result.Exports = std::move(Ast.Exports);

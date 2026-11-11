@@ -1,3 +1,5 @@
+#include <Feather/ByteBuffer.hpp>
+#include <Feather/Compiler.hpp>
 #include <Feather/Runtime.hpp>
 #include "Internal.hpp"
 
@@ -21,25 +23,25 @@ void RecycleTopFrame(ExecutionState& Execution) {
     auto& Current = Execution.Frames.back();
     constexpr std::size_t MaximumRetainedSlots = 4096;
     if (Execution.FreeFrameCount < Execution.FreeFrames.size() &&
-        Current.Locals.capacity() <= MaximumRetainedSlots &&
-        Current.Stack.capacity() <= MaximumRetainedSlots - Current.Locals.capacity()) {
+        Current.Arguments.capacity() + Current.Locals.capacity() +
+            Current.Stack.capacity() <= MaximumRetainedSlots) {
         // Match Frame destruction order, releasing every value before reuse.
         Current.Stack.clear();
         Current.Locals.clear();
+        Current.Arguments.clear();
         Current.Function.reset();
         Current.Pc = 0;
-        Current.InvocationId = 0;
         Execution.FreeFrames[Execution.FreeFrameCount++] = std::move(Current);
     }
     Execution.Frames.pop_back();
 }
 
 Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Value>& Args,
-                std::uint64_t InvocationId, Frame Next = {}) {
+                Frame Next = {}) {
     const auto& Body = Function->GetBody();
     Next.Function = std::move(Function);
-    Next.InvocationId = InvocationId;
     Next.Pc = 0;
+    Next.Arguments = Args;
     Next.Locals.resize(Body.LocalCount);
     for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
         if (I < Args.size()) Next.Locals[I] = Args[I];
@@ -49,18 +51,18 @@ Frame MakeFrame(std::shared_ptr<FunctionObject> Function, const std::vector<Valu
 }
 Frame MakeFrameFromStack(std::shared_ptr<FunctionObject> Function,
                          std::vector<Value>& Stack, std::size_t Count,
-                         std::uint64_t InvocationId, Frame Next = {}) {
+                         Frame Next = {}) {
     const auto& Body = Function->GetBody();
     const auto Start = Stack.size() - Count;
     Next.Function = std::move(Function);
-    Next.InvocationId = InvocationId;
     Next.Pc = 0;
+    Next.Arguments.assign(Stack.begin() + Start, Stack.end());
     Next.Locals.resize(Body.LocalCount);
     for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
         if (I < Count) Next.Locals[I] = std::move(Stack[Start + I]);
         else if (Body.Defaults[I]) Next.Locals[I] = *Body.Defaults[I];
     }
-    // Drop the target and all arguments, including unused extra arguments.
+    // The callee frame now owns the arguments.
     Stack.resize(Start - 1);
     return Next;
 }
@@ -91,9 +93,35 @@ struct ActiveRunGuard {
     std::function<void()> Finish;
 };
 Value Error(std::string Message) { return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message))); }
-// Core builtins have stable identities for ordinary native snapshot restoration.
+// Core builtin type identities belong to this VM.
 constexpr NativeModuleGuid CoreBuiltinsGuid{{0x46,0x65,0x61,0x74,0x68,0x65,0x72,0x00,
                                              0xb1,0x17,0x49,0x81,0x96,0x27,0xa5,0x01}};
+class EvalBytecodeFunction final : public NativeObject {
+public:
+    EvalBytecodeFunction(NativeObjectType& Type, Vm& Machine) : NativeObject(Type), Machine(Machine) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        if (Arguments.empty() || Arguments.size() > 2)
+            return Error("eval_bytecode expects ByteBuffer and optional context");
+        return Machine.EvalBytecode(Arguments[0], Arguments.size() == 2 ? Arguments[1] : Value{});
+    }
+private:
+    Vm& Machine;
+};
+class ArrayFunction final : public NativeObject {
+public:
+    ArrayFunction(NativeObjectType& Type, Vm& Machine) : NativeObject(Type), Machine(Machine) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        if (!Arguments.empty()) return Error("array expects no arguments");
+        return Value::FromScript(Machine.CreateArray());
+    }
+private:
+    Vm& Machine;
+};
+
 class GetTypeFunction final : public NativeObject {
 public:
     explicit GetTypeFunction(NativeObjectType& Type) : NativeObject(Type) {}
@@ -110,7 +138,8 @@ public:
         case ValueType::String: return Value::String("string");
         case ValueType::Object:
             switch (Input.GetObjectType()) {
-            case ObjectType::Script: return Value::String("ScriptObject");
+            case ObjectType::Script:
+                return Value::String(Input.AsScriptObject()->IsArray() ? "Array" : "ScriptObject");
             case ObjectType::Function: return Value::String("Function");
             case ObjectType::Error: return Value::String("Error");
             case ObjectType::Host: return Value::String("NativeObject");
@@ -119,6 +148,144 @@ public:
         return Error("unrecognized value type");
     }
 };
+class ModulePathsFunction final : public NativeObject {
+public:
+    ModulePathsFunction(NativeObjectType& Type, Vm& Machine, bool Write)
+        : NativeObject(Type), Machine(Machine), Write(Write) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        if (!Write) {
+            if (!Arguments.empty()) return Error("get_module_paths expects no arguments");
+            const auto& Paths = Machine.GetModulePaths();
+            auto* List = Machine.CreateArray();
+            for (const auto& Path : Paths) List->AppendArray(Value::String(Path));
+            return Value::FromScript(List);
+        }
+        if (Arguments.size() != 1 || !Arguments[0].IsScriptObject())
+            return Error("set_module_paths expects a list of strings");
+        const auto* List = Arguments[0].AsScriptObject();
+        if (!List->IsArray()) return Error("set_module_paths expects an array of strings");
+        const auto Elements = List->GetArrayElements();
+        if (Elements.size() > 65536) return Error("too many module paths");
+        std::vector<std::string> Paths;
+        Paths.reserve(Elements.size());
+        for (const auto& Entry : Elements) {
+            if (Entry.GetType() != ValueType::String)
+                return Error("module path array entries must be strings");
+            Paths.push_back(Entry.AsString());
+        }
+        try { Machine.SetModulePaths(std::move(Paths)); }
+        catch (const std::invalid_argument& Failure) { return Error(Failure.what()); }
+        return Value::Bool(true);
+    }
+private:
+    Vm& Machine;
+    bool Write;
+};
+
+class FunctionArgumentsFunction final : public NativeObject {
+public:
+    FunctionArgumentsFunction(NativeObjectType& Type, ExecutionState* const& Execution, bool Count)
+        : NativeObject(Type), Execution(Execution), Count(Count) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        if (!Execution || Execution->Frames.empty())
+            return Error("no active Feather function");
+        const auto& Values = Execution->Frames.back().Arguments;
+        if (Count) {
+            if (!Arguments.empty()) return Error("get_func_argc expects no arguments");
+            return Value::Number(static_cast<double>(Values.size()));
+        }
+        if (Arguments.size() != 1 || !Arguments[0].IsNumeric())
+            return Error("get_func_argv expects one numeric index");
+        const auto Index = Arguments[0].AsNumber();
+        if (!std::isfinite(Index) || Index < 0 || std::trunc(Index) != Index ||
+            Index >= static_cast<double>(Values.size()))
+            return Error("function argument index out of range");
+        return Values[static_cast<std::size_t>(Index)];
+    }
+private:
+    ExecutionState* const& Execution;
+    bool Count;
+};
+
+class InvokeFunction final : public NativeObject {
+public:
+    InvokeFunction(NativeObjectType& Type, Vm& Machine) : NativeObject(Type), Machine(Machine) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        Value Target;
+        std::vector<Value> Expanded;
+        if (auto Failure = Expand(Arguments, Target, Expanded); Failure.IsError()) return Failure;
+        return Machine.Call(std::move(Target), std::move(Expanded));
+    }
+
+    static Value Expand(const std::vector<Value>& Arguments, Value& Target, std::vector<Value>& Expanded) {
+        if (Arguments.size() != 2 || !Arguments[1].IsScriptObject() ||
+            !Arguments[1].AsScriptObject()->IsArray())
+            return Error("invoke_function expects a callable and an array");
+        const auto Elements = Arguments[1].AsScriptObject()->GetArrayElements();
+        Target = Arguments[0];
+        // Snapshot the values before replacing Arguments, which may alias Expanded.
+        Expanded = std::vector<Value>(Elements.begin(), Elements.end());
+        return {};
+    }
+private:
+    Vm& Machine;
+};
+
+class SetMetaObjectFunction final : public NativeObject {
+public:
+    SetMetaObjectFunction(NativeObjectType& Type, Vm& Machine) : NativeObject(Type), Machine(Machine) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        if (Arguments.size() != 2 || !Arguments[0].IsScriptObject() || !Arguments[1].IsScriptObject() ||
+            Arguments[0].AsScriptObject()->IsArray() || Arguments[1].AsScriptObject()->IsArray())
+            return Error("set_metaobject expects two script objects");
+        try { Machine.SetMetaObject(Arguments[0].AsScriptObject(), Arguments[1].AsScriptObject()); }
+        catch (const std::invalid_argument& Failure) { return Error(Failure.what()); }
+        return Arguments[0];
+    }
+private:
+    Vm& Machine;
+};
+
+class VmModule final : public NativeObject {
+public:
+    VmModule(NativeObjectType& Type, Value Eval, Value SetPaths, Value GetPaths,
+             Value GetArgc, Value GetArgv, Value Invoke, Value SetMeta)
+        : NativeObject(Type), Eval(std::move(Eval)),
+          SetPaths(std::move(SetPaths)), GetPaths(std::move(GetPaths)),
+          GetArgc(std::move(GetArgc)), GetArgv(std::move(GetArgv)),
+          Invoke(std::move(Invoke)), SetMeta(std::move(SetMeta)) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    Value GetMember(const Value& Key) override {
+        if (Key.GetType() == ValueType::String) {
+            if (Key.AsString() == "eval_bytecode") return Eval;
+            if (Key.AsString() == "set_module_paths") return SetPaths;
+            if (Key.AsString() == "get_module_paths") return GetPaths;
+            if (Key.AsString() == "get_func_argc") return GetArgc;
+            if (Key.AsString() == "get_func_argv") return GetArgv;
+            if (Key.AsString() == "invoke_function") return Invoke;
+            if (Key.AsString() == "set_metaobject") return SetMeta;
+        }
+        return Error("unknown vm module member");
+    }
+    std::vector<std::string> Paths;
+private:
+    Value Eval;
+    Value SetPaths;
+    Value GetPaths;
+    Value GetArgc;
+    Value GetArgv;
+    Value Invoke;
+    Value SetMeta;
+};
+
 bool Equal(const Value& Left, const Value& Right) {
     if (Left.IsNumeric() && Right.IsNumeric()) return Left.AsNumber() == Right.AsNumber();
     if (Left.GetType() != Right.GetType()) return false;
@@ -141,11 +308,12 @@ std::uint32_t ReadU32(const std::vector<std::uint8_t>& Code, std::size_t& Pc) {
     Pc = At + 4;
     return Result;
 }
-Value ConstantValue(const Constant& Item, const std::shared_ptr<Object>& Function) {
+Value ConstantValue(Vm& Machine, const Constant& Item, const std::shared_ptr<Object>& Function) {
     switch (Item.Type) {
     case Constant::Kind::Number: return Value::Number(Item.Numeric);
     case Constant::Kind::Byte: return Value::Byte(Item.ByteValue);
     case Constant::Kind::String: return Value::String(Item.Text);
+    case Constant::Kind::Buffer: return ByteBufferLibrary(Machine).Create(Item.Text);
     case Constant::Kind::Function: return Value::FromObject(Function);
     }
     throw std::logic_error("invalid constant kind");
@@ -171,15 +339,58 @@ bool IsIdentifier(std::string_view Name) {
 }
 } // namespace
 
-struct Vm::CheckpointState {
-    struct SavedFrame {
-        std::shared_ptr<FunctionObject> Function;
-        std::uint64_t InvocationId = 0;
-        std::size_t Pc = 0;
-        std::vector<Value> Stack;
-    };
-    std::vector<SavedFrame> Frames;
+class ScriptObject::ArrayMethod final : public NativeObject {
+public:
+    enum class Operation { Add, Remove, RemoveAt };
+
+    ArrayMethod(ScriptObject& Receiver, Operation Action)
+        : Receiver(&Receiver), Machine(Receiver.Owner),
+          Lifetime(Machine->Lifetime), Action(Action) {
+        // Bound methods trace their receiver only while the method is reachable.
+        SetGcVisibleMember("receiver", Value::FromScript(&Receiver));
+    }
+
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        if (Arguments.size() != 1) return Error("array method expects exactly one argument");
+        if (Lifetime.expired() || !Machine->OwnsScript(Receiver))
+            return Error("array receiver is no longer available");
+
+        const auto& Input = Arguments.front();
+        if (Action == Operation::Add) {
+            Receiver->AppendArray(Input);
+            return Value::Bool(true);
+        }
+        if (Action == Operation::RemoveAt) {
+            auto Index = Receiver->GetArrayIndex(Input);
+            if (!Index || !Receiver->RemoveArrayAt(*Index)) return Error("invalid array index");
+            return Value::Bool(true);
+        }
+        auto& Elements = *Receiver->Elements;
+        auto Found = std::find_if(Elements.begin(), Elements.end(),
+            [&](const Value& Entry) { return Equal(Entry, Input); });
+        if (Found == Elements.end()) return Value::Bool(false);
+        Elements.erase(Found);
+        return Value::Bool(true);
+    }
+
+private:
+    ScriptObject* Receiver;
+    Vm* Machine;
+    std::weak_ptr<int> Lifetime;
+    Operation Action;
 };
+
+std::optional<Value> ScriptObject::GetArrayMethod(std::string_view Name) const {
+    ArrayMethod::Operation Action;
+    if (Name == "Add" || Name == "add") Action = ArrayMethod::Operation::Add;
+    else if (Name == "remove") Action = ArrayMethod::Operation::Remove;
+    else if (Name == "RemoveAt" || Name == "remove_at") Action = ArrayMethod::Operation::RemoveAt;
+    else return std::nullopt;
+    return Value::FromObject(std::make_shared<ArrayMethod>(
+        *const_cast<ScriptObject*>(this), Action));
+}
 
 Value ModuleNamespace::GetMember(const Value& Key) {
     auto Instance = Owner.lock();
@@ -206,7 +417,7 @@ std::string ModuleNamespace::GetModuleId() const {
 Vm::~Vm() = default;
 
 void Vm::SetDebugController(std::shared_ptr<VmDebugController> Input) {
-    if (ActiveRuns != 0 || ActiveNativeCalls != 0 || SnapshotBusy)
+    if (ActiveRuns != 0 || ActiveNativeCalls != 0)
         throw std::logic_error("debug controller can only be replaced while the VM is idle");
     DebugController = std::move(Input);
 }
@@ -256,7 +467,7 @@ std::vector<DebugNamedValue> VmDebugContext::GetGlobals(std::size_t FrameId) con
         auto Instance = Machine->ModuleByProgram.find(Owner.get());
         if (Instance == Machine->ModuleByProgram.end())
             throw std::logic_error("debug frame has no module instance");
-        Values = &Instance->second->Globals;
+        Values = Instance->second->GlobalScope ? Instance->second->GlobalScope : &Instance->second->Globals;
     }
     std::vector<DebugNamedValue> Result;
     Result.reserve(Values->size());
@@ -272,6 +483,14 @@ std::vector<DebugProperty> VmDebugContext::GetProperties(const Value& Input) con
         throw std::invalid_argument("debug properties require an object");
     std::vector<DebugProperty> Result;
     if (auto* Script = dynamic_cast<ScriptObject*>(Input.AsObject())) {
+        if (Script->IsArray()) {
+            const auto Elements = Script->GetArrayElements();
+            Result.reserve(Elements.size() + 1);
+            Result.push_back({Value::String("Length"), Value::Number(static_cast<double>(Elements.size()))});
+            for (std::size_t I = 0; I < Elements.size(); ++I)
+                Result.push_back({Value::Number(static_cast<double>(I)), Elements[I]});
+            return Result;
+        }
         Result.reserve(Script->Members.size() + (Script->MetaObject ? 1 : 0));
         for (const auto& [Key, Data] : Script->Members) {
             auto PublicKey = Key.Type == ValueType::String ? Value::String(Key.Text) : Value::Number(Key.Number);
@@ -329,7 +548,8 @@ void VmDebugContext::SetGlobal(std::size_t FrameId, std::string Name, Value Inpu
         auto Found = Machine->ModuleByProgram.find(Owner.get());
         if (Found == Machine->ModuleByProgram.end())
             throw std::logic_error("debug frame has no module instance");
-        Found->second->Globals.insert_or_assign(std::move(Name), std::move(Input));
+        auto& Values = Found->second->GlobalScope ? *Found->second->GlobalScope : Found->second->Globals;
+        Values.insert_or_assign(std::move(Name), std::move(Input));
     }
 }
 
@@ -364,6 +584,27 @@ Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
     auto& Type = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "get_type");
     BuiltinGetType = Value::FromObject(Type.Create<GetTypeFunction>());
     Globals.emplace("get_type", BuiltinGetType);
+    auto& ArrayType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "array");
+    BuiltinArray = Value::FromObject(ArrayType.Create<ArrayFunction>(*this));
+    Globals.emplace("array", BuiltinArray);
+    auto& EvalType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "eval_bytecode");
+    auto Eval = Value::FromObject(EvalType.Create<EvalBytecodeFunction>(*this));
+    auto& SetPathsType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "set_module_paths");
+    auto& GetPathsType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "get_module_paths");
+    auto SetPaths = Value::FromObject(SetPathsType.Create<ModulePathsFunction>(*this, true));
+    auto GetPaths = Value::FromObject(GetPathsType.Create<ModulePathsFunction>(*this, false));
+    auto& ArgcType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "get_func_argc");
+    auto& ArgvType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "get_func_argv");
+    auto GetArgc = Value::FromObject(ArgcType.Create<FunctionArgumentsFunction>(ActiveExecution, true));
+    auto GetArgv = Value::FromObject(ArgvType.Create<FunctionArgumentsFunction>(ActiveExecution, false));
+    auto& InvokeType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "invoke_function");
+    auto Invoke = Value::FromObject(InvokeType.Create<InvokeFunction>(*this));
+    auto& SetMetaType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "set_metaobject");
+    auto SetMeta = Value::FromObject(SetMetaType.Create<SetMetaObjectFunction>(*this));
+    auto& VmModuleType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "vm");
+    BuiltinVmModule = Value::FromObject(VmModuleType.Create<VmModule>(
+        std::move(Eval), std::move(SetPaths), std::move(GetPaths),
+        std::move(GetArgc), std::move(GetArgv), std::move(Invoke), std::move(SetMeta)));
     // Freeze the mutable builder's module before any execution.
     Program = std::make_shared<Module>(*Input);
     for (auto& Item : Program->Constants) {
@@ -400,6 +641,7 @@ void Vm::LoadModule(std::string Id, std::shared_ptr<Module> Source,
     Source->Validate();
     auto Instance = std::make_shared<ModuleInstance>();
     Instance->Globals.emplace("get_type", BuiltinGetType);
+    Instance->Globals.emplace("array", BuiltinArray);
     Instance->Id = Id;
     Instance->Source = Source;
     Instance->Identity.assign(Identity.begin(), Identity.end());
@@ -462,80 +704,6 @@ std::string Vm::GetActiveModuleId() const {
     return Found->second->Id;
 }
 
-std::uint64_t Vm::CaptureCheckpoint() {
-    constexpr std::uint64_t MaxExactScriptInteger = 9'007'199'254'740'991ull;
-    constexpr std::size_t MaxCheckpoints = 256;
-    constexpr std::size_t MaxSavedStackValues = 65'536;
-    if (ActiveRuns != 1 || ActiveNativeCalls != 1 || !ActiveExecution ||
-        !ActiveExecution->PendingCallResult || ActiveExecution->Frames.empty())
-        throw std::logic_error("checkpoint capture requires a direct script call");
-    if (Checkpoints.size() >= MaxCheckpoints)
-        throw std::length_error("too many active checkpoints");
-    if (NextCheckpointId > MaxExactScriptInteger)
-        throw std::overflow_error("checkpoint ID space exhausted");
-
-    auto State = std::make_unique<CheckpointState>();
-    State->Frames.reserve(ActiveExecution->Frames.size());
-    std::size_t SavedValues = 0;
-    for (const auto& Current : ActiveExecution->Frames) {
-        if (Current.InvocationId == 0)
-            throw std::logic_error("active frame has no invocation identity");
-        if (Current.Stack.size() > MaxSavedStackValues - SavedValues)
-            throw std::length_error("checkpoint operand stacks are too large");
-        SavedValues += Current.Stack.size();
-        State->Frames.push_back({Current.Function, Current.InvocationId,
-                                 Current.Pc, Current.Stack});
-    }
-    auto Id = NextCheckpointId++;
-    Checkpoints.emplace(Id, std::move(State));
-    return Id;
-}
-
-void Vm::RequestCheckpointRestore(std::uint64_t Id) {
-    if (ActiveRuns != 1 || ActiveNativeCalls != 1 || !ActiveExecution ||
-        !ActiveExecution->PendingCallResult || ActiveExecution->Frames.empty())
-        throw std::logic_error("checkpoint restore requires a direct script call");
-    if (ActiveExecution->PendingCheckpointRestore)
-        throw std::logic_error("checkpoint restore is already pending");
-    auto Found = Checkpoints.find(Id);
-    if (Found == Checkpoints.end()) throw std::invalid_argument("unknown checkpoint ID");
-    const auto& Saved = Found->second->Frames;
-    if (ActiveExecution->Frames.size() < Saved.size())
-        throw std::invalid_argument("checkpoint stack is no longer active");
-    for (std::size_t I = 0; I < Saved.size(); ++I) {
-        const auto& Current = ActiveExecution->Frames[I];
-        if (Current.InvocationId != Saved[I].InvocationId ||
-            Current.Function != Saved[I].Function)
-            throw std::invalid_argument("checkpoint stack is no longer active");
-    }
-    ActiveExecution->PendingCheckpointRestore = Id;
-}
-
-bool Vm::UnloadCheckpoint(std::uint64_t Id) {
-    if (ActiveRuns != 1 || ActiveNativeCalls != 1 || !ActiveExecution ||
-        !ActiveExecution->PendingCallResult)
-        throw std::logic_error("checkpoint unload requires a direct script call");
-    return Checkpoints.erase(Id) != 0;
-}
-
-void Vm::ApplyCheckpointRestore(ExecutionState& Execution, std::uint64_t Id) {
-    auto Found = Checkpoints.find(Id);
-    if (Found == Checkpoints.end()) throw std::logic_error("pending checkpoint disappeared");
-    const auto& Saved = Found->second->Frames;
-    if (Execution.Frames.size() < Saved.size())
-        throw std::logic_error("pending checkpoint stack changed");
-    while (Execution.Frames.size() > Saved.size()) RecycleTopFrame(Execution);
-    for (std::size_t I = 0; I < Saved.size(); ++I) {
-        auto& Current = Execution.Frames[I];
-        if (Current.InvocationId != Saved[I].InvocationId ||
-            Current.Function != Saved[I].Function)
-            throw std::logic_error("pending checkpoint stack changed");
-        Current.Pc = Saved[I].Pc;
-        Current.Stack = Saved[I].Stack;
-    }
-    Execution.Frames.back().Stack.push_back(Value::Number(static_cast<double>(Id)));
-}
-
 ScriptObject* Vm::AllocateScriptObject(ScriptObject* MetaObject) {
     MaybeCollectGarbage();
     if (ScriptHeap.size() >= ScriptObjectLimit) throw std::bad_alloc();
@@ -550,6 +718,12 @@ ScriptObject* Vm::AllocateScriptObject(ScriptObject* MetaObject) {
     return Result;
 }
 ScriptObject* Vm::CreateScriptObject() { return AllocateScriptObject(RootMetaObject); }
+ScriptObject* Vm::CreateArray() {
+    auto Elements = std::make_unique<std::vector<Value>>();
+    auto* Result = AllocateScriptObject(nullptr);
+    Result->Elements = std::move(Elements);
+    return Result;
+}
 ScriptObject* Vm::CreateMetaObject() { return CreateScriptObject(); }
 bool Vm::OwnsScript(ScriptObject* Input) const {
     return ScriptObjects.contains(Input);
@@ -663,7 +837,7 @@ void Vm::UpdateCollectionThreshold() {
 }
 
 void Vm::MaybeCollectGarbage() {
-    if (ActiveRuns != 1 || ActiveNativeCalls != 0 || !ActiveExecution || SnapshotBusy)
+    if (ActiveRuns != 1 + RootedEvalDepth || ActiveNativeCalls != 0 || !ActiveExecution)
         return;
     if (!CollectionPending && ScriptHeap.size() < NextCollectionObjectCount)
         return;
@@ -711,12 +885,10 @@ std::size_t Vm::CollectGarbageImpl() {
     for (const auto& [_, Entry] : HostRoots) MarkValue(Entry);
     if (ActiveExecution)
         for (const auto& Current : ActiveExecution->Frames) {
+            for (const auto& Entry : Current.Arguments) MarkValue(Entry);
             for (const auto& Entry : Current.Locals) MarkValue(Entry);
             for (const auto& Entry : Current.Stack) MarkValue(Entry);
         }
-    for (const auto& [_, Checkpoint] : Checkpoints)
-        for (const auto& Current : Checkpoint->Frames)
-            for (const auto& Entry : Current.Stack) MarkValue(Entry);
     for (auto It = NativeRegistry.begin(); It != NativeRegistry.end();) {
         if (auto Native = It->lock()) {
             if (SeenNative.insert(Native.get()).second) NativeWork.push_back(std::move(Native));
@@ -728,6 +900,7 @@ std::size_t Vm::CollectGarbageImpl() {
             auto Script = ScriptWork.back(); ScriptWork.pop_back();
             if (Script->MetaObject) MarkScript(Script->MetaObject);
             for (const auto& [_, Entry] : Script->Members) MarkValue(Entry);
+            for (const auto& Entry : Script->GetArrayElements()) MarkValue(Entry);
         }
         while (!NativeWork.empty()) {
             auto Native = std::move(NativeWork.back()); NativeWork.pop_back();
@@ -772,8 +945,7 @@ Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Argument
     for (const auto& Input : Arguments) ValidateOwnedValue(Input);
     ExecutionState Execution;
     Execution.Frames.push_back(MakeFrame(
-        std::static_pointer_cast<FunctionObject>(Functions[FunctionConstant]), Arguments,
-        NextFrameInvocationId++));
+        std::static_pointer_cast<FunctionObject>(Functions[FunctionConstant]), Arguments));
     return Execute(Execution);
 }
 
@@ -813,12 +985,24 @@ Value Vm::Call(Value Target, std::vector<Value> Arguments) {
         }
         auto* Native = dynamic_cast<NativeObject*>(Target.AsObject());
         if (!Native || !Native->IsCallable()) return Error("value is not callable");
+        if (dynamic_cast<InvokeFunction*>(Native)) {
+            if (Depth == 63) return Error("invoke_function forwarding limit exceeded");
+            if (auto Failure = InvokeFunction::Expand(Arguments, Target, Arguments); Failure.IsError())
+                return Failure;
+            Roots.push_back(AddToRoot(Target));
+            for (const auto& Argument : Arguments) Roots.push_back(AddToRoot(Argument));
+            continue;
+        }
         if (Native->GetObjectType() == ObjectType::Function) {
             ExecutionState Execution;
             Execution.Frames.push_back(MakeFrame(
-                std::static_pointer_cast<FunctionObject>(Target.AsNativeObject()), Arguments,
-                NextFrameInvocationId++));
+                std::static_pointer_cast<FunctionObject>(Target.AsNativeObject()), Arguments));
             return Execute(Execution);
+        }
+        if (dynamic_cast<EvalBytecodeFunction*>(Native)) {
+            auto Result = Native->Call(Arguments);
+            ValidateOwnedValue(Result);
+            return Result;
         }
         ActiveRunGuard Guard(ActiveNativeCalls);
         auto Result = Native->Call(Arguments);
@@ -839,9 +1023,75 @@ Value Vm::RunModule(std::string_view Id, std::uint32_t FunctionConstant,
     for (const auto& Input : Arguments) ValidateOwnedValue(Input);
     ExecutionState Execution;
     Execution.Frames.push_back(MakeFrame(
-        std::static_pointer_cast<FunctionObject>(ModuleFunctions[FunctionConstant]), Arguments,
-        NextFrameInvocationId++));
+        std::static_pointer_cast<FunctionObject>(ModuleFunctions[FunctionConstant]), Arguments));
     return Execute(Execution);
+}
+
+const std::vector<std::string>& Vm::GetModulePaths() const {
+    return static_cast<VmModule*>(BuiltinVmModule.AsObject())->Paths;
+}
+
+void Vm::SetModulePaths(std::vector<std::string> Paths) {
+    if (Paths.size() > 65536) throw std::invalid_argument("too many module paths");
+    for (const auto& Path : Paths) {
+        if (Path.empty() || Path.find('\0') != std::string::npos)
+            throw std::invalid_argument("module paths must be non-empty strings without NUL");
+        (void)Value::String(Path);
+    }
+    static_cast<VmModule*>(BuiltinVmModule.AsObject())->Paths = std::move(Paths);
+}
+
+Value Vm::EvalBytecode(const Value& Code, Value Context) {
+    const auto* Bytes = ByteBufferData(Code);
+    if (!Bytes) return Error("eval_bytecode expects a ByteBuffer");
+    CompiledProgram Compiled;
+    try {
+        Compiled = DeserializeProgram({reinterpret_cast<const std::uint8_t*>(Bytes->data()), Bytes->size()});
+        if (Compiled.Functions.size() != 1 || !Compiled.Functions.contains("__compiled_block") || !Compiled.Exports.empty())
+            return Error("eval_bytecode requires a compiled block without module declarations");
+    } catch (const std::exception& Failure) {
+        return Error(std::string("invalid compiled bytecode: ") + Failure.what());
+    }
+    auto Entry = Compiled.Functions.at("__compiled_block");
+    auto& Body = Compiled.Program->Constants.at(Entry).Function;
+    if (Body->ParameterCount != 1) return Error("eval_bytecode requires a compiled block");
+    auto Instance = std::make_shared<ModuleInstance>();
+    Instance->Program = Compiled.Program;
+    Instance->Id = GetActiveModuleId();
+    Instance->GlobalScope = &Globals;
+    if (ActiveExecution && !ActiveExecution->Frames.empty()) {
+        auto Owner = ActiveExecution->Frames.back().Function->GetOwner();
+        if (Owner != Program) {
+            auto Caller = ModuleByProgram.at(Owner.get());
+            Instance->GlobalScope = Caller->GlobalScope ? Caller->GlobalScope : &Caller->Globals;
+        }
+    }
+    Instance->Functions.resize(Compiled.Program->Constants.size());
+    for (std::size_t I = 0; I < Instance->Functions.size(); ++I) {
+        const auto& Item = Compiled.Program->Constants[I];
+        if (Item.Type == Constant::Kind::Function)
+            Instance->Functions[I] = std::make_shared<FunctionObject>(Compiled.Program, Item.Function);
+    }
+    ModuleByProgram.emplace(Instance->Program.get(), Instance);
+    struct Guard {
+        Vm& Machine; const Module* Program;
+        ~Guard() { Machine.ModuleByProgram.erase(Program); }
+    } Cleanup{*this, Instance->Program.get()};
+    // Nested execution replaces ActiveExecution; keep all caller frames rooted.
+    std::vector<RootHandle> CallerRoots;
+    if (ActiveExecution) for (const auto& Frame : ActiveExecution->Frames) {
+        for (const auto& Value : Frame.Arguments) CallerRoots.push_back(AddToRoot(Value));
+        for (const auto& Value : Frame.Locals) CallerRoots.push_back(AddToRoot(Value));
+        for (const auto& Value : Frame.Stack) CallerRoots.push_back(AddToRoot(Value));
+    }
+    struct EvalDepthGuard {
+        Vm& Machine; bool Nested;
+        EvalDepthGuard(Vm& Machine) : Machine(Machine), Nested(Machine.ActiveRuns != 0) {
+            if (Nested) ++Machine.RootedEvalDepth;
+        }
+        ~EvalDepthGuard() { if (Nested) --Machine.RootedEvalDepth; }
+    } RootedDepth(*this);
+    return Call(Value::FromObject(Instance->Functions[Entry]), {Context});
 }
 
 Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t FrameId,
@@ -860,7 +1110,7 @@ Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t F
     if (PausedOwner != Program) {
         auto Found = ModuleByProgram.find(PausedOwner.get());
         if (Found == ModuleByProgram.end()) throw std::logic_error("debug frame has no module instance");
-        PausedGlobals = &Found->second->Globals;
+        PausedGlobals = Found->second->GlobalScope ? Found->second->GlobalScope : &Found->second->Globals;
     }
 
     auto Instance = std::make_shared<ModuleInstance>();
@@ -894,8 +1144,7 @@ Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t F
 
     ExecutionState Evaluation;
     Evaluation.Frames.push_back(MakeFrame(
-        std::static_pointer_cast<FunctionObject>(Instance->Functions[FunctionConstant]), Arguments,
-        NextFrameInvocationId++));
+        std::static_pointer_cast<FunctionObject>(Instance->Functions[FunctionConstant]), Arguments));
     auto Result = Execute(Evaluation);
     if (Result.GetType() == ValueType::Object && Result.GetObjectType() == ObjectType::Function) {
         auto* Function = dynamic_cast<FunctionObject*>(Result.AsObject());
@@ -955,13 +1204,8 @@ Value Vm::Execute(ExecutionState& Execution) {
     const bool OuterRun = ActiveRuns == 0;
     if (OuterRun) {
         InstructionsRemaining = InstructionLimit;
-        Checkpoints.clear();
     }
-    for (auto& Item : Execution.Frames)
-        if (Item.InvocationId == 0) Item.InvocationId = NextFrameInvocationId++;
-    ActiveRunGuard Guard(ActiveRuns, OuterRun ?
-        std::function<void()>([this] { Checkpoints.clear(); }) : std::function<void()>{});
-    HasRun = true;
+    ActiveRunGuard Guard(ActiveRuns);
     auto* PreviousExecution = ActiveExecution;
     ActiveExecution = &Execution;
     struct RestoreExecution {
@@ -973,7 +1217,7 @@ Value Vm::Execute(ExecutionState& Execution) {
     auto PushFrame = [&](const std::shared_ptr<FunctionObject>& Function,
                          const std::vector<Value>& Args) {
         if (Frames.size() >= 1024) throw std::runtime_error("VM call depth exceeded");
-        Frames.push_back(MakeFrame(Function, Args, NextFrameInvocationId++,
+        Frames.push_back(MakeFrame(Function, Args,
                                    TakeFreeFrame(Execution)));
     };
     const FunctionPrototype* FaultBody = nullptr;
@@ -998,7 +1242,7 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         FaultModuleId = FrameInstance ? FrameInstance->Id : std::string{};
         auto& FrameFunctions = FrameInstance ? FrameInstance->Functions : Functions;
-        auto& FrameGlobals = FrameInstance ? FrameInstance->Globals : Globals;
+        auto& FrameGlobals = FrameInstance ? (FrameInstance->GlobalScope ? *FrameInstance->GlobalScope : FrameInstance->Globals) : Globals;
         if (InstructionsRemaining == 0)
             throw std::runtime_error("VM instruction budget exceeded");
         --InstructionsRemaining;
@@ -1056,12 +1300,27 @@ Value Vm::Execute(ExecutionState& Execution) {
                 Push(Error(MetaCall ? "metafunction is not callable" : "value is not callable"),
                      DebugErrorOrigin::Operation); return;
             }
-            if (Native->GetObjectType() == ObjectType::Function) {
+            if (dynamic_cast<InvokeFunction*>(Native)) {
+                if (Depth == 63) {
+                    Push(Error("invoke_function forwarding limit exceeded"), DebugErrorOrigin::Operation);
+                    return;
+                }
+                if (auto Failure = InvokeFunction::Expand(Args, Target, Args); Failure.IsError()) {
+                    Push(std::move(Failure), DebugErrorOrigin::FunctionReturn);
+                    return;
+                }
+                Self(Self, std::move(Target), std::move(Args), Depth + 1, false);
+            } else if (Native->GetObjectType() == ObjectType::Function) {
                 auto Function = std::static_pointer_cast<FunctionObject>(Target.AsNativeObject());
                 if (Function->GetOwner() != Program &&
                     !ModuleByProgram.contains(Function->GetOwner().get()))
                     throw std::invalid_argument("function belongs to another VM module");
                 PushFrame(Function, Args);
+            } else if (dynamic_cast<EvalBytecodeFunction*>(Native)) {
+                // This builtin runs interpreter code, not an arbitrary native
+                // callback. Caller values are rooted by EvalBytecode, so normal
+                // instruction-boundary GC remains available inside the block.
+                Push(Native->Call(Args), DebugErrorOrigin::FunctionReturn);
             } else {
                 ActiveRunGuard NativeGuard(ActiveNativeCalls);
                 Push(Native->Call(Args), DebugErrorOrigin::FunctionReturn);
@@ -1070,7 +1329,7 @@ Value Vm::Execute(ExecutionState& Execution) {
         switch (Instruction) {
         case Op::Const: {
             auto Id = ReadU32(Code, Current.Pc);
-            Push(ConstantValue(FrameOwner->Constants[Id], FrameFunctions[Id])); break;
+            Push(ConstantValue(*this, FrameOwner->Constants[Id], FrameFunctions[Id])); break;
         }
         case Op::Null: Push({}); break;
         case Op::True: Push(Value::Bool(true)); break;
@@ -1151,13 +1410,12 @@ Value Vm::Execute(ExecutionState& Execution) {
                 const auto& Target = Current.Stack[Current.Stack.size() - Count - 1];
                 auto* Function = Target.GetType() == ValueType::Object ?
                     dynamic_cast<FunctionObject*>(Target.AsObject()) : nullptr;
-                // Extra arguments keep the general path's destruction order.
-                if (Function && Count <= Function->GetBody().ParameterCount &&
+                if (Function &&
                     (Function->GetOwner() == Program ||
                                  ModuleByProgram.contains(Function->GetOwner().get()))) {
                     auto Owner = std::static_pointer_cast<FunctionObject>(Target.AsNativeObject());
                     auto NewFrame = MakeFrameFromStack(std::move(Owner), Current.Stack,
-                                                      Count, NextFrameInvocationId++,
+                                                      Count,
                                                       TakeFreeFrame(Execution));
                     // Appending can relocate Frames; do not use Current afterward.
                     Frames.push_back(std::move(NewFrame));
@@ -1167,14 +1425,8 @@ Value Vm::Execute(ExecutionState& Execution) {
             std::vector<Value> Args(Count);
             for (std::size_t I = Count; I > 0; --I) Args[I - 1] = Pop();
             Value Target = Pop();
-            Execution.PendingCallResult = true;
             DispatchCall(DispatchCall, std::move(Target), std::move(Args), 0, false);
-            Execution.PendingCallResult = false;
-            if (Execution.PendingCheckpointRestore) {
-                auto Id = *Execution.PendingCheckpointRestore;
-                Execution.PendingCheckpointRestore.reset();
-                ApplyCheckpointRestore(Execution, Id);
-            }
+
             break;
         }
         case Op::Return: {
@@ -1208,6 +1460,10 @@ Value Vm::Execute(ExecutionState& Execution) {
                 }
                 auto Found = Script->GetRaw(Key);
                 if (Found) { Push(*Found, DebugErrorOrigin::Operation); break; }
+                if (Script->IsArray()) {
+                    Push(Error("invalid array index or member"), DebugErrorOrigin::Operation);
+                    break;
+                }
                 auto Meta = Script->GetMetaObject();
                 auto Method = Meta ? Meta->GetRaw(Value::String("__index")) : std::nullopt;
                 if (!Method) {

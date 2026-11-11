@@ -40,7 +40,7 @@ int main() {
     try {
         auto Source = Compile("var base = 2; def score(x = 3) { return base + x; }");
         auto Bytes = SerializeProgram(Source);
-        Check(Bytes.size() > 16 && Bytes[8] == 4 && Bytes[9] == 0,
+        Check(Bytes.size() > 16 && Bytes[8] == 5 && Bytes[9] == 0,
               "unexpected current bytecode version");
         Check(Bytes == SerializeProgram(Source), "artifact is not deterministic");
         auto Loaded = DeserializeProgram(Bytes);

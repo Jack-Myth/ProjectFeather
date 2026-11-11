@@ -78,8 +78,10 @@ NativeModuleEntry GetEntry(void* Handle) {
 } // namespace
 
 NativeModules::NativeModules(std::istream& Input, std::ostream& Output)
-    : Input(Input), Output(Output) {
-    Paths.push_back((ExecutablePath().parent_path() / "modules").lexically_normal());
+    : Input(Input), Output(Output) {}
+
+std::filesystem::path NativeModules::DefaultSearchPath() const {
+    return (ExecutablePath().parent_path() / "modules").lexically_normal();
 }
 
 void NativeModules::ReleaseRoots() noexcept {
@@ -87,21 +89,12 @@ void NativeModules::ReleaseRoots() noexcept {
     for (auto& Library : Libraries) Library.Root = {};
 }
 
-std::vector<NativeModuleIdentity> NativeModules::LoadedIdentities() const {
-    std::vector<NativeModuleIdentity> Result;
-    Result.reserve(Libraries.size());
-    for (const auto& Library : Libraries)
-        Result.push_back(NativeModuleIdentity{Library.Name, Library.Id});
-    return Result;
-}
 
-bool NativeModules::HasIdentity(std::string_view Name, const NativeModuleGuid& Id) const {
-    for (const auto& Library : Libraries)
-        if (Library.Name == Name) return Library.Id == Id;
-    return false;
-}
 
-std::optional<Value> NativeModules::Resolve(Vm& Machine, std::string_view Name) {
+
+
+std::optional<Value> NativeModules::Resolve(
+    Vm& Machine, std::string_view Name, const std::vector<std::filesystem::path>& Paths) {
     if (auto Found = ByName.find(std::string(Name)); Found != ByName.end()) return Found->second;
     for (const auto& Directory : Paths) {
         auto Candidate = Directory / (std::string(Name) + NativeSuffix());
@@ -117,7 +110,7 @@ std::optional<Value> NativeModules::Resolve(Vm& Machine, std::string_view Name) 
         for (const auto& Library : Libraries)
             if (Library.Id == Descriptor->Id)
                 throw std::runtime_error("duplicate Native module GUID: " + PathText(Path));
-        auto Root = Descriptor->Create(NativeModuleContext{Machine, &Input, &Output, Snapshots});
+        auto Root = Descriptor->Create(NativeModuleContext{Machine, &Input, &Output});
         if (Root.IsError()) return Root;
         if (Root.GetType() != ValueType::Object || Root.IsScriptObject() ||
             Root.GetObjectType() != ObjectType::Host)

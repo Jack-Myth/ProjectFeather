@@ -2,6 +2,7 @@
 #include <iostream>
 #include <bgfx/bgfx.h>
 #include <stdexcept>
+#include <SDL3/SDL.h>
 using namespace Feather;
 int main(int Argc, char** Argv) {
     try {
@@ -12,7 +13,25 @@ int main(int Argc, char** Argv) {
         auto Context = Host->Create(Config);
         auto Texture = Context->LoadTexture(Argv[1]);
         auto Font = Context->LoadFont(Argv[2]);
+        auto M = Context->MeasureText(*Font, "AV\nA", 24);
+        if (M.Width <= 0 || M.Height != 48 || M.LineHeight != 24 || M.Baseline <= 0)
+            throw std::runtime_error("invalid multiline text measurement");
+        if (Context->MeasureText(*Font, "", 24).Width != 0)
+            throw std::runtime_error("empty text has nonzero advance");
+        int Count = 0; auto Windows = SDL_GetWindows(&Count);
+        if (!Windows || Count != 1) throw std::runtime_error("test window inventory failed");
+        if (!SDL_SetWindowSize(Windows[0], 480, 360)) throw std::runtime_error(SDL_GetError());
+        SDL_free(Windows);
+        for (int I = 0; I < 100; ++I) Context->PollEvent();
+        if (Context->GetWindowMetrics().WindowWidth != 480)
+            throw std::runtime_error("resize metrics were not updated");
         Context->BeginRender({});
+        Context->FillRect({0,0,100,100}, {1,0,0,1});
+        Context->SetClipRect(Render2DRect{10,10,30,30});
+        Context->FillRect({0,0,100,100}, {0,1,0,1});
+        Context->SetClipRect(Render2DRect{20,20,0,0});
+        Context->FillRect({0,0,100,100}, {0,0,1,1});
+        Context->SetClipRect(std::nullopt);
         Context->DrawTexture(*Texture, {0,0,100,100}, {});
         Context->DrawText(*Font, "Lifecycle", 0, 100, 24, {});
         Context->DrawLine(0, 40, 200, 40, 4, {1,0,0,0.5f});

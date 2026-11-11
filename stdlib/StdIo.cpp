@@ -148,61 +148,10 @@ std::int64_t TellFile(std::FILE* File) {
 #endif
 }
 
-void AppendU32(std::vector<std::uint8_t>& Output, std::uint32_t Value) {
-    for (unsigned I = 0; I < 4; ++I)
-        Output.push_back(static_cast<std::uint8_t>(Value >> (I * 8)));
-}
-
-void AppendU64(std::vector<std::uint8_t>& Output, std::uint64_t Value) {
-    for (unsigned I = 0; I < 8; ++I)
-        Output.push_back(static_cast<std::uint8_t>(Value >> (I * 8)));
-}
-
-std::uint32_t ReadU32(std::span<const std::uint8_t> Input, std::size_t& At) {
-    if (At > Input.size() || Input.size() - At < 4)
-        throw std::invalid_argument("truncated stdio payload");
-    std::uint32_t Result = 0;
-    for (unsigned I = 0; I < 4; ++I) Result |= std::uint32_t(Input[At++]) << (I * 8);
-    return Result;
-}
-
-std::uint64_t ReadU64(std::span<const std::uint8_t> Input, std::size_t& At) {
-    if (At > Input.size() || Input.size() - At < 8)
-        throw std::invalid_argument("truncated stdio payload");
-    std::uint64_t Result = 0;
-    for (unsigned I = 0; I < 8; ++I) Result |= std::uint64_t(Input[At++]) << (I * 8);
-    return Result;
-}
-
-void AppendString(std::vector<std::uint8_t>& Output, const std::string& Value) {
-    if (Value.size() > std::numeric_limits<std::uint32_t>::max())
-        throw std::length_error("stdio snapshot string is too large");
-    AppendU32(Output, static_cast<std::uint32_t>(Value.size()));
-    Output.insert(Output.end(), Value.begin(), Value.end());
-}
-
-std::string ReadString(std::span<const std::uint8_t> Input, std::size_t& At) {
-    auto Size = ReadU32(Input, At);
-    if (At > Input.size() || Input.size() - At < Size)
-        throw std::invalid_argument("truncated stdio string");
-    std::string Result(reinterpret_cast<const char*>(Input.data() + At), Size);
-    At += Size;
-    (void)Value::String(Result);
-    return Result;
-}
-
 std::pair<bool, bool> ModeAccess(std::string_view Mode) {
     bool Readable = Mode == "r" || Mode == "r+" || Mode == "w+" || Mode == "a+";
     bool Writable = Mode == "w" || Mode == "a" || Mode == "r+" || Mode == "w+" || Mode == "a+";
     return {Readable, Writable};
-}
-
-std::string RestoreMode(std::string_view Mode) {
-    if (Mode == "r") return "rb";
-    if (Mode == "r+" || Mode == "w" || Mode == "w+") return "r+b";
-    if (Mode == "a") return "ab";
-    if (Mode == "a+") return "a+b";
-    throw std::invalid_argument("invalid saved file mode");
 }
 
 class FileHandleType final : public NativeObjectType {
@@ -214,46 +163,7 @@ public:
         return CreateObject<FileHandle>(File, Owner, std::move(Path), std::move(Mode),
                                         Readable, Writable);
     }
-    std::vector<std::uint8_t> Serialize(const NativeObject& Input) const override {
-        auto* Handle = dynamic_cast<const FileHandle*>(&Input);
-        if (!Handle || Handle->GetNativeObjectType() != this)
-            throw std::invalid_argument("invalid stdio file handle");
-        if (!Handle->Get()) return {0};
-        if (Handle->CanWrite() && std::fflush(Handle->Get()) != 0)
-            throw std::runtime_error("cannot flush file for snapshot");
-        auto Position = TellFile(Handle->Get());
-        if (Position < 0) throw std::runtime_error("cannot save file position");
-        std::vector<std::uint8_t> Result{1};
-        AppendString(Result, Handle->GetPath());
-        AppendString(Result, Handle->GetMode());
-        AppendU64(Result, static_cast<std::uint64_t>(Position));
-        return Result;
-    }
-    std::shared_ptr<NativeObject> Deserialize(
-        std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
-        if (Version != 1 || Payload.empty() || Payload[0] > 1)
-            throw std::invalid_argument("invalid stdio file handle payload");
-        if (Payload[0] == 0) {
-            if (Payload.size() != 1)
-                throw std::invalid_argument("invalid closed file handle payload");
-            return Create(nullptr, {}, {}, false, false);
-        }
-        std::size_t At = 1;
-        auto Path = ReadString(Payload, At);
-        auto Mode = ReadString(Payload, At);
-        auto Position = ReadU64(Payload, At);
-        if (At != Payload.size() || Position > std::uint64_t(std::numeric_limits<std::int64_t>::max()))
-            throw std::invalid_argument("invalid stdio file handle payload");
-        auto [Readable, Writable] = ModeAccess(Mode);
-        if (!Readable && !Writable) throw std::invalid_argument("invalid saved file mode");
-        auto* File = Open(Path, RestoreMode(Mode));
-        if (!File) throw std::runtime_error("cannot reopen saved file");
-        if (SeekFile(File, static_cast<std::int64_t>(Position), SEEK_SET) != 0) {
-            std::fclose(File);
-            throw std::runtime_error("cannot restore saved file position");
-        }
-        return Create(File, std::move(Path), std::move(Mode), Readable, Writable);
-    }
+
 private:
     std::shared_ptr<void> Owner;
 };

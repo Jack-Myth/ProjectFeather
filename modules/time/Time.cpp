@@ -78,18 +78,7 @@ public:
     ClockType(Vm& Machine, std::shared_ptr<TimeHost> Host)
         : NativeObjectType(Machine, TimeModuleGuid, "Clock"), Host(std::move(Host)) {}
     std::shared_ptr<Clock> Create() { return CreateObject<Clock>(Host); }
-    std::shared_ptr<NativeObject> Deserialize(
-        std::uint32_t Version, std::span<const std::uint8_t> Payload) override {
-        if (Version != 1 || !Payload.empty())
-            throw std::invalid_argument("invalid time Clock payload");
-        return Create();
-    }
-    void FinalizeRestore(NativeObject& Input) override {
-        auto* Restored = dynamic_cast<Clock*>(&Input);
-        if (!Restored || Restored->GetNativeObjectType() != this)
-            throw std::invalid_argument("invalid time Clock object");
-        Restored->Reset();
-    }
+
 private:
     std::shared_ptr<TimeHost> Host;
 };

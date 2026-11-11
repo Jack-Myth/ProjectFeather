@@ -1,4 +1,3 @@
-#include <Feather/Checkpoint.hpp>
 #include <Feather/Compiler.hpp>
 #include <Feather/StdIo.hpp>
 
@@ -31,21 +30,8 @@ Value Call(Value Object, const char* Name, std::vector<Value> Arguments = {}) {
 Value Member(Value Object, const char* Name) {
     return dynamic_cast<NativeObject*>(Object.AsObject())->GetMember(Value::String(Name));
 }
-class Capture final : public NativeObject {
-public:
-    Capture(NativeObjectType& Type, Vm& Machine, std::vector<std::uint8_t>& Saved)
-        : NativeObject(Type), Machine(Machine), Saved(Saved) {}
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    bool IsCallable() const override { return true; }
-    Value Call(const std::vector<Value>&) override {
-        Saved = Machine.CaptureSnapshot();
-        return Value::Bool(false);
-    }
-private:
-    Vm& Machine;
-    std::vector<std::uint8_t>& Saved;
-};
-}
+} // namespace
+
 int main(int Argc, char** Argv) {
     try {
         static_assert(sizeof(std::uint8_t) == 1);
@@ -131,53 +117,6 @@ int main(int Argc, char** Argv) {
             {static_cast<std::uint8_t>(Op::ToByte), static_cast<std::uint8_t>(Op::Return)};
         Reject([&] { Broken.Program->Validate(); }, "ToByte underflow accepted");
 
-        auto SnapshotProgram = Compile(R"(
-            var global = byte(255);
-            var container = object();
-            container[byte(1)] = byte(128);
-            def pick(first, second) { return first; }
-            def main() { var n = 7; var local = byte(n); return pick(local, capture()); }
-        )");
-        Vm SnapshotMachine(SnapshotProgram.Program);
-        std::vector<std::uint8_t> Saved;
-        auto& CaptureType = SnapshotMachine.CreateNativeObjectType<NativeSingletonType>(
-            NativeModuleGuid{{0x42}}, "ByteTestCapture");
-        SnapshotMachine.RegisterNativeFunction("capture",
-            CaptureType.Create<Capture>(SnapshotMachine, Saved));
-        SnapshotProgram.Initialize(SnapshotMachine);
-        Check(SnapshotMachine.Run(SnapshotProgram.Functions.at("main")).AsByte() == 7, "capture path");
-        Vm Restored(SnapshotProgram.Program);
-        auto& RestoredType = Restored.CreateNativeObjectType<NativeSingletonType>(
-            NativeModuleGuid{{0x42}}, "ByteTestCapture");
-        Restored.RegisterNativeFunction("capture", RestoredType.Create<Capture>(Restored, Saved));
-        Check(Restored.ResumeSnapshot(Saved).AsByte() == 7, "snapshot local/operand stack");
-        Check(Restored.GetGlobal("global").AsByte() == 255, "snapshot byte global");
-        Check(Restored.GetGlobal("container").AsScriptObject()
-                  ->GetRaw(Value::Number(1))->AsByte() == 128, "snapshot byte field");
-        auto OldSnapshot = Saved; OldSnapshot[4] = 4;
-        Vm RejectOld(SnapshotProgram.Program);
-        Reject([&] { RejectOld.ResumeSnapshot(OldSnapshot); }, "old snapshot accepted");
-
-        // Checkpoints intentionally preserve current locals; their saved operand stack retains byte.
-        auto CheckpointProgram = Compile(R"(
-            var done = false; var id = null;
-            def pick(first, second) { return first; }
-            def main() {
-                var saved = pick(byte(255), id = checkpoint.Capture());
-                if (done) { return saved; }
-                done = true;
-                checkpoint.Restore(id);
-                return null;
-            }
-        )");
-        Vm CheckpointMachine(CheckpointProgram.Program);
-        CheckpointLibrary Checkpoints(CheckpointMachine);
-        CheckpointMachine.SetGlobal("checkpoint", Checkpoints.GetModule());
-        CheckpointProgram.Initialize(CheckpointMachine);
-        Check(CheckpointMachine.Run(CheckpointProgram.Functions.at("main")).AsByte() == 255,
-              "checkpoint byte operand stack");
-
-        Check(Argc == 2, "missing work file path");
         auto Path = std::filesystem::path(Argv[1]);
         std::filesystem::create_directories(Path.parent_path());
         std::istringstream Input;

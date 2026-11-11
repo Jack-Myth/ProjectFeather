@@ -143,12 +143,7 @@ public:
             throw std::invalid_argument("network socket is closed");
         return *Socket.Body;
     }
-    std::vector<std::uint8_t> Serialize(const NativeObject&) const override {
-        throw std::invalid_argument("network sockets cannot be saved; close and release them first");
-    }
-    std::shared_ptr<NativeObject> Deserialize(std::uint32_t, std::span<const std::uint8_t>) override {
-        throw std::invalid_argument("network sockets cannot be restored");
-    }
+
     std::shared_ptr<State> Shared;
 };
 void TcpConnected(const Connection& C) {

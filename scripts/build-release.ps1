@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [string]$BuildDirectory,
-    [switch]$WithoutDebugger
+    [switch]$WithoutDebugger,
+    [ValidateRange(0, 1024)]
+    [int]$Jobs = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,10 +30,15 @@ if (Test-Path -LiteralPath $CoreData) {
 & meson @SetupArguments
 if ($LASTEXITCODE -ne 0) { throw "Meson setup failed with exit code $LASTEXITCODE." }
 
-& meson compile -C $ResolvedBuildDirectory
+$CompileArguments = @('compile', '-C', $ResolvedBuildDirectory)
+if ($Jobs -gt 0) { $CompileArguments += @('--jobs', $Jobs.ToString()) }
+& meson @CompileArguments
 if ($LASTEXITCODE -ne 0) { throw "Release build failed with exit code $LASTEXITCODE." }
 
-& meson test -C $ResolvedBuildDirectory --print-errorlogs
+# Build above with the selected limit; tests must not start an unlimited implicit rebuild.
+$TestArguments = @('test', '-C', $ResolvedBuildDirectory, '--no-rebuild', '--print-errorlogs')
+if ($Jobs -gt 0) { $TestArguments += @('--num-processes', $Jobs.ToString()) }
+& meson @TestArguments
 if ($LASTEXITCODE -ne 0) { throw "Release tests failed with exit code $LASTEXITCODE." }
 
 Write-Host "ProjectFeather release build is ready at $ResolvedBuildDirectory"

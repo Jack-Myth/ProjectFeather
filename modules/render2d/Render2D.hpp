@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -64,6 +65,11 @@ struct Render2DEvent {
     double WindowX = 0, WindowY = 0;
     bool InsideViewport = false;
     std::optional<Render2DWindowMetrics> Metrics;
+    std::uint8_t Button = 0;
+};
+
+struct Render2DTextMetrics {
+    double Width = 0, Height = 0, Baseline = 0, LineHeight = 0;
 };
 
 class Render2DTexture {
@@ -94,6 +100,18 @@ public:
                           Render2DColor Color) = 0;
     virtual void DrawText(Render2DFont& Font, std::string_view Text, float X, float Y,
                           float Size, Render2DColor Color) = 0;
+    virtual Render2DTextMetrics MeasureText(Render2DFont&, std::string_view, float) {
+        throw std::runtime_error("text measurement is not supported by this backend");
+    }
+    virtual void FillRect(Render2DRect, Render2DColor) {
+        throw std::runtime_error("rectangle fill is not supported by this backend");
+    }
+    virtual void SetClipRect(std::optional<Render2DRect>) {
+        throw std::runtime_error("widget clipping is not supported by this backend");
+    }
+    virtual void CaptureMouse(bool) {
+        throw std::runtime_error("mouse capture is not supported by this backend");
+    }
     virtual std::optional<Render2DEvent> PollEvent() = 0;
     virtual std::optional<Render2DEvent> WaitEvent(std::int32_t TimeoutMilliseconds) = 0;
 };
