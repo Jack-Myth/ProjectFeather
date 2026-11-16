@@ -24,7 +24,7 @@ struct ModuleInstance {
     enum class State { Loaded, Initializing, Initialized, Failed };
     std::string Id;
     std::shared_ptr<Module> Source;
-    std::vector<std::uint8_t> Identity;
+    std::shared_ptr<const std::vector<std::uint8_t>> Identity;
     std::shared_ptr<Module> Program;
     std::vector<std::shared_ptr<Object>> Functions;
     std::unordered_map<std::string, Value> Globals;

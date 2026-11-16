@@ -94,13 +94,15 @@ void NativeModules::ReleaseRoots() noexcept {
 
 
 std::optional<Value> NativeModules::Resolve(
-    Vm& Machine, std::string_view Name, const std::vector<std::filesystem::path>& Paths) {
+    Vm& Machine, std::string_view Name, const std::vector<std::filesystem::path>& Paths,
+    NativeModuleHost* Host) {
     if (auto Found = ByName.find(std::string(Name)); Found != ByName.end()) return Found->second;
     for (const auto& Directory : Paths) {
         auto Candidate = Directory / (std::string(Name) + NativeSuffix());
         if (!std::filesystem::is_regular_file(Candidate)) continue;
         auto Path = std::filesystem::canonical(Candidate);
-        auto Handle = OpenLibrary(Path);
+        auto LoadedHandle = Handles.find(Path);
+        auto Handle = LoadedHandle == Handles.end() ? OpenLibrary(Path) : LoadedHandle->second;
         auto* Descriptor = GetEntry(Handle.get())();
         bool AnyGuidByte = false;
         if (Descriptor)
@@ -110,13 +112,14 @@ std::optional<Value> NativeModules::Resolve(
         for (const auto& Library : Libraries)
             if (Library.Id == Descriptor->Id)
                 throw std::runtime_error("duplicate Native module GUID: " + PathText(Path));
-        auto Root = Descriptor->Create(NativeModuleContext{Machine, &Input, &Output});
+        // Create can install VM types and shutdown callbacks even if it fails.
+        Handles.try_emplace(Path, Handle);
+        auto Root = Descriptor->Create(NativeModuleContext{Machine, &Input, &Output, Host});
         if (Root.IsError()) return Root;
         if (Root.GetType() != ValueType::Object || Root.IsScriptObject() ||
             Root.GetObjectType() != ObjectType::Host)
             throw std::runtime_error("Native module must return a Host object: " + PathText(Path));
-        Libraries.push_back(Loaded{std::move(Handle), Descriptor->Id,
-                                   std::string(Name), Root});
+        Libraries.push_back(Loaded{Descriptor->Id, std::string(Name), Root});
         ByName.emplace(std::string(Name), Root);
         return Root;
     }

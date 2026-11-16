@@ -123,6 +123,7 @@ struct NativeModuleContext {
     Vm& Machine;
     std::istream* Input = nullptr;
     std::ostream* Output = nullptr;
+    NativeModuleHost* Host = nullptr;
 };
 struct NativeModuleDescriptor {
     NativeModuleGuid Id;            // 模块稳定 GUID，不得全零
@@ -150,6 +151,30 @@ Windows 构建与发行包把 SDL3 动态库放在 `modules/`，供同目录的 
 | `GetArrayElements()` | 获取只读元素视图。数组修改后应重新获取视图。 |
 
 宿主跨 GC 持有数组时使用 `RootHandle`。数组和其中的脚本对象遵守原有的 VM 所有权约束。
+
+## threads
+
+`threads` 是独立的 Native 模块。CLI 通过普通模块搜索路径加载 `threads.felib.dll`（Linux 为 `.so`，macOS 为 `.dylib`）。脚本使用 `import("threads")`。每个 worker 在自己的系统线程和 VM 中执行。运行线程模块的嵌入式宿主需要通过 `NativeModuleContext::Host` 提供 worker VM、脚本调用和关闭回调。
+
+| 函数 | 行为 |
+|---|---|
+| `threads.Start(fn, context)` | 启动 worker，把 Context 作为唯一实参调用脚本函数，返回该 worker 的数字 ID。函数返回后，worker 继续收消息。 |
+| `threads.Post(targetId, fn, args)` | 归档参数并将消息放进指定线程的队列。省略 args 表示零个参数，数组按元素展开，其他值作为一个参数。传一个数组参数时，把它放进外层参数数组。返回 true 表示已入队。 |
+| `threads.GetMainThread()` | 返回 CLI 入口线程的操作系统线程 ID，可直接作为 Post 的目标。 |
+| `threads.Current()` | 返回调用者当前线程的数字 ID。 |
+| `threads.Join(workerId)` | 入口线程关闭指定 worker 的收件队列，等待已入队的任务完成，并返回第一个执行错误（如有）。 |
+
+线程 ID 是操作系统分配的数字，可以直接作为跨 VM 消息的参数。`Post` 和 `Join` 只查找当前 CLI 线程组中的线程。操作系统可能在线程退出后复用 ID，脚本应在 `Join` 后丢弃该 ID。
+
+目标 VM 在当前调用返回后按队列顺序派发消息。缺少函数所在的脚本模块时，CLI 会尝试加载并初始化，且会核对程序版本。执行函数使用目标 VM 的模块全局变量。入口线程在 `main` 返回后处理投递给它的消息，CLI 在队列和执行中的消息都完成后退出。worker 初始化失败时关闭该 worker，未被 `Join` 取走的执行错误会在 CLI 退出前报告。
+
+worker 启动时继承创建线程的模块搜索路径，并可导入 `audio` 和 `render2d`。开窗、播放和事件轮询等操作遵循实际平台与 SDL 后端的线程要求。
+
+### VM 间消息参数
+
+宿主在源 VM 所属线程调用 `SerializeArguments(args)` 获取二进制归档，再把字节交给目标线程。目标线程调用 `DeserializeArguments(bytes)`，按类型标签和原顺序重建实参。脚本对象和数组在目标 VM 中分配，对象编号保留重复引用、循环引用和自定义 MetaObject。返回的脚本对象遵循现有 `RootHandle` 规则。
+
+当前归档支持 null、布尔、byte、number、字符串、脚本对象、数组和 `ByteBuffer`。`ByteBuffer` 记录原生类型 ID 和字节内容。函数及其他原生对象会被拒绝。归档用于运行时消息，格式当前没有长期兼容承诺。
 
 ## stdio
 

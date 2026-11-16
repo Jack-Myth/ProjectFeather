@@ -1,0 +1,5 @@
+export var value = 0;
+
+export def Init(context) {
+    value = context + 1;
+}

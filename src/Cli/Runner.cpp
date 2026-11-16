@@ -38,11 +38,9 @@ int RunProgram(const CompiledProgram& Program, const std::filesystem::path& Entr
     NativeModules Native(std::cin, std::cout);
     Vm Machine(Program.Program, MaxCliScriptObjects);
     Machine.SetDebugController(DebugController);
-    auto Loader = std::make_shared<ModuleLoader>(Machine, EntryPath, Kind, Native);
-    struct NativeRootGuard {
-        NativeModules& Owner;
-        ~NativeRootGuard() { Owner.ReleaseRoots(); }
-    } RootGuard{Native};
+    auto Loader = std::make_shared<ModuleLoader>(Machine, EntryPath, Kind, Native,
+                                                 &Program, MaxCliScriptObjects);
+    NativeExecutionGuard Guard{*Loader, Native};
     Loader->InstallRootImport();
     try {
         CheckResult(Program.Initialize(Machine), "initializer failed", Machine);
@@ -52,6 +50,7 @@ int RunProgram(const CompiledProgram& Program, const std::filesystem::path& Entr
                 throw std::runtime_error("main must have no parameters");
             CheckResult(Machine.Run(Main->second), "main failed", Machine);
         }
+        Loader->FinishNativeModules();
     } catch (const std::exception& Failure) {
         if (auto Source = Machine.GetFaultLocation())
             throw std::runtime_error(FormatSource(*Source) + Failure.what());

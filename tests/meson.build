@@ -4,7 +4,7 @@ M2Tests = executable('m2-tests', 'M2.cpp', dependencies : FeatherDependency)
 test('m2', M2Tests)
 M3Tests = executable('m3-tests', 'M3.cpp', dependencies : FeatherDependency)
 test('m3', M3Tests)
-EmbedTests = executable('embed-tests', 'Embed.cpp', dependencies : FeatherDependency)
+EmbedTests = executable('embed-tests', 'Embed.cpp', dependencies : [FeatherDependency, ThreadDependency])
 test('embed', EmbedTests)
 M4Tests = executable('m4-tests', 'M4.cpp', dependencies : FeatherDependency)
 test('m4', M4Tests)
@@ -15,6 +15,18 @@ test('cli-run', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-ok.fe'])
 test('cli-loop-control', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-loop-control.fe'])
+test('cli-threads-source', FeatherCli,
+  args : ['run', meson.current_source_dir() / 'fixtures/threads-root.fe'],
+  depends : [ThreadsNativeModule, StdioNativeModule])
+ThreadArtifacts = []
+foreach Name : ['threads-root', 'threads-jobs', 'threads-messages']
+  ThreadArtifacts += custom_target(Name + '-fbc',
+    input : 'fixtures/' + Name + '.fe', output : Name + '.fbc',
+    command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
+    build_by_default : true)
+endforeach
+test('cli-threads-bytecode', FeatherVmCli, args : [ThreadArtifacts[0]],
+  depends : ThreadArtifacts + [ThreadsNativeModule, StdioNativeModule])
 test('cli-main-error', FeatherCli,
   args : ['run', meson.current_source_dir() / 'fixtures/cli-main-error.fe'],
   expected_fail : true)

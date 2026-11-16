@@ -6,11 +6,27 @@
 
 namespace Feather {
 
+class NativeModuleHost {
+public:
+    using WorkerMain = std::function<void(NativeModuleHost&)>;
+
+    virtual ~NativeModuleHost() = default;
+    // On the calling OS thread, create an isolated VM and invoke Main.
+    // The child can retrieve the caller's module state for the duration of Main.
+    virtual void RunWorker(std::vector<std::string> Paths, NativeModuleGuid Owner,
+                           void* State, const WorkerMain& Main) const = 0;
+    virtual void* GetWorkerState(NativeModuleGuid Owner) const noexcept = 0;
+    virtual Value DispatchScript(const ScriptFunctionAddress& Address,
+                                 std::span<const std::uint8_t> Arguments) = 0;
+    // Stop must not throw. The host calls it before destroying the VM, including on failure.
+    virtual void RegisterShutdown(std::function<void()> Finish, std::function<void()> Stop) = 0;
+};
 
 struct NativeModuleContext {
     Vm& Machine;
     std::istream* Input = nullptr;
     std::ostream* Output = nullptr;
+    NativeModuleHost* Host = nullptr;
 };
 
 struct NativeModuleDescriptor {

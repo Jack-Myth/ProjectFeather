@@ -1,0 +1,57 @@
+var threads = import("threads");
+var jobs = import("./threads-jobs.fe");
+var messages = import("./threads-messages.fe");
+var phase = 0;
+
+def root_init(context) {
+    if (phase != context) { return byte(-1); }
+    phase = 8;
+}
+
+def fail_init(context) {
+    return byte(-1);
+}
+
+def after_main() {
+    if (phase != 1) { return byte(-1); }
+    if (messages.replies != 2) { return byte(-1); }
+    import("stdio").Console.PrintLine("thread messages dispatched");
+}
+
+def main() {
+    var first = threads.Start(jobs.Init, 41);
+    var second = threads.Start(jobs.Init, 41);
+    var own = threads.Start(root_init, 0);
+    if (get_type(first) != "number") { return byte(-1); }
+    if (first == second) { return byte(-1); }
+    if (threads.Post(first, messages.CheckThreadId, first) != true) { return byte(-1); }
+    if (threads.Post(second, messages.CheckThreadId, second) != true) { return byte(-1); }
+    var args = array();
+    args.Add(0);
+    args.Add(byte(17));
+    if (threads.Post(first, messages.Step, args) != true) { return byte(-1); }
+    if (threads.Post(second, messages.Step, args) != true) { return byte(-1); }
+    args.RemoveAt(0);
+    args.RemoveAt(0);
+    args.Add(1);
+    args.Add(byte(17));
+    if (threads.Post(first, messages.Step, args) != true) { return byte(-1); }
+    if (threads.Post(second, messages.Step, args) != true) { return byte(-1); }
+    if (threads.Join(first) != true) { return byte(-1); }
+    if (threads.Join(second) != true) { return byte(-1); }
+    if (threads.Join(own) != true) { return byte(-1); }
+    var failing = threads.Start(jobs.Init, 41);
+    if (threads.Post(failing, messages.Step, 3) != true) { return byte(-1); }
+    if (get_type(threads.Join(failing)) != "Error") { return byte(-1); }
+    if (get_type(threads.Join(threads.Start(fail_init, null))) != "Error") { return byte(-1); }
+    if (get_type(threads.Post(first, messages.Step, args)) != "Error") { return byte(-1); }
+    if (phase != 0) { return byte(-1); }
+    if (messages.replies != 0) { return byte(-1); }
+    var mainId = threads.GetMainThread();
+    if (get_type(mainId) != "number") { return byte(-1); }
+    if (mainId != threads.Current()) { return byte(-1); }
+    if (mainId < 1) { return byte(-1); }
+    if (get_type(threads.Join(mainId)) != "Error") { return byte(-1); }
+    if (threads.Post(threads.Current(), after_main) != true) { return byte(-1); }
+    phase = 1;
+}

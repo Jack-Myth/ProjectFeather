@@ -630,11 +630,7 @@ void Vm::LoadModule(std::string Id, std::shared_ptr<Module> Source,
         if (!IsIdentifier(Name) || !Exports.insert(Name).second)
             throw std::invalid_argument("invalid loaded module export");
     if (auto Found = LoadedModules.find(Id); Found != LoadedModules.end()) {
-        bool SameProgram = Identity.empty() == Found->second->Identity.empty() &&
-            (Identity.empty() ? Found->second->Source == Source :
-                std::equal(Identity.begin(), Identity.end(), Found->second->Identity.begin(),
-                           Found->second->Identity.end()));
-        if (SameProgram && Found->second->Exports == Exports) return;
+        if (IsModuleBuiltFrom(Id, Source, Identity) && Found->second->Exports == Exports) return;
         throw std::invalid_argument("module ID already belongs to another program");
     }
     if (LoadedModules.size() >= 65'536) throw std::invalid_argument("too many loaded modules");
@@ -644,7 +640,8 @@ void Vm::LoadModule(std::string Id, std::shared_ptr<Module> Source,
     Instance->Globals.emplace("array", BuiltinArray);
     Instance->Id = Id;
     Instance->Source = Source;
-    Instance->Identity.assign(Identity.begin(), Identity.end());
+    if (!Identity.empty())
+        Instance->Identity = std::make_shared<const std::vector<std::uint8_t>>(Identity.begin(), Identity.end());
     Instance->Program = std::make_shared<Module>(*Source);
     Instance->Exports = std::move(Exports);
     for (auto& Item : Instance->Program->Constants)
@@ -666,11 +663,9 @@ bool Vm::IsModuleBuiltFrom(std::string_view Id, const std::shared_ptr<Module>& S
                            std::span<const std::uint8_t> Identity) const {
     auto Found = LoadedModules.find(std::string(Id));
     if (Found == LoadedModules.end()) return false;
-    if (Identity.empty() != Found->second->Identity.empty()) return false;
-    if (!Identity.empty())
-        return std::equal(Identity.begin(), Identity.end(), Found->second->Identity.begin(),
-                          Found->second->Identity.end());
-    return Found->second->Source == Source;
+    const auto& Recorded = Found->second->Identity;
+    if (Identity.empty()) return !Recorded && Found->second->Source == Source;
+    return Recorded && std::equal(Identity.begin(), Identity.end(), Recorded->begin(), Recorded->end());
 }
 
 Value Vm::GetModuleGlobal(std::string_view Id, const std::string& Name) const {
@@ -947,6 +942,27 @@ Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Argument
     Execution.Frames.push_back(MakeFrame(
         std::static_pointer_cast<FunctionObject>(Functions[FunctionConstant]), Arguments));
     return Execute(Execution);
+}
+
+ScriptFunctionAddress Vm::GetFunctionAddress(const Value& Input) const {
+    if (Input.GetType() != ValueType::Object || Input.GetObjectType() != ObjectType::Function)
+        throw std::invalid_argument("expected a script function");
+    ValidateOwnedValue(Input);
+    const auto* Function = static_cast<const FunctionObject*>(Input.AsObject());
+    const auto* Table = &Functions;
+    ScriptFunctionAddress Address{};
+    if (Function->GetOwner() != Program) {
+        const auto& Instance = *ModuleByProgram.at(Function->GetOwner().get());
+        if (!Instance.Identity)
+            throw std::invalid_argument("function module has no transferable program identity");
+        Table = &Instance.Functions;
+        Address.ModuleId = Instance.Id;
+        Address.ModuleIdentity = Instance.Identity;
+    }
+    auto Found = std::find(Table->begin(), Table->end(), Input.AsNativeObject());
+    if (Found == Table->end()) throw std::invalid_argument("function has no address in its module");
+    Address.Constant = static_cast<std::uint32_t>(Found - Table->begin());
+    return Address;
 }
 
 bool Vm::IsCallable(const Value& Input) const {

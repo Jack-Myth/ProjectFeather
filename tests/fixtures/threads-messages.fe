@@ -1,0 +1,29 @@
+var threads = import("threads");
+var jobs = import("./threads-jobs.fe");
+var steps = 0;
+export var replies = 0;
+
+def Reply(result) {
+    if (threads.Current() != threads.GetMainThread()) { return byte(-1); }
+    if (jobs.value != 0) { return byte(-1); }
+    if (result != 17) { return byte(-1); }
+    replies = replies + 1;
+}
+
+export def CheckThreadId(expected) {
+    if (threads.Current() != expected) { return byte(-1); }
+}
+
+export def Step(expected, result) {
+    if (jobs.value != 42) { return byte(-1); }
+    if (steps != expected) { return byte(-1); }
+    if (get_type(result) != "byte") { return byte(-1); }
+    steps = steps + 1;
+    if (steps == 2) {
+        var mainId = threads.GetMainThread();
+        var currentId = threads.Current();
+        if (get_type(currentId) != "number") { return byte(-1); }
+        if (mainId == currentId) { return byte(-1); }
+        return threads.Post(mainId, Reply, result);
+    }
+}

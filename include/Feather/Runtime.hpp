@@ -27,6 +27,7 @@ class Vm;
 class ScriptObject;
 class NativeObject;
 class NativeObjectType;
+class MessageValueArchive;
 struct ExecutionState;
 struct ModuleInstance;
 
@@ -43,6 +44,12 @@ struct NativeTypeId {
 
 struct NativeTypeIdHash {
     std::size_t operator()(const NativeTypeId& Input) const noexcept;
+};
+
+struct ScriptFunctionAddress {
+    std::string ModuleId;
+    std::uint32_t Constant;
+    std::shared_ptr<const std::vector<std::uint8_t>> ModuleIdentity;
 };
 
 enum class ValueType { Null, Bool, Number, String, Object, Byte };
@@ -119,6 +126,7 @@ protected:
 private:
     friend class Vm;
     friend class VmDebugContext;
+    friend class MessageValueArchive;
     NativeObjectType* Type = nullptr;
     std::unordered_map<std::string, Value> GcVisibleMembers;
 };
@@ -180,6 +188,7 @@ public:
 private:
     friend class Vm;
     friend class VmDebugContext;
+    friend class MessageValueArchive;
     explicit ScriptObject(Vm* Owner, ScriptObject* MetaObject = {});
     struct Key {
         ValueType Type;
@@ -407,7 +416,12 @@ public:
     Value Run(std::uint32_t FunctionConstant, const std::vector<Value>& Arguments = {});
     // Calls a value using the same callable/metacall rules and current instruction budget.
     bool IsCallable(const Value& Target) const;
+    ScriptFunctionAddress GetFunctionAddress(const Value& Function) const;
     Value Call(Value Target, std::vector<Value> Arguments = {});
+    // Each call runs on this VM's owner thread. Only the bytes cross threads.
+    std::vector<std::uint8_t> SerializeArguments(std::span<const Value> Arguments) const;
+    // Root returned script objects if retaining them across GC.
+    std::vector<Value> DeserializeArguments(std::span<const std::uint8_t> Bytes);
     Value EvalBytecode(const Value& Code, Value Context = {});
     Value GetVmModule() const { return BuiltinVmModule; }
     const std::vector<std::string>& GetModulePaths() const;
@@ -465,6 +479,7 @@ private:
     friend class ByteBufferLibrary;
     friend class ScriptObject;
     friend class VmDebugContext;
+    friend class MessageValueArchive;
     ScriptObject* AllocateScriptObject(ScriptObject* MetaObject);
     void MaybeCollectGarbage();
     std::size_t CollectGarbageImpl();

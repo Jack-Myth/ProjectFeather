@@ -1,5 +1,8 @@
+#include <Feather/ByteBuffer.hpp>
 #include <Feather/Runtime.hpp>
 
+#include <array>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 
@@ -19,6 +22,59 @@ public:
         return Value::Number(Arguments[0].AsNumber() * 2);
     }
 };
+
+void CheckMessageArchive() {
+    auto Program = std::make_shared<Module>();
+    std::vector<std::uint8_t> Packet;
+    {
+        Vm Sender(Program);
+        auto* State = Sender.CreateScriptObject();
+        auto* Items = Sender.CreateArray();
+        auto* Meta = Sender.CreateMetaObject();
+        auto Buffer = ByteBufferLibrary(Sender).Create(std::string("a\0b", 3));
+        Sender.SetMetaObject(State, Meta);
+        Meta->SetRaw(Value::String("owner"), Value::FromScript(State));
+        Items->AppendArray(Value::FromScript(State));
+        Items->AppendArray(Buffer);
+        State->SetRaw(Value::Number(2.5), Value::FromScript(Items));
+        std::array Arguments{Value{}, Value::Bool(true), Value::Byte(42), Value::Number(42),
+                             Value::String("message"), Value::FromScript(State),
+                             Value::FromScript(Items), Buffer};
+        Packet = Sender.SerializeArguments(Arguments);
+        Items->RemoveArrayAt(0);
+    }
+
+    auto Worker = std::async(std::launch::async, [Packet = std::move(Packet)] {
+        Vm Receiver(std::make_shared<Module>());
+        const auto Arguments = Receiver.DeserializeArguments(Packet);
+        Check(Arguments.size() == 8 && Arguments[0].GetType() == ValueType::Null &&
+                  Arguments[1].AsBool() && Arguments[2].GetType() == ValueType::Byte &&
+                  Arguments[2].AsByte() == 42 && Arguments[3].GetType() == ValueType::Number &&
+                  Arguments[3].AsNumber() == 42 && Arguments[4].AsString() == "message",
+              "message preserves argument order and types");
+        auto Root = Receiver.AddToRoot(Arguments[5]);
+        Receiver.CollectGarbage();
+        auto* State = Root.Get().AsScriptObject();
+        auto* Items = Arguments[6].AsScriptObject();
+        auto* Meta = State->GetMetaObject();
+        Check(State->GetRaw(Value::Number(2.5))->AsScriptObject() == Items &&
+                  Items->GetArrayElements()[0].AsScriptObject() == State &&
+                  Meta->GetRaw(Value::String("owner"))->AsScriptObject() == State &&
+                  Meta->GetMetaObject() == Receiver.GetRootMetaObject(),
+              "message preserves shared references, cycles and MetaObjects");
+        Check(Items->GetArrayElements()[1].AsObject() == Arguments[7].AsObject() &&
+                  *ByteBufferData(Arguments[7]) == std::string("a\0b", 3) &&
+                  &static_cast<NativeObject*>(Arguments[7].AsObject())->GetNativeObjectType()->GetVm() == &Receiver,
+              "binary data uses the receiver's native type");
+        try {
+            Receiver.DeserializeArguments(std::span(Packet).first(Packet.size() - 1));
+        } catch (const std::invalid_argument&) {
+            return;
+        }
+        throw std::runtime_error("truncated message archive was accepted");
+    });
+    Worker.get();
+}
 }
 
 int main() {
@@ -52,6 +108,7 @@ int main() {
         Check(Missing.IsError() &&
               dynamic_cast<ErrorObject*>(Missing.AsObject())->GetMessage() == "undefined global",
               "host can inspect language Error");
+        CheckMessageArchive();
         std::cout << "Embedding tests passed\n";
         return 0;
     } catch (const std::exception& Failure) {

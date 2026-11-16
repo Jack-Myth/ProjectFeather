@@ -19,12 +19,14 @@ endif
 
 FeatherSources = files(
   'src/Value/Value.cpp',
+  'src/Value/BinaryArchive.cpp',
   'src/Value/ByteBuffer.cpp',
   'src/Bytecode/Bytecode.cpp',
   'src/Bytecode/ProgramImage.cpp',
   'src/Bytecode/SymbolImage.cpp',
   'src/Vm/Vm.cpp',
   'src/Vm/Idle.cpp',
+  'src/Vm/MessageArchive.cpp',
   'src/Object/Object.cpp',
   'src/Compiler/Compiler.cpp',
   'src/Embed/Import.cpp',
@@ -61,6 +63,7 @@ FeatherBundledDependency = declare_dependency(
 install_subdir('include/Feather', install_dir : get_option('includedir'))
 
 NativeLoaderSystemDependency = meson.get_compiler('cpp').find_library('dl', required : false)
+ThreadDependency = dependency('threads')
 SocketSystemDependencies = []
 if get_option('debugger') and host_machine.system() == 'windows'
   SocketSystemDependencies += meson.get_compiler('cpp').find_library('ws2_32', required : true)

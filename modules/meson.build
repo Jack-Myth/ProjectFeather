@@ -6,6 +6,13 @@ else
   NativeModuleSuffix = 'so'
 endif
 
+ThreadsNativeModule = shared_module('threads.felib', 'threads/Threads.cpp',
+  name_prefix : '',
+  name_suffix : NativeModuleSuffix,
+  dependencies : [FeatherDependency, ThreadDependency],
+  install : true,
+  install_dir : get_option('bindir') / 'modules')
+
 StdioNativeModule = shared_module('stdio.felib', '../stdlib/StdIo.cpp',
   '../stdlib/StdIoModule.cpp',
   name_prefix : '',

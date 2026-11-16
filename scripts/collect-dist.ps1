@@ -98,7 +98,7 @@ foreach ($Name in @('debugger', 'network', 'render2d', 'audio')) {
 
 $Executables = @('feather', 'featherc', 'feathervm')
 if ($Options['debugger']) { $Executables += 'feather-debugger' }
-$Modules = @('stdio.felib', 'time.felib', 'text.felib')
+$Modules = @('stdio.felib', 'time.felib', 'text.felib', 'threads.felib')
 if ($Options['network']) { $Modules += 'network.felib' }
 if ($Options['audio']) { $Modules += 'audio.felib' }
 if ($Options['render2d'] -eq 'enabled' -or

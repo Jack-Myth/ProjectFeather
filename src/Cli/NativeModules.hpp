@@ -18,19 +18,21 @@ class NativeModules final {
 public:
     NativeModules(std::istream& Input, std::ostream& Output);
     std::optional<Value> Resolve(Vm& Machine, std::string_view Name,
-                                 const std::vector<std::filesystem::path>& Paths);
+                                 const std::vector<std::filesystem::path>& Paths,
+                                 NativeModuleHost* Host = nullptr);
+    NativeModules Fork() const { return NativeModules(Input, Output); }
     void ReleaseRoots() noexcept;
     std::filesystem::path DefaultSearchPath() const;
 
 private:
     struct Loaded {
-        std::shared_ptr<void> Handle;
         NativeModuleGuid Id;
         std::string Name;
         Value Root;
     };
     std::istream& Input;
     std::ostream& Output;
+    std::unordered_map<std::filesystem::path, std::shared_ptr<void>> Handles;
     std::vector<Loaded> Libraries;
     std::unordered_map<std::string, Value> ByName;
 };
