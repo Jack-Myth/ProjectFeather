@@ -26,9 +26,6 @@ constexpr NativeModuleGuid ThreadsGuid{{
     0x82, 0x34, 0x68, 0x3d, 0x70, 0x2e, 0x4d, 0xf5,
     0xa6, 0x87, 0xc4, 0xe8, 0x54, 0x28, 0x9f, 0xb1}};
 
-Value Error(std::string Message) {
-    return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message)));
-}
 
 void Check(const Value& Result) {
     if (!Result.IsError()) return;
@@ -79,7 +76,7 @@ struct Endpoint {
     bool Retiring = false;
 };
 
-enum class Operation { Start, Post, Current, GetMainThread, Join };
+enum class Operation { Start, Post, Current, GetMainThread, Pump, Join };
 
 struct ThreadGroup {
     explicit ThreadGroup(NativeModuleHost& Host) : Host(Host), MainThreadId(NativeThreadId()) {
@@ -97,12 +94,12 @@ struct ThreadGroup {
             try {
                 switch (Action) {
                 case Operation::Start:
-                    if (Args.size() != 2) return Error("threads.Start expects a function and context");
+                    if (Args.size() != 2) return Value::Error("threads.Start expects a function and context");
                     return Value::Number(static_cast<double>(Group.Start(
                         Pack(Args[0], std::span(Args).subspan(1)), Machine.GetModulePaths())));
                 case Operation::Post: {
                     if (Args.size() < 2 || Args.size() > 3)
-                        return Error("threads.Post expects a target thread ID, function and optional arguments");
+                        return Value::Error("threads.Post expects a target thread ID, function and optional arguments");
                     auto Arguments = std::span(Args).subspan(2);
                     if (!Arguments.empty() && Arguments.front().IsScriptObject() &&
                         Arguments.front().AsScriptObject()->IsArray())
@@ -111,22 +108,31 @@ struct ThreadGroup {
                     return Value::Bool(true);
                 }
                 case Operation::Current:
-                    if (!Args.empty()) return Error("threads.Current expects no arguments");
+                    if (!Args.empty()) return Value::Error("threads.Current expects no arguments");
                     return Value::Number(static_cast<double>(CurrentId));
                 case Operation::GetMainThread:
-                    if (!Args.empty()) return Error("threads.GetMainThread expects no arguments");
+                    if (!Args.empty()) return Value::Error("threads.GetMainThread expects no arguments");
                     return Value::Number(static_cast<double>(Group.MainThreadId));
+                case Operation::Pump: {
+                    if (CurrentId != Group.MainThreadId) return Value::Error("threads.Pump requires the entry thread");
+                    if (Args.size() != 1 || !Args[0].IsNumeric()) return Value::Error("threads.Pump expects a message limit");
+                    double Limit = Args[0].AsNumber();
+                    if (!std::isfinite(Limit) || Limit < 0 || Limit > static_cast<double>(MaxThreadId) ||
+                        std::trunc(Limit) != Limit)
+                        return Value::Error("threads.Pump expects a nonnegative integer limit");
+                    return Value::Number(static_cast<double>(Group.Pump(static_cast<std::uint64_t>(Limit))));
+                }
                 case Operation::Join:
-                    if (Args.size() != 1) return Error("threads.Join expects a worker thread ID");
+                    if (Args.size() != 1) return Value::Error("threads.Join expects a worker thread ID");
                     if (CurrentId != Group.MainThreadId)
-                        return Error("threads.Join is available on the CLI entry thread");
+                        return Value::Error("threads.Join is available on the CLI entry thread");
                     Group.Join(ThreadId(Args[0]));
                     return Value::Bool(true);
                 }
             } catch (const std::exception& Failure) {
-                return Error(Failure.what());
+                return Value::Error(Failure.what());
             }
-            return Error("unknown threads operation");
+            return Value::Error("unknown threads operation");
         }
     private:
         Message Pack(const Value& Function, std::span<const Value> Arguments) {
@@ -150,9 +156,10 @@ struct ThreadGroup {
                 if (Name == "Post") return MakeMethod(Operation::Post);
                 if (Name == "Current") return MakeMethod(Operation::Current);
                 if (Name == "GetMainThread") return MakeMethod(Operation::GetMainThread);
+                if (Name == "Pump") return MakeMethod(Operation::Pump);
                 if (Name == "Join") return MakeMethod(Operation::Join);
             }
-            return Error("unknown threads member");
+            return Value::Error("unknown threads member");
         }
     private:
         Value MakeMethod(Operation Action) {
@@ -278,6 +285,35 @@ struct ThreadGroup {
         }
     }
 
+    void DispatchRoot(Endpoint& Root, Message Input, bool DeferFailure) {
+        DispatchingRoot = true;
+        std::exception_ptr Failure;
+        try { Check(Host.DispatchScript(Input.Function, Input.Arguments)); }
+        catch (...) { Failure = std::current_exception(); }
+        DispatchingRoot = false;
+        Complete(Root, DeferFailure ? Failure : nullptr);
+        if (Failure && !DeferFailure) std::rethrow_exception(Failure);
+    }
+
+    std::uint64_t Pump(std::uint64_t Limit) {
+        if (DispatchingRoot) throw std::logic_error("threads.Pump cannot dispatch recursively");
+        std::uint64_t Count = 0;
+        while (Count < Limit) {
+            Endpoint* Root;
+            Message Input;
+            {
+                std::lock_guard Lock(Mutex);
+                Root = Endpoints.at(MainThreadId).get();
+                if (Root->Queue.empty()) break;
+                Input = std::move(Root->Queue.front());
+                Root->Queue.pop_front();
+            }
+            DispatchRoot(*Root, std::move(Input), false);
+            ++Count;
+        }
+        return Count;
+    }
+
     void Finish() {
         Endpoint* Root;
         {
@@ -293,10 +329,7 @@ struct ThreadGroup {
                 Input = std::move(Root->Queue.front());
                 Root->Queue.pop_front();
             }
-            std::exception_ptr Failure;
-            try { Check(Host.DispatchScript(Input.Function, Input.Arguments)); }
-            catch (...) { Failure = std::current_exception(); }
-            Complete(*Root, std::move(Failure));
+            DispatchRoot(*Root, std::move(Input), true);
         }
         Stop();
         if (Root->Failure) std::rethrow_exception(Root->Failure);
@@ -331,10 +364,11 @@ struct ThreadGroup {
     std::unordered_map<ThreadIdentifier, std::unique_ptr<Endpoint>> Endpoints;
     std::size_t Pending = 0;
     bool Stopped = false;
+    bool DispatchingRoot = false; // Accessed only on the entry thread.
 };
 
 Value CreateThreads(const NativeModuleContext& Context) {
-    if (!Context.Host) return Error("threads requires native host worker support");
+    if (!Context.Host) return Value::Error("threads requires native host worker support");
     if (auto* Group = static_cast<ThreadGroup*>(Context.Host->GetWorkerState(ThreadsGuid))) {
         return Value::FromObject(
             std::make_shared<ThreadGroup::Library>(*Group, Context.Machine, NativeThreadId()));

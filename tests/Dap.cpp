@@ -149,8 +149,22 @@ void Run() {
     DapAdapter RelativeAdapter(RelativeChannel, {.PrimarySourcePath = "root/main.fe"});
     RelativeAdapter.DispatchDapMessage(
         R"({"seq":1,"type":"request","command":"setBreakpoints","arguments":{"source":{"path":"root/sub/math.fe"},"breakpoints":[{"line":1}]}})");
-    Check(RelativeChannel->TargetContains(R"("moduleId":"file:sub/math.fe")"),
+    Check(RelativeChannel->TargetContains(R"("moduleId":"./sub/math.fe")"),
           "entry-relative module ID was not mapped from the DAP source path");
+#ifdef _WIN32
+    auto CrossDriveChannel = std::make_shared<RecordingChannel>();
+    DapAdapter CrossDrive(CrossDriveChannel, {.PrimarySourcePath = "D:/game/main.fe"});
+    CrossDrive.DispatchDapMessage(
+        R"({"seq":1,"type":"request","command":"setBreakpoints","arguments":{"source":{"path":"C:/lib/math.fe"},"breakpoints":[{"line":1}]}})");
+    Check(CrossDriveChannel->TargetContains(R"("moduleId":"C:/lib/math.fe")"),
+          "cross-drive breakpoint lost its absolute module ID");
+    CrossDrive.DispatchDapMessage(
+        R"({"seq":2,"type":"request","command":"stackTrace","arguments":{}})");
+    CrossDrive.DispatchTargetMessage(
+        R"({"id":2,"result":{"frames":[{"frameId":0,"functionId":1,"functionName":"f","pc":0,"moduleId":"C:/lib/math.fe","line":1,"column":1}]}})");
+    Check(CrossDriveChannel->DapContains(R"("path":"C:/lib/math.fe")"),
+          "cross-drive stack frame lost its source path");
+#endif
 }
 
 } // namespace

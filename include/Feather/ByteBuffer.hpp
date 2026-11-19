@@ -7,6 +7,7 @@ namespace Feather {
 class FEATHER_API ByteBufferLibrary final {
 public:
     explicit ByteBufferLibrary(Vm& Machine);
+    static const NativeTypeId& GetTypeId();
     Value Create(std::string Bytes) const;
 private:
     NativeObjectType* Type = nullptr;

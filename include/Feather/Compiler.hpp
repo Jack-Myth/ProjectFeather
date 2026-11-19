@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -29,11 +30,13 @@ struct FEATHER_API CompiledProgram {
 // Compile a complete UTF-8 source unit. Throws std::runtime_error on a source error.
 FEATHER_API CompiledProgram Compile(std::string_view Source);
 
-// Experimental versioned bytecode artifact. Decode rejects malformed input before execution.
+// SourceBytes is cache metadata. Omit it for canonical module and symbol identity.
 FEATHER_API std::vector<std::uint8_t> SerializeProgram(const CompiledProgram& Input,
-                                           std::size_t MaxBytes = 64 * 1024 * 1024);
+                                           std::size_t MaxBytes = 64 * 1024 * 1024,
+                                           std::optional<std::uint64_t> SourceBytes = std::nullopt);
 FEATHER_API CompiledProgram DeserializeProgram(std::span<const std::uint8_t> Bytes,
-                                   std::size_t MaxBytes = 64 * 1024 * 1024);
+                                   std::size_t MaxBytes = 64 * 1024 * 1024,
+                                   std::optional<std::uint64_t> ExpectedSourceBytes = std::nullopt);
 
 // Optional companion symbol artifact. The bytecode format and VM semantics stay unchanged.
 // Attach before constructing a VM; rejects damaged or mismatched symbols without mutation.

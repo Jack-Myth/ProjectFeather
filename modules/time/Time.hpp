@@ -33,7 +33,7 @@ public:
 
 private:
     std::shared_ptr<TimeHost> Host;
-    std::shared_ptr<NativeObject> ModuleObject;
+    Value ModuleObject;
 };
 
 } // namespace Feather

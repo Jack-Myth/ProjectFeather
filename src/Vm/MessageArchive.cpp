@@ -1,12 +1,10 @@
 #include <Feather/BinaryArchive.hpp>
 #include <Feather/ByteBuffer.hpp>
-#include <Feather/StdIo.hpp>
 
 namespace Feather {
 namespace {
 
 constexpr std::uint32_t MessageFormat = 0x314d5446; // FTM1
-constexpr std::string_view BufferTypeName = "ByteBuffer";
 
 enum class Tag : std::uint8_t {
     Null = 0, Bool = 1, Byte = 2, Number = 3, String = 4,
@@ -133,11 +131,10 @@ private:
         case Tag::Object: return Value::FromScript(Target.CreateScriptObject());
         case Tag::Array: return Value::FromScript(Target.CreateArray());
         case Tag::Native: {
-            NativeModuleGuid Module;
-            for (auto& Byte : Module.Bytes) Archive.Access(Byte);
-            std::string Name;
-            Archive.Access(Name);
-            if (Module != StdIoModuleGuid || Name != BufferTypeName)
+            NativeTypeId Id;
+            for (auto& Byte : Id.Module.Bytes) Archive.Access(Byte);
+            Archive.Access(Id.Name);
+            if (Id != ByteBufferLibrary::GetTypeId())
                 throw std::invalid_argument("unknown native type in message archive");
             std::string Bytes;
             Archive.Access(Bytes);

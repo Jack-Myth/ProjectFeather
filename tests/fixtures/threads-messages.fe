@@ -11,6 +11,7 @@ def Reply(result) {
 }
 
 export def CheckThreadId(expected) {
+    if (get_type(threads.Pump(0)) != "Error") { return byte(-1); }
     if (threads.Current() != expected) { return byte(-1); }
 }
 

@@ -1,6 +1,6 @@
 #include <Feather/Compiler.hpp>
 #include <Feather/Import.hpp>
-#include <Feather/StdIo.hpp>
+#include "../modules/stdio/StdIo.hpp"
 
 #include <filesystem>
 #include <fstream>

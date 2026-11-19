@@ -1,4 +1,4 @@
-#include <Feather/StdIo.hpp>
+#include "StdIo.hpp"
 #include <Feather/ByteBuffer.hpp>
 
 #include <algorithm>
@@ -17,9 +17,6 @@
 namespace Feather {
 namespace {
 
-Value Error(std::string Message) {
-    return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message)));
-}
 
 using Method = std::function<Value(const std::vector<Value>&)>;
 
@@ -31,7 +28,7 @@ public:
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>& Arguments) override {
         try { return Body(Arguments); }
-        catch (const std::exception& Failure) { return Error(Failure.what()); }
+        catch (const std::exception& Failure) { return Value::Error(Failure.what()); }
     }
 private:
     Method Body;
@@ -45,9 +42,9 @@ public:
         Members.emplace(std::move(Name), std::move(Input));
     }
     Value GetMember(const Value& Key) override {
-        if (Key.GetType() != ValueType::String) return Error("member name must be a string");
+        if (Key.GetType() != ValueType::String) return Value::Error("member name must be a string");
         auto Found = Members.find(Key.AsString());
-        return Found == Members.end() ? Error("unknown standard IO member") : Found->second;
+        return Found == Members.end() ? Value::Error("unknown standard IO member") : Found->second;
     }
 private:
     std::unordered_map<std::string, Value> Members;
@@ -212,24 +209,24 @@ StdIoLibrary::StdIoLibrary(Vm& Machine, std::istream& Input, std::ostream& Outpu
 
     auto ConsoleNamespace = MakeNamespace("Console");
     AddMethod(ConsoleNamespace, "Console.Print", "Print", [State = Shared](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("Console.Print expects one value");
+        if (A.size() != 1) return Value::Error("Console.Print expects one value");
         State->Output << Display(A[0]);
         State->Output.flush();
-        return State->Output ? Value{} : Error("console output failed");
+        return State->Output ? Value{} : Value::Error("console output failed");
     });
     AddMethod(ConsoleNamespace, "Console.PrintLine", "PrintLine", [State = Shared](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("Console.PrintLine expects one value");
+        if (A.size() != 1) return Value::Error("Console.PrintLine expects one value");
         State->Output << Display(A[0]) << '\n';
         State->Output.flush();
-        return State->Output ? Value{} : Error("console output failed");
+        return State->Output ? Value{} : Value::Error("console output failed");
     });
     AddMethod(ConsoleNamespace, "Console.InputLine", "InputLine", [State = Shared](const std::vector<Value>& A) {
-        if (!A.empty()) return Error("Console.InputLine expects no arguments");
+        if (!A.empty()) return Value::Error("Console.InputLine expects no arguments");
         std::string Line;
         if (!std::getline(State->Input, Line))
-            return State->Input.eof() ? Value{} : Error("console input failed");
+            return State->Input.eof() ? Value{} : Value::Error("console input failed");
         try { return Value::String(std::move(Line)); }
-        catch (const std::invalid_argument&) { return Error("console input is not valid UTF-8"); }
+        catch (const std::invalid_argument&) { return Value::Error("console input is not valid UTF-8"); }
     });
     ConsoleObject = ConsoleNamespace;
 
@@ -237,62 +234,62 @@ StdIoLibrary::StdIoLibrary(Vm& Machine, std::istream& Input, std::ostream& Outpu
     auto Owner = std::static_pointer_cast<void>(Shared);
     AddMethod(IONamespace, "IO.OpenFile", "OpenFile", [Owner, Files](const std::vector<Value>& A) {
         if (A.size() != 2 || A[0].GetType() != ValueType::String || A[1].GetType() != ValueType::String)
-            return Error("IO.OpenFile expects path and mode strings");
+            return Value::Error("IO.OpenFile expects path and mode strings");
         const auto& Mode = A[1].AsString();
         auto [Readable, Writable] = ModeAccess(Mode);
-        if (!Readable && !Writable) return Error("invalid file mode");
+        if (!Readable && !Writable) return Value::Error("invalid file mode");
         auto Path = AbsolutePath(A[0].AsString());
         std::FILE* File = Open(Path, Mode + "b");
-        if (!File) return Error("cannot open file");
+        if (!File) return Value::Error("cannot open file");
         return Value::FromObject(Files->Create(
             File, std::move(Path), Mode, Readable, Writable));
     });
     AddMethod(IONamespace, "IO.CloseFile", "CloseFile", [Owner](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("IO.CloseFile expects one handle");
+        if (A.size() != 1) return Value::Error("IO.CloseFile expects one handle");
         auto* File = Handle(A, Owner);
-        if (!File) return Error("invalid or closed file handle");
-        return File->Close() == 0 ? Value::Bool(true) : Error("file close failed");
+        if (!File) return Value::Error("invalid or closed file handle");
+        return File->Close() == 0 ? Value::Bool(true) : Value::Error("file close failed");
     });
     AddMethod(IONamespace, "IO.Tell", "Tell", [Owner](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("IO.Tell expects one handle");
+        if (A.size() != 1) return Value::Error("IO.Tell expects one handle");
         auto* File = Handle(A, Owner);
-        if (!File) return Error("invalid or closed file handle");
+        if (!File) return Value::Error("invalid or closed file handle");
         auto Position = TellFile(File->Get());
-        return Position < 0 || Position > 9007199254740991LL ? Error("file position unavailable")
+        return Position < 0 || Position > 9007199254740991LL ? Value::Error("file position unavailable")
             : Value::Number(static_cast<double>(Position));
     });
     AddMethod(IONamespace, "IO.Seek", "Seek", [Owner](const std::vector<Value>& A) {
         std::int64_t Distance = 0;
         if (A.size() != 3 || !Offset(A[1], Distance) || A[2].GetType() != ValueType::String)
-            return Error("IO.Seek expects handle, integer offset, and origin");
+            return Value::Error("IO.Seek expects handle, integer offset, and origin");
         auto* File = Handle(A, Owner);
-        if (!File) return Error("invalid or closed file handle");
+        if (!File) return Value::Error("invalid or closed file handle");
         const auto& Origin = A[2].AsString();
         int Base = Origin == "start" ? SEEK_SET : Origin == "current" ? SEEK_CUR :
                    Origin == "end" ? SEEK_END : -1;
-        if (Base < 0) return Error("invalid seek origin");
-        if (SeekFile(File->Get(), Distance, Base) != 0) return Error("file seek failed");
+        if (Base < 0) return Value::Error("invalid seek origin");
+        if (SeekFile(File->Get(), Distance, Base) != 0) return Value::Error("file seek failed");
         auto Position = TellFile(File->Get());
-        return Position < 0 || Position > 9007199254740991LL ? Error("file position unavailable")
+        return Position < 0 || Position > 9007199254740991LL ? Value::Error("file position unavailable")
             : Value::Number(static_cast<double>(Position));
     });
     AddMethod(IONamespace, "IO.Read", "Read", [Owner, Buffers](const std::vector<Value>& A) {
         constexpr std::uint64_t MaxRead = 16 * 1024 * 1024;
         std::uint64_t Count = 0;
         if (A.size() != 2 || !Integer(A[1], Count, MaxRead))
-            return Error("IO.Read expects handle and byte count (at most 16 MiB)");
+            return Value::Error("IO.Read expects handle and byte count (at most 16 MiB)");
         auto* File = Handle(A, Owner);
-        if (!File || !File->CanRead()) return Error("invalid, closed, or unreadable file handle");
+        if (!File || !File->CanRead()) return Value::Error("invalid, closed, or unreadable file handle");
         std::string Bytes(static_cast<std::size_t>(Count), '\0');
         auto ReadCount = std::fread(Bytes.data(), 1, Bytes.size(), File->Get());
-        if (std::ferror(File->Get())) return Error("file read failed");
+        if (std::ferror(File->Get())) return Value::Error("file read failed");
         Bytes.resize(ReadCount);
         return Buffers.Create(std::move(Bytes));
     });
     AddMethod(IONamespace, "IO.Write", "Write", [Owner](const std::vector<Value>& A) {
-        if (A.size() != 2) return Error("IO.Write expects handle and byte, string or ByteBuffer");
+        if (A.size() != 2) return Value::Error("IO.Write expects handle and byte, string or ByteBuffer");
         auto* File = Handle(A, Owner);
-        if (!File || !File->CanWrite()) return Error("invalid, closed, or unwritable file handle");
+        if (!File || !File->CanWrite()) return Value::Error("invalid, closed, or unwritable file handle");
         std::string SingleByte;
         const std::string* Bytes = nullptr;
         if (A[1].GetType() == ValueType::Byte) {
@@ -303,9 +300,9 @@ StdIoLibrary::StdIoLibrary(Vm& Machine, std::istream& Input, std::ostream& Outpu
         else if (A[1].GetType() == ValueType::Object && !A[1].IsScriptObject()) {
             Bytes = ByteBufferData(A[1]);
         }
-        if (!Bytes) return Error("IO.Write expects a byte, string or ByteBuffer");
+        if (!Bytes) return Value::Error("IO.Write expects a byte, string or ByteBuffer");
         auto Written = std::fwrite(Bytes->data(), 1, Bytes->size(), File->Get());
-        if (Written != Bytes->size()) return Error("file write failed");
+        if (Written != Bytes->size()) return Value::Error("file write failed");
         return Value::Number(static_cast<double>(Written));
     });
     IOObject = IONamespace;

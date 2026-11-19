@@ -18,7 +18,25 @@ def after_main() {
     import("stdio").Console.PrintLine("thread messages dispatched");
 }
 
+def check_pump() {
+    if (get_type(threads.Pump(1)) != "Error") { return byte(-1); }
+    phase = phase + 1;
+}
+
 def main() {
+    var root = threads.Current();
+    if (threads.Pump(1) != 0) { return byte(-1); }
+    if (get_type(threads.Pump(-1)) != "Error") { return byte(-1); }
+    threads.Post(root, check_pump);
+    threads.Post(root, fail_init, null);
+    threads.Post(root, check_pump);
+    if (threads.Pump(0) != 0) { return byte(-1); }
+    if (threads.Pump(1) != 1) { return byte(-1); }
+    if (phase != 1) { return byte(-1); }
+    if (get_type(threads.Pump(2)) != "Error") { return byte(-1); }
+    if (threads.Pump(2) != 1) { return byte(-1); }
+    if (phase != 2) { return byte(-1); }
+    phase = 0;
     var first = threads.Start(jobs.Init, 41);
     var second = threads.Start(jobs.Init, 41);
     var own = threads.Start(root_init, 0);
@@ -47,6 +65,8 @@ def main() {
     if (get_type(threads.Post(first, messages.Step, args)) != "Error") { return byte(-1); }
     if (phase != 0) { return byte(-1); }
     if (messages.replies != 0) { return byte(-1); }
+    if (threads.Pump(1) != 1) { return byte(-1); }
+    if (messages.replies != 1) { return byte(-1); }
     var mainId = threads.GetMainThread();
     if (get_type(mainId) != "number") { return byte(-1); }
     if (mainId != threads.Current()) { return byte(-1); }

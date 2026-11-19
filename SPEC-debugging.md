@@ -178,7 +178,7 @@ frame ID 和 object ID 只在当前暂停中有效。没有 `.fbs` 的字节码�
 
 `DapAdapter` 是 DAP 与 [Feather 调试协议](#feather-调试协议)之间的状态转换器。它不拥有 VM、`DebugTarget`、子进程、Socket 或字节流 framing。宿主实现 `DapChannel`，分别把完整的 UTF-8 JSON 对象送往 IDE 和 Feather target；DAP 的 `Content-Length` framing 仍属于宿主传输层。
 
-adapter 与 `DebugTarget` 可以装在同一进程，也可以位于 IDE 插件或独立调试进程。`DapAdapterOptions::PrimarySourcePath` 对应 Feather 的空 `moduleId`；CLI 使用的 `file:<relative-path>` 模块 ID 相对主源码目录映射为 DAP `source.path`，其他模块 ID 原样转发。更复杂的路径规范化和远端路径映射仍由宿主负责。
+adapter 与 `DebugTarget` 可以装在同一进程，也可以位于 IDE 插件或独立调试进程。`DapAdapterOptions::PrimarySourcePath` 对应 Feather 的空 `moduleId`；CLI 的 `./`、`../` 模块 ID 相对主源码目录映射为 DAP `source.path`，绝对路径直接定位源文件，其他宿主自定义 ID 原样转发。更复杂的路径规范化和远端路径映射仍由宿主负责。
 
 仓库的 `editors/vscode-feather` 是 IDE 侧具体接入：它使用 JavaScript 在 VS Code extension host 内实现本规范的同等状态转换，并直接持有到 Feather target 的单条 TCP 连接，不启动独立 DAP 中继。C++ `DapAdapter` 仍供 C++ 宿主嵌入；两者以本规范和协议测试对齐，不要求跨语言链接同一实现。
 

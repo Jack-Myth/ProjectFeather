@@ -15,9 +15,6 @@
 namespace Feather {
 namespace {
 
-Value Error(std::string Message) {
-    return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message)));
-}
 
 using Method = std::function<Value(const std::vector<Value>&)>;
 
@@ -29,7 +26,7 @@ public:
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>& Arguments) override {
         try { return Body(Arguments); }
-        catch (const std::exception& Failure) { return Error(Failure.what()); }
+        catch (const std::exception& Failure) { return Value::Error(Failure.what()); }
     }
 private:
     Method Body;
@@ -43,9 +40,9 @@ public:
         Members.emplace(std::move(Name), std::move(Input));
     }
     Value GetMember(const Value& Key) override {
-        if (Key.GetType() != ValueType::String) return Error("member name must be a string");
+        if (Key.GetType() != ValueType::String) return Value::Error("member name must be a string");
         auto Found = Members.find(Key.AsString());
-        return Found == Members.end() ? Error("unknown render2d member") : Found->second;
+        return Found == Members.end() ? Value::Error("unknown render2d member") : Found->second;
     }
 private:
     std::unordered_map<std::string, Value> Members;
@@ -301,40 +298,40 @@ Render2DLibrary::Render2DLibrary(Vm& Machine, std::shared_ptr<Render2DHost> Host
     };
 
     Add("CreateRenderContext", [&Contexts](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("CreateRenderContext expects one config object");
+        if (A.size() != 1) return Value::Error("CreateRenderContext expects one config object");
         return Value::FromObject(Contexts.Create(Config(A[0]), true));
     });
     Add("Close", [](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("Close expects one RenderContext");
+        if (A.size() != 1) return Value::Error("Close expects one RenderContext");
         ContextArgument(A[0]).Close();
         return Value::Bool(true);
     });
     Add("IsOpen", [](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("IsOpen expects one RenderContext");
+        if (A.size() != 1) return Value::Error("IsOpen expects one RenderContext");
         return Value::Bool(ContextArgument(A[0]).IsOpen());
     });
     Add("GetWindowMetrics", [State](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("GetWindowMetrics expects context");
+        if (A.size() != 1) return Value::Error("GetWindowMetrics expects context");
         return MetricsValue(State->Machine, ContextArgument(A[0]).RequireOpen().GetWindowMetrics());
     });
     Add("SetViewport", [](const std::vector<Value>& A) {
-        if (A.size() != 2 && A.size() != 5) return Error("SetViewport expects context, null or x,y,width,height");
+        if (A.size() != 2 && A.size() != 5) return Value::Error("SetViewport expects context, null or x,y,width,height");
         auto& Context = ContextArgument(A[0]);
-        if (Context.IsFrameOpen()) return Error("SetViewport must precede BeginRender");
+        if (Context.IsFrameOpen()) return Value::Error("SetViewport must precede BeginRender");
         std::optional<Render2DRect> View;
         if (A.size() == 2) {
-            if (A[1].GetType() != ValueType::Null) return Error("viewport reset requires null");
+            if (A[1].GetType() != ValueType::Null) return Value::Error("viewport reset requires null");
         } else {
             View = Render2DRect{FiniteFloat(A[1], "x"), FiniteFloat(A[2], "y"),
                                FiniteFloat(A[3], "width"), FiniteFloat(A[4], "height")};
             if (View->X < 0 || View->Y < 0 || View->Width < 0 || View->Height < 0)
-                return Error("viewport values must be non-negative");
+                return Value::Error("viewport values must be non-negative");
         }
         Context.RequireOpen().SetViewport(View);
         return Value{};
     });
     Add("WindowToCanvas", [State](const std::vector<Value>& A) {
-        if (A.size() != 3) return Error("WindowToCanvas expects context,x,y");
+        if (A.size() != 3) return Value::Error("WindowToCanvas expects context,x,y");
         auto P = ContextArgument(A[0]).RequireOpen().WindowToCanvas(
             FiniteFloat(A[1], "x"), FiniteFloat(A[2], "y"));
         auto* Result = State->Machine.CreateScriptObject();
@@ -345,25 +342,25 @@ Render2DLibrary::Render2DLibrary(Vm& Machine, std::shared_ptr<Render2DHost> Host
     });
     Add("LoadTexture", [&Textures](const std::vector<Value>& A) {
         if (A.size() != 2 || A[1].GetType() != ValueType::String)
-            return Error("LoadTexture expects RenderContext and path");
+            return Value::Error("LoadTexture expects RenderContext and path");
         auto& Context = ContextArgument(A[0]); Context.RequireOpen();
         return Value::FromObject(Textures.Create(Context.GetId(), NormalizeResourcePath(A[1].AsString())));
     });
     Add("LoadFont", [&Fonts](const std::vector<Value>& A) {
         if (A.size() != 2 || A[1].GetType() != ValueType::String)
-            return Error("LoadFont expects RenderContext and path");
+            return Value::Error("LoadFont expects RenderContext and path");
         auto& Context = ContextArgument(A[0]); Context.RequireOpen();
         return Value::FromObject(Fonts.Create(Context.GetId(), NormalizeResourcePath(A[1].AsString())));
     });
     Add("BeginRender", [](const std::vector<Value>& A) {
-        if (A.size() != 5) return Error("BeginRender expects context and RGBA");
+        if (A.size() != 5) return Value::Error("BeginRender expects context and RGBA");
         ContextArgument(A[0]).Begin(Color(A, 1));
         return Value::Bool(true);
     });
     Add("DrawTexture", [](const std::vector<Value>& A) {
-        if (A.size() != 10) return Error("DrawTexture expects context, texture, rectangle, and RGBA");
+        if (A.size() != 10) return Value::Error("DrawTexture expects context, texture, rectangle, and RGBA");
         auto& Context = ContextArgument(A[0]);
-        if (!Context.IsFrameOpen()) return Error("DrawTexture requires an open render frame");
+        if (!Context.IsFrameOpen()) return Value::Error("DrawTexture requires an open render frame");
         auto& Texture = ResourceArgument<TextureObject>(A[1], Context.GetId(), "Texture");
         auto& Loaded = Texture.GetLoaded();
         if (!Loaded) Loaded = Context.RequireOpen().LoadTexture(Texture.GetPath());
@@ -373,44 +370,44 @@ Render2DLibrary::Render2DLibrary(Vm& Machine, std::shared_ptr<Render2DHost> Host
         return Value::Bool(true);
     });
     Add("DrawLine", [](const std::vector<Value>& A) {
-        if (A.size() != 10) return Error("DrawLine expects context, x1,y1,x2,y2,width, and RGBA");
+        if (A.size() != 10) return Value::Error("DrawLine expects context, x1,y1,x2,y2,width, and RGBA");
         auto& Context = ContextArgument(A[0]);
-        if (!Context.IsFrameOpen()) return Error("DrawLine requires an open render frame");
+        if (!Context.IsFrameOpen()) return Value::Error("DrawLine requires an open render frame");
         const float X1 = FiniteFloat(A[1], "x1"), Y1 = FiniteFloat(A[2], "y1");
         const float X2 = FiniteFloat(A[3], "x2"), Y2 = FiniteFloat(A[4], "y2");
         const float Width = FiniteFloat(A[5], "width");
-        if (Width <= 0) return Error("line width must be positive");
+        if (Width <= 0) return Value::Error("line width must be positive");
         Context.RequireOpen().DrawLine(X1, Y1, X2, Y2, Width, Color(A, 6));
         return Value::Bool(true);
     });
     Add("DrawText", [](const std::vector<Value>& A) {
         if (A.size() != 10 || A[2].GetType() != ValueType::String)
-            return Error("DrawText expects context, font, text, position, size, and RGBA");
+            return Value::Error("DrawText expects context, font, text, position, size, and RGBA");
         auto& Context = ContextArgument(A[0]);
-        if (!Context.IsFrameOpen()) return Error("DrawText requires an open render frame");
+        if (!Context.IsFrameOpen()) return Value::Error("DrawText requires an open render frame");
         auto& Font = ResourceArgument<FontObject>(A[1], Context.GetId(), "Font");
         auto& Loaded = Font.GetLoaded();
         if (!Loaded) Loaded = Context.RequireOpen().LoadFont(Font.GetPath());
         auto Size = FiniteFloat(A[5], "size");
-        if (Size <= 0) return Error("text size must be positive");
+        if (Size <= 0) return Value::Error("text size must be positive");
         Context.RequireOpen().DrawText(*Loaded, A[2].AsString(), FiniteFloat(A[3], "x"),
             FiniteFloat(A[4], "y"), Size, Color(A, 6));
         return Value::Bool(true);
     });
     Add("EndRender", [](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("EndRender expects one RenderContext");
+        if (A.size() != 1) return Value::Error("EndRender expects one RenderContext");
         ContextArgument(A[0]).End();
         return Value::Bool(true);
     });
     Add("MeasureText", [State](const std::vector<Value>& A) {
         if (A.size() != 4 || A[2].GetType() != ValueType::String)
-            return Error("MeasureText expects context, font, text, size");
+            return Value::Error("MeasureText expects context, font, text, size");
         auto& Context = ContextArgument(A[0]); Context.RequireOpen();
         auto& Font = ResourceArgument<FontObject>(A[1], Context.GetId(), "Font");
         auto& Loaded = Font.GetLoaded();
         if (!Loaded) Loaded = Context.RequireOpen().LoadFont(Font.GetPath());
         auto Size = FiniteFloat(A[3], "size");
-        if (Size <= 0) return Error("text size must be positive");
+        if (Size <= 0) return Value::Error("text size must be positive");
         auto M = Context.RequireOpen().MeasureText(*Loaded, A[2].AsString(), Size);
         auto* Result = State->Machine.CreateScriptObject();
         Result->SetRaw(Value::String("Width"), Value::Number(M.Width));
@@ -420,45 +417,45 @@ Render2DLibrary::Render2DLibrary(Vm& Machine, std::shared_ptr<Render2DHost> Host
         return Value::FromScript(Result);
     });
     Add("FillRect", [](const std::vector<Value>& A) {
-        if (A.size() != 9) return Error("FillRect expects context, rectangle, RGBA");
+        if (A.size() != 9) return Value::Error("FillRect expects context, rectangle, RGBA");
         auto& Context = ContextArgument(A[0]);
-        if (!Context.IsFrameOpen()) return Error("FillRect requires an open render frame");
+        if (!Context.IsFrameOpen()) return Value::Error("FillRect requires an open render frame");
         Render2DRect Rect{FiniteFloat(A[1], "x"), FiniteFloat(A[2], "y"),
             FiniteFloat(A[3], "width"), FiniteFloat(A[4], "height")};
-        if (Rect.Width < 0 || Rect.Height < 0) return Error("rectangle size must be non-negative");
+        if (Rect.Width < 0 || Rect.Height < 0) return Value::Error("rectangle size must be non-negative");
         Context.RequireOpen().FillRect(Rect, Color(A, 5));
         return Value::Bool(true);
     });
     Add("SetClipRect", [](const std::vector<Value>& A) {
-        if (A.size() != 2 && A.size() != 5) return Error("SetClipRect expects context, null or rectangle");
+        if (A.size() != 2 && A.size() != 5) return Value::Error("SetClipRect expects context, null or rectangle");
         auto& Context = ContextArgument(A[0]);
-        if (!Context.IsFrameOpen()) return Error("SetClipRect requires an open render frame");
+        if (!Context.IsFrameOpen()) return Value::Error("SetClipRect requires an open render frame");
         std::optional<Render2DRect> Rect;
         if (A.size() == 2) {
-            if (A[1].GetType() != ValueType::Null) return Error("clip reset requires null");
+            if (A[1].GetType() != ValueType::Null) return Value::Error("clip reset requires null");
         } else {
             Rect = Render2DRect{FiniteFloat(A[1], "x"), FiniteFloat(A[2], "y"),
                 FiniteFloat(A[3], "width"), FiniteFloat(A[4], "height")};
-            if (Rect->Width < 0 || Rect->Height < 0) return Error("clip size must be non-negative");
+            if (Rect->Width < 0 || Rect->Height < 0) return Value::Error("clip size must be non-negative");
         }
         Context.RequireOpen().SetClipRect(Rect);
         return Value::Bool(true);
     });
     Add("CaptureMouse", [](const std::vector<Value>& A) {
         if (A.size() != 2 || A[1].GetType() != ValueType::Bool)
-            return Error("CaptureMouse expects context, bool");
+            return Value::Error("CaptureMouse expects context, bool");
         ContextArgument(A[0]).RequireOpen().CaptureMouse(A[1].AsBool());
         return Value::Bool(true);
     });
     Add("PollEvent", [State](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("PollEvent expects one RenderContext");
+        if (A.size() != 1) return Value::Error("PollEvent expects one RenderContext");
         return EventValue(State->Machine, ContextArgument(A[0]).RequireOpen().PollEvent());
     });
     Add("WaitEvent", [State](const std::vector<Value>& A) {
         std::uint32_t Timeout = 0;
         if (A.size() != 2 || !ExactInteger(A[1], Timeout, 0,
                 static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())))
-            return Error("WaitEvent expects RenderContext and a non-negative integer timeout");
+            return Value::Error("WaitEvent expects RenderContext and a non-negative integer timeout");
         return EventValue(State->Machine, ContextArgument(A[0]).RequireOpen().WaitEvent(
             static_cast<std::int32_t>(Timeout)));
     });

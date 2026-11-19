@@ -12,9 +12,6 @@
 namespace Feather {
 namespace {
 namespace Net = NetworkPlatform;
-Value Error(std::string Message) {
-    return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message)));
-}
 using Method = std::function<Value(const std::vector<Value>&)>;
 class Function final : public NativeObject {
 public:
@@ -23,7 +20,7 @@ public:
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>& A) override {
         try { return Body(A); }
-        catch (const std::exception& Failure) { return Error(Failure.what()); }
+        catch (const std::exception& Failure) { return Value::Error(Failure.what()); }
     }
 private:
     Method Body;
@@ -34,9 +31,9 @@ public:
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     void Add(std::string Name, Value Input) { Members.emplace(std::move(Name), std::move(Input)); }
     Value GetMember(const Value& Key) override {
-        if (Key.GetType() != ValueType::String) return Error("network member name must be a string");
+        if (Key.GetType() != ValueType::String) return Value::Error("network member name must be a string");
         auto Found = Members.find(Key.AsString());
-        return Found == Members.end() ? Error("unknown network member") : Found->second;
+        return Found == Members.end() ? Value::Error("unknown network member") : Found->second;
     }
 private:
     std::unordered_map<std::string, Value> Members;
@@ -207,7 +204,7 @@ Value DispatchOne(Vm& Machine, const std::shared_ptr<State>& Shared, const ByteB
                 From = std::move(Packet.From);
             }
         } catch (const std::runtime_error& ErrorValue) {
-            Kind = "error"; Failure = Error(ErrorValue.what());
+            Kind = "error"; Failure = Value::Error(ErrorValue.what());
             if (C.Tcp) C.Close();
         }
         if (Kind != "data") ClearCallback(*Socket);
@@ -260,23 +257,23 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
     Add("CreateUdp", [Create](const auto& A) { return Create(false, A); });
     Add("Bind", [&Sockets](const auto& A) {
         Arity(A, 3, 3); auto& C = Sockets.Get(A[0]);
-        if (C.Status != Phase::Created) return Error("network Bind requires a new socket");
+        if (C.Status != Phase::Created) return Value::Error("network Bind requires a new socket");
         Net::Bind(C.Handle, C.Version, Text(A[1]), Port(A[2], true));
         C.Status = Phase::Bound;
         return Value{};
     });
     Add("Listen", [&Sockets](const auto& A) {
         Arity(A, 1, 2); auto& C = Sockets.Get(A[0]);
-        if (!C.Tcp || C.Status != Phase::Bound) return Error("network Listen requires a bound TCP socket");
+        if (!C.Tcp || C.Status != Phase::Bound) return Value::Error("network Listen requires a bound TCP socket");
         auto Backlog = A.size() == 2 ? Integer(A[1], 1024, "backlog") : 16;
-        if (Backlog == 0) return Error("network backlog must be positive");
+        if (Backlog == 0) return Value::Error("network backlog must be positive");
         Net::Listen(C.Handle, static_cast<int>(Backlog)); C.Status = Phase::Listening;
         return Value{};
     });
     Add("Connect", [&Sockets](const auto& A) {
         Arity(A, 3, 3); auto& C = Sockets.Get(A[0]);
         if (!C.Tcp || (C.Status != Phase::Created && C.Status != Phase::Bound))
-            return Error("network Connect requires a new or bound TCP socket");
+            return Value::Error("network Connect requires a new or bound TCP socket");
         const auto& Host = Text(A[1]); auto Destination = Port(A[2]);
         try {
             bool Done = Net::Connect(C.Handle, C.Version, Host, Destination);
@@ -286,9 +283,9 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
     });
     Add("FinishConnect", [&Sockets](const auto& A) {
         Arity(A, 1, 1); auto& C = Sockets.Get(A[0]);
-        if (!C.Tcp) return Error("network FinishConnect requires TCP");
+        if (!C.Tcp) return Value::Error("network FinishConnect requires TCP");
         if (C.Status == Phase::Connected) return Value::Bool(true);
-        if (C.Status != Phase::Connecting) return Error("network no connection is pending");
+        if (C.Status != Phase::Connecting) return Value::Error("network no connection is pending");
         try {
             bool Done = Net::FinishConnect(C.Handle);
             if (Done) C.Status = Phase::Connected;
@@ -297,7 +294,7 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
     });
     Add("Accept", [&Sockets](const auto& A) {
         Arity(A, 1, 1); auto& C = Sockets.Get(A[0]);
-        if (C.Status != Phase::Listening) return Error("network Accept requires a listener");
+        if (C.Status != Phase::Listening) return Value::Error("network Accept requires a listener");
         auto Body = Sockets.Allocate(C.Version, true);
         auto Accepted = Net::Accept(C.Handle);
         if (Accepted == Net::Invalid) return Value{};
@@ -308,7 +305,7 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
         Arity(A, 3, 4); auto& C = Sockets.Get(A[0]);
         if (A[1].GetType() != ValueType::Bool || A[2].GetType() != ValueType::Bool ||
             (!A[1].AsBool() && !A[2].AsBool()))
-            return Error("network Poll requires read/write booleans, at least one true");
+            return Value::Error("network Poll requires read/write booleans, at least one true");
         auto Timeout = A.size() == 4 ? Integer(A[3], 60000, "timeout milliseconds") : 0;
         auto Ready = Net::Poll(C.Handle, A[1].AsBool(), A[2].AsBool(), static_cast<int>(Timeout));
         return Record(Machine, {{"Readable", Value::Bool(Ready.Readable)},
@@ -317,11 +314,11 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
     });
     Add("Send", [&Sockets](const auto& A) {
         Arity(A, 2, 4); auto& C = Sockets.Get(A[0]); TcpConnected(C);
-        if (C.WriteClosed) return Error("network write side is closed");
+        if (C.WriteClosed) return Value::Error("network write side is closed");
         char Single = 0; auto Bytes = Data(A[1], Single);
         auto Offset = A.size() > 2 ? Integer(A[2], Bytes.size(), "send offset") : 0;
         auto Count = A.size() > 3 ? Integer(A[3], Bytes.size() - Offset, "send count") : Bytes.size() - Offset;
-        if (Count > C.Owner->Limits.MaxTransferBytes) return Error("network transfer limit exceeded");
+        if (Count > C.Owner->Limits.MaxTransferBytes) return Value::Error("network transfer limit exceeded");
         if (Count == 0) return Value::Number(0);
         try {
             auto Written = Net::Send(C.Handle, Bytes.substr(Offset, Count));
@@ -331,11 +328,11 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
     });
     Add("Receive", [&Sockets, Buffers](const auto& A) {
         Arity(A, 1, 2); auto& C = Sockets.Get(A[0]); TcpConnected(C);
-        if (C.Receiving) return Error("network receive callback owns this socket");
+        if (C.Receiving) return Value::Error("network receive callback owns this socket");
         if (C.ReadClosed) return Value::Bool(false);
         auto Count = A.size() == 2 ? Integer(A[1], C.Owner->Limits.MaxTransferBytes, "receive count")
                                   : std::min<std::size_t>(65536, C.Owner->Limits.MaxTransferBytes);
-        if (Count == 0) return Error("network TCP receive count must be positive");
+        if (Count == 0) return Value::Error("network TCP receive count must be positive");
         std::string Bytes(Count, '\0');
         std::ptrdiff_t Read;
         try { Read = Net::Receive(C.Handle, Bytes.data(), Bytes.size()); }
@@ -349,15 +346,15 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
         Arity(A, 4, 4); auto& C = Sockets.Get(A[0]); Udp(C);
         char Single = 0; auto Bytes = Data(A[1], Single);
         if (Bytes.size() > std::min<std::size_t>(65507, C.Owner->Limits.MaxTransferBytes))
-            return Error("network UDP payload limit exceeded");
+            return Value::Error("network UDP payload limit exceeded");
         auto Written = Net::SendTo(C.Handle, C.Version, Bytes, Text(A[2]), Port(A[3]));
         if (Written < 0) return Value{};
-        if (static_cast<std::size_t>(Written) != Bytes.size()) return Error("network incomplete datagram send");
+        if (static_cast<std::size_t>(Written) != Bytes.size()) return Value::Error("network incomplete datagram send");
         return Value::Number(static_cast<double>(Written));
     });
     Add("ReceiveFrom", [&Sockets, Buffers, &Machine](const auto& A) {
         Arity(A, 1, 2); auto& C = Sockets.Get(A[0]); Udp(C);
-        if (C.Receiving) return Error("network receive callback owns this socket");
+        if (C.Receiving) return Value::Error("network receive callback owns this socket");
         auto Limit = std::min<std::size_t>(65507, C.Owner->Limits.MaxTransferBytes);
         auto Count = A.size() == 2 ? Integer(A[1], Limit, "datagram receive count") : Limit;
         // One extra byte distinguishes a valid zero-length packet from overflow,
@@ -366,7 +363,7 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
         auto Packet = Net::ReceiveFrom(C.Handle, Bytes.data(), Bytes.size());
         if (Packet.Count < 0) return Value{};
         if (Packet.Truncated || static_cast<std::size_t>(Packet.Count) > Count)
-            return Error("network datagram exceeds receive limit; datagram discarded");
+            return Value::Error("network datagram exceeds receive limit; datagram discarded");
         Bytes.resize(static_cast<std::size_t>(Packet.Count));
         return Record(Machine, {{"Data", Buffers.Create(std::move(Bytes))},
             {"Address", Value::String(Packet.From.Host)}, {"Port", Value::Number(Packet.From.Port)}});
@@ -382,8 +379,8 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
         auto& C = Sockets.Get(A[0]);
         if (C.Tcp) TcpConnected(C);
         if ((!C.Tcp && C.Status != Phase::Bound) || C.ReadClosed)
-            return Error("network receiver requires bound UDP or readable TCP");
-        if (!Machine.IsCallable(A[1])) return Error("network receiver must be callable");
+            return Value::Error("network receiver requires bound UDP or readable TCP");
+        if (!Machine.IsCallable(A[1])) return Value::Error("network receiver must be callable");
         if (!Shared->Service) {
             Shared->Service = Machine.RegisterIdleHook(
                 [Weak = std::weak_ptr<State>(Shared), &Machine, Buffers](double) {
@@ -423,7 +420,7 @@ NetworkLibrary::NetworkLibrary(Vm& Machine, NetworkLimits Limits) {
         for (const auto& Item : A) {
             char Single = 0; auto Part = Data(Item, Single);
             if (Part.size() > Shared->Limits.MaxTransferBytes - Bytes.size())
-                return Error("network buffer limit exceeded");
+                return Value::Error("network buffer limit exceeded");
             Bytes.append(Part);
         }
         return Buffers.Create(std::move(Bytes));

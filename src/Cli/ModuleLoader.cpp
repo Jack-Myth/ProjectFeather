@@ -1,4 +1,5 @@
 #include "ModuleLoader.hpp"
+#include "../FileModulePath.hpp"
 
 #include <Feather/Import.hpp>
 
@@ -8,12 +9,6 @@
 
 namespace Feather::Cli {
 namespace {
-std::filesystem::path Utf8Path(std::string_view Text) {
-    std::u8string Bytes;
-    Bytes.reserve(Text.size());
-    for (unsigned char Byte : Text) Bytes.push_back(static_cast<char8_t>(Byte));
-    return std::filesystem::path(Bytes);
-}
 bool BareName(std::string_view Name) {
     if (Name.empty()) return false;
     for (std::size_t I = 0; I < Name.size(); ++I) {
@@ -23,9 +18,6 @@ bool BareName(std::string_view Name) {
         if (!Letter && C != '_' && !(I != 0 && Digit)) return false;
     }
     return true;
-}
-Value Error(std::string Message) {
-    return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message)));
 }
 }
 
@@ -101,9 +93,10 @@ Value ModuleLoader::LoadFunctionModule(const ScriptFunctionAddress& Address) {
     if (!Address.ModuleIdentity)
         throw std::invalid_argument("message module has no program identity");
     if (!Cache.contains(Id)) {
-        if (!Id.starts_with("file:"))
+        auto Path = FileModulePath::Resolve(RootDirectory, Id);
+        if (!Path)
             throw std::invalid_argument("message module has no file location: " + Id);
-        LoadFile(RootDirectory / Utf8Path(std::string_view(Id).substr(5)), false);
+        LoadFile(*Path, false);
     }
     if (!Machine.IsModuleBuiltFrom(Id, nullptr, *Address.ModuleIdentity))
         throw std::runtime_error("message module differs from the sender's program: " + Id);
@@ -128,19 +121,19 @@ void ModuleLoader::InstallModuleImport(std::string_view Id) {
 
 Value ModuleLoader::Resolve(std::string_view Caller, std::string_view Specifier) {
     if (!Specifier.starts_with("./") && !Specifier.starts_with("../")) {
-        if (!BareName(Specifier)) return Error("invalid module name: " + std::string(Specifier));
+        if (!BareName(Specifier)) return Value::Error("invalid module name: " + std::string(Specifier));
         std::vector<std::filesystem::path> Paths;
-        for (const auto& Directory : Machine.GetModulePaths()) Paths.push_back(Utf8Path(Directory));
+        for (const auto& Directory : Machine.GetModulePaths()) Paths.push_back(FileModulePath::FromUtf8(Directory));
         if (auto Result = Native.Resolve(Machine, Specifier, Paths, this)) return *Result;
         auto Extension = Kind == ModuleFileKind::Source ? ".fe" : ".fbc";
         for (const auto& Directory : Paths) {
             auto Candidate = Directory / (std::string(Specifier) + Extension);
             if (std::filesystem::is_regular_file(Candidate)) return LoadFile(Candidate);
         }
-        return Error("module not found: " + std::string(Specifier));
+        return Value::Error("module not found: " + std::string(Specifier));
     }
 
-    auto Relative = Utf8Path(Specifier);
+    auto Relative = FileModulePath::FromUtf8(Specifier);
     if (Relative.is_absolute()) throw std::invalid_argument("file import must be relative");
     auto Extension = Kind == ModuleFileKind::Source ? ".fe" : ".fbc";
     if (Relative.extension().empty()) Relative += Extension;
@@ -159,26 +152,14 @@ Value ModuleLoader::Resolve(std::string_view Caller, std::string_view Specifier)
     return LoadFile(CallerPath.parent_path() / Relative);
 }
 
-std::string ModuleLoader::LogicalId(const std::filesystem::path& Path) const {
-    auto Relative = Path.lexically_relative(RootDirectory);
-    if (Relative.empty() || Relative.is_absolute())
-        throw std::invalid_argument(
-            "Feather module cannot be represented relative to the entry directory");
-    auto Utf8 = Relative.generic_u8string();
-    std::string Result = "file:";
-    Result.reserve(Result.size() + Utf8.size());
-    for (char8_t Byte : Utf8) Result.push_back(static_cast<char>(Byte));
-    return Result;
-}
-
 Value ModuleLoader::LoadFile(const std::filesystem::path& Candidate, bool Initialize) {
     auto Path = std::filesystem::canonical(Candidate);
     if (Path == RootPath)
         throw std::invalid_argument("entry file cannot import itself as a module");
-    auto Id = LogicalId(Path);
+    auto Id = FileModulePath::Id(RootDirectory, Path);
     if (auto Found = Cache.find(Id); Found != Cache.end()) {
         if (!Initialize) return Machine.GetModuleNamespace(Id);
-        auto Result = Found->second.InitializeModule(Machine, Id);
+        auto Result = Machine.InitializeModule(Id, Found->second.Initializer);
         return Result.IsError() ? Result : Machine.GetModuleNamespace(Id);
     }
 
@@ -204,7 +185,7 @@ Value ModuleLoader::LoadFile(const std::filesystem::path& Candidate, bool Initia
     PathsById.emplace(Id, Path);
     InstallModuleImport(Id);
     if (!Initialize) return Machine.GetModuleNamespace(Id);
-    auto Result = Found->second.InitializeModule(Machine, Id);
+    auto Result = Machine.InitializeModule(Id, Found->second.Initializer);
     return Result.IsError() ? Result : Machine.GetModuleNamespace(Id);
 }
 

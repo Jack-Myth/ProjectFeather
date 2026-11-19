@@ -1,12 +1,27 @@
 var math = import("./math");
 var mathAgain = import("./math.fe");
 var util = import("./util");
+var helper = import("helper");
+var stdio = import("stdio");
+var time = import("time");
+var text = import("text");
 
 def main() {
-    if (math == mathAgain) {
-        if (math.sum(7) == 13) {
-            if (util.answer == 6) { return 0; }
-        }
-    }
-    return 1 + "wrong module result";
+    if (text.Length("a雪") != 2) { return 1 + "native text length"; }
+    if (text.Slice("a雪", 1, 1) != "雪") { return 1 + "native text slice"; }
+    if (text.Before("a.b", ".") != "a") { return 1 + "native text before"; }
+    if (text.After("a.b", ".") != "b") { return 1 + "native text after"; }
+    if (get_type(text.Missing) != "Error") { return 1 + "unknown native member"; }
+    if (math != mathAgain) { return 1 + "module cache"; }
+    if (math.sum(7) != 13) { return 1 + "relative module"; }
+    if (util.answer != 6) { return 1 + "module export"; }
+    if (helper.Value() != 42) { return 1 + "bare module search"; }
+    if (get_type(import("math")) != "Error") { return 1 + "bare import used entry directory"; }
+    if (get_type(Console) != "Error") { return 1 + "unexpected global Console"; }
+    if (stdio.Console.PrintLine("stdio ready") != null) { return 1 + "native stdio"; }
+    var clock = time.CreateClock();
+    if (time.Sleep(0) != null) { return 1 + "native sleep"; }
+    var delta = time.Tick(clock);
+    if (get_type(delta) != "number") { return 1 + "native clock"; }
+    if (delta < 0) { return 1 + "negative clock delta"; }
 }

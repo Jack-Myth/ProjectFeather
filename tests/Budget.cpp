@@ -36,10 +36,74 @@ private:
     std::uint32_t Entry;
 };
 
+void CheckCompareBranchBudget() {
+    auto Branch = Compile("def choose(a,b) { if (a < b) { return 1; } return 2; }");
+    const auto Entry = Branch.Functions.at("choose");
+    const auto Original = SerializeProgram(Branch);
+    const std::vector<Value> Taken{Value::Byte(0), Value::Number(1)};
+    const std::vector<Value> NotTaken{Value::Number(1), Value::Number(0)};
+    // Two loads, comparison, JumpIf, then the constant and Return. The false
+    // path executes one additional Jump before loading its result.
+    Vm Six(Branch.Program, 100, 6);
+    Check(Six.Run(Entry, Taken).AsNumber() == 1, "taken branch charged an extra jump");
+    BudgetExceeded([&] { Six.Run(Entry, NotTaken); }, "false branch lost its jump charge");
+    Vm Seven(Branch.Program, 100, 7);
+    Check(Seven.Run(Entry, NotTaken).AsNumber() == 2, "false branch exceeded its exact budget");
+    Check(SerializeProgram(Branch) == Original, "branch preparation modified the source program");
+}
+
+void CheckNumericAssignment() {
+    auto Program = Compile("def adjust(x) { x = x * 2 + 1; return x; }");
+    const auto Entry = Program.Functions.at("adjust");
+    const auto Image = SerializeProgram(Program);
+    const std::vector<Value> Args{Value::Number(7)};
+    // GetLocal, MulConst, AddConst, SetLocal, Pop, GetLocal, Return.
+    for (unsigned Limit = 1; Limit < 7; ++Limit) {
+        Vm Limited(Program.Program, 100, Limit);
+        BudgetExceeded([&] { Limited.Run(Entry, Args); }, "folded assignment lost an instruction charge");
+    }
+    Vm Exact(Program.Program, 100, 7);
+    Check(Exact.Run(Entry, Args).AsNumber() == 15, "folded assignment failed at exact budget");
+    Check(Exact.Run(Entry, {Value::Byte(7)}).GetType() == ValueType::Number, "byte promotion failed");
+    Check(Exact.Run(Entry, {Value::String("x")}).IsError(), "assignment lost its arithmetic error");
+    Check(SerializeProgram(Program) == Image, "optimization changed the source bytecode");
+}
+
+void CheckEntryInsideAssignment() {
+    auto Program = std::make_shared<Module>();
+    auto Two = Program->AddNumber(2);
+    auto Function = std::make_shared<FunctionPrototype>();
+    Function->ParameterCount = Function->LocalCount = 3;
+    Function->Defaults.resize(3);
+    Builder Code;
+    Code.EmitU32(Op::GetLocal, 2);
+    auto First = Code.EmitJump(Op::JumpIf);
+    Code.EmitU32(Op::GetLocal, 1);
+    auto Interior = Code.EmitJump(Op::Jump);
+    Code.PatchJump(First, Code.Offset());
+    Code.EmitU32(Op::GetLocal, 0);
+    Code.PatchJump(Interior, Code.Offset());
+    Code.EmitU32(Op::MulConst, Two);
+    Code.EmitU32(Op::SetLocal, 0);
+    Code.Emit(Op::Pop);
+    Code.EmitU32(Op::GetLocal, 0);
+    Code.Emit(Op::Return);
+    Function->Code = std::move(Code).Finish();
+    auto Entry = Program->AddFunction(Function);
+    Vm Machine(Program);
+    for (bool UseFirst : {true, false}) {
+        auto Result = Machine.Run(Entry, {Value::Number(3), Value::Number(5), Value::Bool(UseFirst)});
+        Check(Result.AsNumber() == (UseFirst ? 6 : 10), "branch into assignment changed its operand");
+    }
+}
+
 } // namespace
 
 int main() {
     try {
+        CheckCompareBranchBudget();
+        CheckNumericAssignment();
+        CheckEntryInsideAssignment();
         auto Loop = Compile("def spin() { while (true) { } } def answer() { return 42; }");
         Vm Limited(Loop.Program, std::numeric_limits<std::size_t>::max(), 40);
         Check(!Loop.Initialize(Limited).IsError(), "initializer should fit its budget");

@@ -1,13 +1,10 @@
 #include <Feather/NativeModule.hpp>
-#include <Feather/StdIo.hpp>
-
-#include <memory>
+#include "StdIo.hpp"
 
 namespace {
 Feather::Value Create(const Feather::NativeModuleContext& Context) {
     if (!Context.Input || !Context.Output)
-        return Feather::Value::FromObject(std::make_shared<Feather::ErrorObject>(
-            "stdio requires input and output streams"));
+        return Feather::Value::Error("stdio requires input and output streams");
     Feather::StdIoLibrary Library(Context.Machine, *Context.Input, *Context.Output);
     return Library.GetModule();
 }

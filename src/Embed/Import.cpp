@@ -18,8 +18,7 @@ public:
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>& Arguments) override {
         if (Arguments.size() != 1 || Arguments[0].GetType() != ValueType::String)
-            return Value::FromObject(std::make_shared<ErrorObject>(
-                "import expects exactly one string argument"));
+            return Value::Error("import expects exactly one string argument");
         const auto& Specifier = Arguments[0].AsString();
         if (Specifier == "vm") return Machine.GetVmModule();
         return Callback(Machine.GetActiveModuleId(), Specifier);

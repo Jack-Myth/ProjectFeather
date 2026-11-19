@@ -1,6 +1,0 @@
-def main() {
-    stdio.Console.PrintLine("Feather stdio ready");
-    stdio.Console.PrintLine("import ready");
-}
-
-var stdio = import("stdio");

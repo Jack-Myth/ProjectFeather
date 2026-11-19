@@ -13,8 +13,8 @@ ThreadsNativeModule = shared_module('threads.felib', 'threads/Threads.cpp',
   install : true,
   install_dir : get_option('bindir') / 'modules')
 
-StdioNativeModule = shared_module('stdio.felib', '../stdlib/StdIo.cpp',
-  '../stdlib/StdIoModule.cpp',
+StdioNativeModule = shared_module('stdio.felib', 'stdio/StdIo.cpp',
+  'stdio/StdIoModule.cpp',
   name_prefix : '',
   name_suffix : NativeModuleSuffix,
   dependencies : FeatherDependency,
@@ -81,7 +81,7 @@ foreach Name : ['delegate']
   Source = configure_file(input : '../script_modules/' + Name + '.fe',
     output : Name + '.fe', copy : true, install : true,
     install_dir : get_option('bindir') / 'modules')
-  custom_target('script-module-' + Name, input : Source, output : Name + '.fbc',
+  DelegateModuleBytecode = custom_target('script-module-' + Name, input : Source, output : Name + '.fbc',
     command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'],
     build_by_default : true, install : true,
     install_dir : get_option('bindir') / 'modules')
@@ -105,4 +105,6 @@ if get_option('network')
 
 endif
 
-shared_module('text.felib', 'text/TextModule.cpp', dependencies : FeatherDependency, name_prefix : '', install : true, install_dir : 'modules')
+TextNativeModule = shared_module('text.felib', 'text/TextModule.cpp',
+  dependencies : FeatherDependency, name_prefix : '', name_suffix : NativeModuleSuffix,
+  install : true, install_dir : get_option('bindir') / 'modules')

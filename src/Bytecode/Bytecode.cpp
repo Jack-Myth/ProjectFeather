@@ -1,4 +1,5 @@
 #include <Feather/Runtime.hpp>
+#include "InstructionWidth.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -45,22 +46,30 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
     const auto& Code = Function.Code;
     for (std::size_t Pc = 0; Pc < Code.size();) {
         Instruction Current{static_cast<Op>(Code[Pc]), Pc, Pc + 1};
-        std::size_t Width = 0;
-        switch (Current.Code) {
-        case Op::Const: case Op::GetLocal: case Op::GetGlobal:
-        case Op::SetLocal: case Op::SetGlobal: case Op::Jump: case Op::JumpIf: Width = 4; break;
-        case Op::Call: Width = 2; break;
-        case Op::Null: case Op::True: case Op::False: case Op::Pop:
-        case Op::NewObject: case Op::GetMember: case Op::SetMember:
-        case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
-        case Op::ToByte: case Op::Negate: case Op::Equal: case Op::Less: case Op::Return: break;
-        default: Invalid("unknown opcode");
-        }
+        if (Program.InstructionVersion == 2 && Current.Code > Op::ToByte)
+            Invalid("opcode requires instruction version 3");
+        const auto Width = OperandWidth(Current.Code);
         if (Code.size() - Pc - 1 < Width) Invalid("truncated instruction");
         Current.End += Width;
         if (Width == 4) Current.Operand = ReadU32(Code, Pc + 1);
         if (Width == 2) Current.Operand = std::uint32_t(Code[Pc + 1]) | (std::uint32_t(Code[Pc + 2]) << 8);
         switch (Current.Code) {
+        case Op::AddToLocal: case Op::AddConstToLocal: {
+            const auto Local = Current.Operand & 0xffff;
+            const auto Right = Current.Operand >> 16;
+            if (Local >= Function.LocalCount) Invalid("local index out of range");
+            if (Current.Code == Op::AddToLocal) {
+                if (Right >= Function.LocalCount) Invalid("local index out of range");
+            } else if (Right >= Program.Constants.size() || Program.Constants[Right].Type != Constant::Kind::Number)
+                Invalid("addition requires a number constant");
+            break;
+        }
+        case Op::AddConst: case Op::SubConst: case Op::MulConst: case Op::GetField: {
+            auto Type = Current.Code == Op::GetField ? Constant::Kind::String : Constant::Kind::Number;
+            if (Current.Operand >= Program.Constants.size() || Program.Constants[Current.Operand].Type != Type)
+                Invalid("invalid instruction constant");
+            Current.Consumes = 1; Current.Produces = 1; break;
+        }
         case Op::Const:
             if (Current.Operand >= Program.Constants.size()) Invalid("constant index out of range");
             [[fallthrough]];
@@ -123,6 +132,8 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
         auto Index = Pending.front(); Pending.pop();
         auto& Current = Instructions[Index];
         int Height = Heights[Index];
+        if ((Current.Code == Op::AddToLocal || Current.Code == Op::AddConstToLocal) && Height != 0)
+            Invalid("local update requires an empty expression stack");
         if (Height < Current.Consumes) Invalid("bytecode stack underflow");
         if (Current.Code == Op::Return && Height != 1) Invalid("Return requires exactly one value");
         int NextHeight = Height - Current.Consumes + Current.Produces;
@@ -178,6 +189,8 @@ std::uint32_t Module::AddFunction(std::shared_ptr<FunctionPrototype> Input) {
     Constants.push_back(Constant::FunctionRef(std::move(Input))); return static_cast<std::uint32_t>(Constants.size() - 1);
 }
 void Module::Validate() const {
+    if (InstructionVersion != 2 && InstructionVersion != CurrentInstructionVersion)
+        Invalid("unsupported instruction version");
     if (Constants.size() > MaxConstants) Invalid("too many constants");
     for (const auto& Item : Constants) {
         if (Item.Type == Constant::Kind::String) Value::String(Item.Text);

@@ -32,6 +32,13 @@ void CheckMessageArchive() {
         auto* Items = Sender.CreateArray();
         auto* Meta = Sender.CreateMetaObject();
         auto Buffer = ByteBufferLibrary(Sender).Create(std::string("a\0b", 3));
+        // FTM1 encoding from before the buffer type identity moved into the runtime.
+        const std::vector<std::uint8_t> LegacyPacket{
+            'F','T','M','1', 1,0,0,0, 1,0,0,0, 9,
+            0x2d,0x33,0xd7,0x69,0x4a,0x83,0x46,0xc0,0xb5,0x87,0x65,0x72,0x47,0x4f,0x1f,0xd2,
+            10,0,0,0, 'B','y','t','e','B','u','f','f','e','r', 3,0,0,0, 'a',0,'b', 5,0,0,0,0};
+        Check(Sender.SerializeArguments(std::array{Buffer}) == LegacyPacket,
+              "ByteBuffer message encoding changed");
         Sender.SetMetaObject(State, Meta);
         Meta->SetRaw(Value::String("owner"), Value::FromScript(State));
         Items->AppendArray(Value::FromScript(State));

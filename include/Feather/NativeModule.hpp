@@ -6,6 +6,19 @@
 
 namespace Feather {
 
+class FEATHER_API NativeModuleBuilder final {
+public:
+    using Function = std::function<Value(const std::vector<Value>&)>;
+    NativeModuleBuilder(Vm& Machine, NativeModuleGuid Id, std::string Name);
+    void AddFunction(std::string Name, Function Body);
+    Value Build() const;
+private:
+    class Namespace;
+    Vm& Machine;
+    NativeModuleGuid Id;
+    std::shared_ptr<Namespace> Module;
+};
+
 class NativeModuleHost {
 public:
     using WorkerMain = std::function<void(NativeModuleHost&)>;

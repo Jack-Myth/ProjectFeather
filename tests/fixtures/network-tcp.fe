@@ -1,6 +1,5 @@
 var network = import("network");
 var time = import("time");
-var stdio = import("stdio");
 var pending = null;
 var done = false;
 var failure = null;
@@ -9,7 +8,9 @@ def echo(event) {
     else { done = true; failure = connectionEnded; }
 }
 def received(event) {
-    if (event.Kind == "data") { stdio.Console.PrintLine(event.Data.Get(0)); }
+    if (event.Kind == "data") {
+        if (event.Data.Get(0) != 255) { failure = byte(-1); }
+    }
     else { failure = connectionEnded; }
     done = true;
 }

@@ -1,6 +1,7 @@
 #include <Feather/Dap.hpp>
 
 #include "../Protocol/Json.hpp"
+#include "../FileModulePath.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -124,31 +125,17 @@ struct DapAdapter::Impl final {
         if (!Options.PrimarySourcePath.empty() && Path == Options.PrimarySourcePath)
             return {};
         if (Options.PrimarySourcePath.empty()) return std::string(Path);
-        auto Primary = std::filesystem::path(Options.PrimarySourcePath);
-        auto Relative = std::filesystem::path(Path).lexically_relative(Primary.parent_path());
-        if (Relative.empty() || Relative.is_absolute()) return std::string(Path);
-        auto Utf8 = Relative.generic_u8string();
-        std::string Result = "file:";
-        Result.reserve(Result.size() + Utf8.size());
-        for (char8_t Byte : Utf8) Result.push_back(static_cast<char>(Byte));
-        return Result;
+        const auto Entry = std::filesystem::absolute(FileModulePath::FromUtf8(Options.PrimarySourcePath)).lexically_normal();
+        const auto File = std::filesystem::absolute(FileModulePath::FromUtf8(Path)).lexically_normal();
+        return File == Entry ? std::string{} : FileModulePath::Id(Entry.parent_path(), File);
     }
 
     std::string SourcePath(std::string_view Module) const {
         if (Module.empty()) return Options.PrimarySourcePath;
-        constexpr std::string_view Prefix = "file:";
-        if (Options.PrimarySourcePath.empty() || !Module.starts_with(Prefix))
-            return std::string(Module);
-        std::u8string Utf8;
-        auto Text = Module.substr(Prefix.size());
-        Utf8.reserve(Text.size());
-        for (unsigned char Byte : Text) Utf8.push_back(static_cast<char8_t>(Byte));
-        auto Path = (std::filesystem::path(Options.PrimarySourcePath).parent_path() /
-                     std::filesystem::path(Utf8)).lexically_normal().u8string();
-        std::string Result;
-        Result.reserve(Path.size());
-        for (char8_t Byte : Path) Result.push_back(static_cast<char>(Byte));
-        return Result;
+        if (Options.PrimarySourcePath.empty()) return std::string(Module);
+        const auto Entry = FileModulePath::FromUtf8(Options.PrimarySourcePath);
+        const auto File = FileModulePath::Resolve(Entry.parent_path(), Module);
+        return File ? FileModulePath::ToUtf8(*File) : std::string(Module);
     }
 
     std::uint64_t AddReference(Reference Value) {

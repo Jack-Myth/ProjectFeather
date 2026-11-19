@@ -26,7 +26,6 @@ private:
     Value LoadFile(const std::filesystem::path& Path, bool Initialize = true);
     Value LoadFunctionModule(const ScriptFunctionAddress& Address);
     void InstallModuleImport(std::string_view Id);
-    std::string LogicalId(const std::filesystem::path& Path) const;
     void RunWorker(std::vector<std::string> Paths, NativeModuleGuid Owner,
                    void* State, const WorkerMain& Main) const override;
     void* GetWorkerState(NativeModuleGuid Owner) const noexcept override;

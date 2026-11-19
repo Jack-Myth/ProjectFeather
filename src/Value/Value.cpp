@@ -29,6 +29,10 @@ bool IsValidUtf8(std::string_view Input) {
 }
 } // namespace
 
+Value Value::Error(std::string Message) {
+    return FromObject(std::make_shared<ErrorObject>(std::move(Message)));
+}
+
 Value::Value() = default;
 Value::Value(ValueType NewType) : Type(NewType) {}
 Value::Value(const Value& Other) { CopyFrom(Other); }

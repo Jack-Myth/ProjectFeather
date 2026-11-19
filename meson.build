@@ -25,6 +25,9 @@ FeatherSources = files(
   'src/Bytecode/ProgramImage.cpp',
   'src/Bytecode/SymbolImage.cpp',
   'src/Vm/Vm.cpp',
+  'src/Vm/Optimize.cpp',
+  'src/Vm/Gc.cpp',
+  'src/Embed/NativeModuleBuilder.cpp',
   'src/Vm/Idle.cpp',
   'src/Vm/MessageArchive.cpp',
   'src/Object/Object.cpp',
@@ -98,3 +101,4 @@ endif
 
 subdir('modules')
 subdir('tests')
+subdir('benchmarks')

@@ -107,7 +107,14 @@ int main() {
                 if (vm.get_func_argv(0).answer != 42) { return false; }
                 return vm.get_func_argv(1).answer;
             }
-            def main() { return check(make(), make()); }
+            def descend(depth) {
+                if (depth == 0) { return check(make(), make()); }
+                return 1 + descend(depth - 1);
+            }
+            def main() {
+                if (descend(48) != 90) { return false; }
+                return descend(0);
+            }
         )");
         Vm argsGcVm(argsGc.Program, 20);
         argsGcVm.SetGlobal("vm", argsGcVm.GetVmModule());

@@ -141,6 +141,25 @@ void BranchLoopAndGlobals() {
     Check(Other.Run(UndefinedId).AsObject()->GetObjectType() == ObjectType::Error,
           "undefined global Error");
 }
+void JumpIntoCompareBranch() {
+    auto Program = std::make_shared<Module>();
+    Builder Code;
+    Code.EmitU32(Op::GetLocal, 0);
+    auto EnterJumpIf = Code.EmitJump(Op::Jump);
+    Code.Emit(Op::Null); Code.Emit(Op::Null); Code.Emit(Op::Equal);
+    Code.PatchJump(EnterJumpIf, Code.Offset());
+    auto IfTrue = Code.EmitJump(Op::JumpIf);
+    auto IfFalse = Code.EmitJump(Op::Jump);
+    Code.PatchJump(IfTrue, Code.Offset());
+    Code.Emit(Op::True); Code.Emit(Op::Return);
+    Code.PatchJump(IfFalse, Code.Offset());
+    Code.Emit(Op::False); Code.Emit(Op::Return);
+    auto Entry = Function(Program, std::move(Code), 1, 1);
+    Vm Machine(Program);
+    for (bool Input : {false, true})
+        Check(Machine.Run(Entry, {Value::Bool(Input)}).AsBool() == Input,
+              "direct jump into comparison sequence changed its condition");
+}
 void InvalidBytecode() {
     auto Program = std::make_shared<Module>();
     Builder Underflow; Underflow.Emit(Op::Pop); Underflow.Emit(Op::Null); Underflow.Emit(Op::Return);
@@ -189,6 +208,7 @@ void InvalidBytecode() {
 int main() {
     try {
         ArithmeticAndErrors(); CallsAndDefaults(); BranchLoopAndGlobals(); InvalidBytecode();
+        JumpIntoCompareBranch();
         std::cout << "M1 tests passed\n";
         return 0;
     } catch (const std::exception& Failure) {

@@ -23,7 +23,7 @@ void RegisterModuleImport(Vm& Machine, std::string_view ModuleId,
 
 `feather run entry.fe`、`feather run entry.fbc` 与 `feathervm entry.fbc` 都从入口文件所在目录解析相对标识。相对文件标识必须以 `./` 或 `../` 开始；没有扩展名时，源码运行补 `.fe`，字节码运行补 `.fbc`。源码写明 `.fe` 时，字节码运行把该后缀换成 `.fbc`，因而编译后无需修改脚本里的标识；其他扩展名拒绝。每次相对导入相对于真正调用 `import` 的文件解析，而不是总相对于入口文件；入口文件不能作为额外模块导入自身。
 
-解析器先把存在的文件规范化为绝对路径用于本次进程内定位，再以入口文件所在目录为内容根，生成 `file:<relative-path>` 形式、统一使用 `/` 分隔符的 UTF-8 VM 模块 ID。相对路径可以含 `..`，但跨卷或其他无法相对表示的位置会明确拒绝，不回退为绝对 ID。重复导入同一路径只调用幂等的模块初始化，不重跑顶层语句；初始化循环由 VM 拒绝。源码运行遇到 `.fe` 时，若同目录同名 `.fbc` 的修改时间不早于源码，则优先读取并验证该缓存；缓存缺失、较旧、不可读或无效时编译 `.fe`。字节码运行只读取、反序列化 `.fbc`；`featherc` 仍逐文件编译，不打包依赖。文件读取、路径选择和标准库对象均在 CLI 宿主层，嵌入式宿主可选择完全不同的解析规则。CLI 不自动读取依赖模块的 `.fbs`。
+解析器先把存在的文件规范化为绝对路径用于本次进程内定位，再以入口文件所在目录为内容根，生成以 `./` 或 `../` 开头的相对模块 ID；无法相对表示时使用完整绝对路径（含 Windows 盘符或 UNC 共享名）。路径使用 UTF-8 和 `/` 分隔符。worker 以相同的入口目录还原这些 ID。重复导入同一路径只调用幂等的模块初始化，不重跑顶层语句；初始化循环由 VM 拒绝。源码运行遇到 `.fe` 时，若同目录同名 `.fbc` 的修改时间不早于源码，且编译时记录的源文件字节数与当前文件相同，则优先读取并验证该缓存；缓存缺失、较旧、不可读或无效时编译 `.fe`。字节码运行只读取、反序列化 `.fbc`；`featherc` 仍逐文件编译，不打包依赖。文件读取、路径选择和标准库对象均在 CLI 宿主层，嵌入式宿主可选择完全不同的解析规则。CLI 不自动读取依赖模块的 `.fbs`。
 
 `RegisterModuleImport` 将裸名 `vm` 解析为当前 VM 的内建模块，提供 `eval_bytecode` 和模块搜索路径接口。其他裸名从可执行文件旁的 `modules/` 搜索：先找平台 Native 动态库，再找 `.fe`（源码运行）或 `.fbc`（字节码运行）文件模块。`import("stdio")` 返回含 `Console`、`IO` 成员的 Native 对象；库命名与入口见下文。当前 CLI 默认只有这一条搜索目录，可通过下述接口替换。
 
@@ -88,13 +88,13 @@ var listener = delegate.Create(report, owner, ": finished");
 
 ### 模块身份与装载
 
-主模块由 `Vm(primaryProgram)` 建立，调用 `Run(index)`、`GetGlobal` 和 `SetGlobal` 的既有入口，诊断中的模块 ID 为空。新增模块由宿主选择非空 UTF-8 逻辑 ID，调用 `CompiledProgram::LoadInto(vm, id)`。一个 ID 在一台 VM 中只有一个实例；完整 v5 `.fbc` 字节相同的编译模块再次装载复用该实例，即使宿主重新反序列化得到新的 C++ 对象也一样。手工调用 `Vm::LoadModule` 而未提供字节身份时，按源程序对象身份复用。尝试用不同内容占用同一 ID 则拒绝。同一源码在不同 ID 下可建立两个独立实例。
+主模块由 `Vm(primaryProgram)` 建立，调用 `Run(index)`、`GetGlobal` 和 `SetGlobal` 的既有入口，诊断中的模块 ID 为空。新增模块由宿主选择非空 UTF-8 逻辑 ID，调用 `CompiledProgram::LoadInto(vm, id)`。一个 ID 在一台 VM 中只有一个实例；标准 v6 程序编码相同（忽略源码大小字段）的编译模块再次装载复用该实例，即使宿主重新反序列化得到新的 C++ 对象也一样。手工调用 `Vm::LoadModule` 而未提供字节身份时，按源程序对象身份复用。尝试用不同内容占用同一 ID 则拒绝。同一源码在不同 ID 下可建立两个独立实例。
 
 每个实例保存自己的只读代码副本、函数对象、全局表、导出名集合及初始化状态。`Const`、`GetGlobal` 和 `SetGlobal` 从当前函数所属实例读取；模块间脚本函数调用沿用同一 VM 的值栈、GC 与指令预算。`RunModule(id, index, args)` 是宿主调用新模块函数的入口。宿主可以用 `SetModuleGlobal` 注入该模块需要的 native 值；主模块与其他模块的全局名不会自动互通。
 
 ### `export` 与导入
 
-源码 `export var name ...;` 和 `export def name(...) { ... }` 只允许在顶层使用。编译产物的导出名称表只列这些名字，按字节序保存于 v5 `.fbc`；无 `export` 的模块有空导出表。宿主可通过 `GetModuleNamespace(id)` 取得稳定的模块对象。读取 `namespace.name` 时，它只允许导出名，并从该实例的当前全局表取值；因此模块内或宿主改变已导出的 `var` 后，再次读取可见新值。模块对象只读，写入成员返回 Error；读取未导出名或未初始化模块也返回 Error。
+源码 `export var name ...;` 和 `export def name(...) { ... }` 只允许在顶层使用。编译产物的导出名称表只列这些名字，按字节序保存于 v6 `.fbc`；无 `export` 的模块有空导出表。宿主可通过 `GetModuleNamespace(id)` 取得稳定的模块对象。读取 `namespace.name` 时，它只允许导出名，并从该实例的当前全局表取值；因此模块内或宿主改变已导出的 `var` 后，再次读取可见新值。模块对象只读，写入成员返回 Error；读取未导出名或未初始化模块也返回 Error。
 
 宿主应在装载后调用 `InitializeModule(vm, id)`，成功后再把模块对象交给导入方。
 
@@ -133,11 +133,33 @@ struct NativeModuleDescriptor {
 extern "C" const NativeModuleDescriptor* FeatherNativeModule();
 ```
 
-宿主打开文件后只查找该符号，核对非零 GUID、声明名与请求的裸名相同，再调用 `Create`；同一宿主已装入的另一个模块若使用相同 GUID，也会被拒绝。GUID 是模块作者维护的稳定身份，同一模块的各个 `NativeObjectType` 都使用它，类型身份由 GUID 与类型名共同组成；模块改名或文件换路径不应顺便更换 GUID。`stdio` 从上下文取得输入/输出流；缺失服务时返回明确错误。创建失败或描述结构不符时关闭尚未交付对象的库句柄并报告错误；脚本看不到半创建模块。额外的宿主服务以后扩展上下文版本，模块不得自行假定所有宿主都允许文件 IO。
+宿主打开文件后只查找该符号，核对非零 GUID、声明名与请求的裸名相同，再调用 `Create`；同一宿主已装入的另一个模块若使用相同 GUID，也会被拒绝。GUID 是模块作者维护的稳定身份，同一模块的各个 `NativeObjectType` 都使用它，类型身份由 GUID 与类型名共同组成；模块改名或文件换路径不应顺便更换 GUID。`stdio` 从上下文取得输入/输出流；缺失服务时返回明确错误。描述符通过校验后，宿主在调用 `Create` 前保留库句柄，因为创建过程可能已向 VM 注册类型或回调。只有成功返回的 Host 对象才会进入名称缓存。额外的宿主服务以后扩展上下文版本，模块不得自行假定所有宿主都允许文件 IO。
 
-Native 模块和宿主通过 Meson 的静态 runtime 构建，需使用同一工具链、C++ 运行时和 Feather 头文件。`extern "C"` 只固定导出符号名。入口样例见 [StdIoModule.cpp](stdlib/StdIoModule.cpp)，模块构建定义见 [modules/meson.build](modules/meson.build)。
+Native 模块和宿主通过 Meson 的静态 runtime 构建，需使用同一工具链、C++ 运行时和 Feather 头文件。`extern "C"` 只固定导出符号名。入口样例见 [StdIoModule.cpp](modules/stdio/StdIoModule.cpp)，模块构建定义见 [modules/meson.build](modules/meson.build)。
 
 Windows 构建与发行包把 SDL3 动态库放在 `modules/`，供同目录的 `audio.felib.dll` 和 `render2d.felib.dll` 共用。
+
+各 Native 模块的实现和私有头文件放在 `modules/<模块名>/`。宿主通过通用加载接口传入服务，`stdio` 的流实现位于 `modules/stdio/StdIo.hpp`。不可变二进制缓冲区属于运行时，模块通过 `<Feather/ByteBuffer.hpp>` 使用它。网络收发、字节码和 VM 间消息都可以独立于 `stdio` 使用缓冲区。
+
+### 从 C++ 模块导出函数
+
+在模块的 `Create` 中用当前 VM 和描述符中的 GUID 构造 `NativeModuleBuilder`。下面以一个固定 GUID 为 `MathGuid` 的模块为例。
+
+```cpp
+Value Create(const NativeModuleContext& Context) {
+    NativeModuleBuilder Module(Context.Machine, MathGuid, "mathx");
+    Module.AddFunction("Abs", [](const std::vector<Value>& Args) {
+        if (Args.size() != 1 || !Args[0].IsNumeric())
+            return Value::Error("mathx.Abs expects one number");
+        return Value::Number(std::abs(Args[0].AsNumber()));
+    });
+    return Module.Build();
+}
+```
+
+脚本通过 `import("mathx").Abs(-3)` 调用。模块根对象占用类型名 `Module`，每个函数以导出名注册为同一 GUID 下的单例类型，自定义类型和各导出名须互不重复。回调可以捕获宿主状态，其生命周期须覆盖函数的使用期。捕获脚本对象时需要显式持有 GC 根。回调返回的 `Value` 原样交给脚本，普通 C++ 标准异常转换成 Feather 错误值，`IdleCallbackFault` 继续向 VM 传播。带状态的对象可照常通过 `NativeObjectType` 创建，见 `modules/time/Time.cpp`。
+
+构建时使用 `shared_module`，目标名取 `mathx.felib`，设置空前缀和 `NativeModuleSuffix`，安装位置为 `get_option('bindir') / 'modules'`。发行包使用 `scripts/collect-dist.ps1` 中的模块清单，随 Feather 分发时也要加入该清单。
 
 ### 与 Native 交换数组
 
@@ -162,11 +184,12 @@ Windows 构建与发行包把 SDL3 动态库放在 `modules/`，供同目录的 
 | `threads.Post(targetId, fn, args)` | 归档参数并将消息放进指定线程的队列。省略 args 表示零个参数，数组按元素展开，其他值作为一个参数。传一个数组参数时，把它放进外层参数数组。返回 true 表示已入队。 |
 | `threads.GetMainThread()` | 返回 CLI 入口线程的操作系统线程 ID，可直接作为 Post 的目标。 |
 | `threads.Current()` | 返回调用者当前线程的数字 ID。 |
+| `threads.Pump(maxMessages)` | 入口线程立即按 FIFO 顺序执行最多指定条数的消息，队列空时立即返回。上限是非负整数，返回实际执行条数。回调失败则返回该 Error，本次派发结束，剩余消息留在队列中。worker 和消息回调内的递归 Pump 返回 Error。 |
 | `threads.Join(workerId)` | 入口线程关闭指定 worker 的收件队列，等待已入队的任务完成，并返回第一个执行错误（如有）。 |
 
 线程 ID 是操作系统分配的数字，可以直接作为跨 VM 消息的参数。`Post` 和 `Join` 只查找当前 CLI 线程组中的线程。操作系统可能在线程退出后复用 ID，脚本应在 `Join` 后丢弃该 ID。
 
-目标 VM 在当前调用返回后按队列顺序派发消息。缺少函数所在的脚本模块时，CLI 会尝试加载并初始化，且会核对程序版本。执行函数使用目标 VM 的模块全局变量。入口线程在 `main` 返回后处理投递给它的消息，CLI 在队列和执行中的消息都完成后退出。worker 初始化失败时关闭该 worker，未被 `Join` 取走的执行错误会在 CLI 退出前报告。
+目标 VM 在当前调用返回后按队列顺序派发消息。缺少函数所在的脚本模块时，CLI 会尝试加载并初始化，且会核对程序版本。执行函数使用目标 VM 的模块全局变量。入口线程可在主循环中调用 `threads.Pump(maxMessages)` 处理消息，`main` 返回后继续排空队列，CLI 在队列和执行中的消息都完成后退出。worker 初始化失败时关闭该 worker，未被 `Join` 取走的执行错误会在 CLI 退出前报告。
 
 worker 启动时继承创建线程的模块搜索路径，并可导入 `audio` 和 `render2d`。开窗、播放和事件轮询等操作遵循实际平台与 SDL 后端的线程要求。
 

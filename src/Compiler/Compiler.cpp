@@ -1,5 +1,6 @@
 #include <Feather/Compiler.hpp>
 
+#include <bit>
 #include <charconv>
 #include <cctype>
 #include <cmath>
@@ -493,9 +494,16 @@ private:
     std::size_t LoopDepth = 0;
 };
 
+struct ConstantIndices {
+    std::unordered_map<std::string, std::uint32_t> Strings;
+    std::unordered_map<std::uint64_t, std::uint32_t> Numbers;
+    std::unordered_map<std::uint8_t, std::uint32_t> Bytes;
+};
+
 class Emitter {
 public:
-    Emitter(Module& Program, const Token& At) : Program(Program), At(At), CurrentAt(&this->At) {
+    Emitter(Module& Program, ConstantIndices& Indices, const Token& At)
+        : Program(Program), Indices(Indices), At(At), CurrentAt(&this->At) {
         Scopes.emplace_back();
         ScopeSymbols.emplace_back();
     }
@@ -558,16 +566,26 @@ private:
         Locations.push_back({Code.Offset(),
             {CurrentAt->Offset, CurrentAt->Line, CurrentAt->Column}, CurrentBreakable});
     }
+    template<class Map, class Key, class Add>
+    std::uint32_t Intern(Map& Table, const Key& Input, const Token& Location, Add Append) {
+        auto [Slot, Inserted] = Table.try_emplace(Input);
+        if (Inserted) {
+            if (Program.Constants.size() >= 65'536) Fail(Location, "too many constants");
+            Slot->second = Append();
+        }
+        return Slot->second;
+    }
     std::uint32_t ConstantFor(const Value& Input, const Token& At) {
-        if (Program.Constants.size() >= 65'536) Fail(At, "too many constants");
-        if (Input.GetType() == ValueType::Number) return Program.AddNumber(Input.AsNumber());
-        if (Input.GetType() == ValueType::Byte) return Program.AddByte(Input.AsByte());
-        if (Input.GetType() == ValueType::String) return Program.AddString(Input.AsString());
+        if (Input.GetType() == ValueType::Number)
+            return Intern(Indices.Numbers, std::bit_cast<std::uint64_t>(Input.AsNumber()), At,
+                          [&] { return Program.AddNumber(Input.AsNumber()); });
+        if (Input.GetType() == ValueType::Byte)
+            return Intern(Indices.Bytes, Input.AsByte(), At, [&] { return Program.AddByte(Input.AsByte()); });
+        if (Input.GetType() == ValueType::String) return StringConstant(Input.AsString());
         Fail(At, "internal nonconstant literal");
     }
     std::uint32_t StringConstant(const std::string& Input) {
-        if (Program.Constants.size() >= 65'536) Fail(At, "too many constants");
-        return Program.AddString(Input);
+        return Intern(Indices.Strings, Input, *CurrentAt, [&] { return Program.AddString(Input); });
     }
     std::optional<std::uint32_t> FindLocal(const std::string& Name) const {
         for (auto Scope = Scopes.rbegin(); Scope != Scopes.rend(); ++Scope) {
@@ -592,6 +610,33 @@ private:
             ScopeSymbols.pop_back();
             Scopes.pop_back();
         }
+    }
+    bool EmitLocalAddition(const Node& Assignment) {
+        if (Assignment.Kind != NodeKind::Assign) return false;
+        const auto& Target = *Assignment.Children[0];
+        const auto& Sum = *Assignment.Children[1];
+        if (Target.Kind != NodeKind::Name || Sum.Kind != NodeKind::Binary ||
+            Sum.Operator != TokenKind::Plus) return false;
+        const auto& Left = *Sum.Children[0];
+        const auto& Right = *Sum.Children[1];
+        if (Left.Kind != NodeKind::Name || Left.Name != Target.Name ||
+            Target.At.Line != Sum.At.Line || Left.At.Line != Sum.At.Line ||
+            Assignment.At.Line != Sum.At.Line || Right.At.Line != Sum.At.Line) return false;
+        auto Destination = FindLocal(Target.Name);
+        if (!Destination) return false;
+        SourceGuard Source(CurrentAt, Sum.At);
+        if (Right.Kind == NodeKind::Literal && Right.Literal.GetType() == ValueType::Number) {
+            auto Index = ConstantFor(Right.Literal, Right.At);
+            EmitU32(Op::AddConstToLocal, *Destination | (Index << 16));
+            return true;
+        }
+        if (Right.Kind == NodeKind::Name) {
+            if (auto Slot = FindLocal(Right.Name)) {
+                EmitU32(Op::AddToLocal, *Destination | (*Slot << 16));
+                return true;
+            }
+        }
+        return false;
     }
     void EmitStatement(const Node& Statement, bool TopLevel) {
         DepthGuard Guard(Depth, Statement.At);
@@ -619,6 +664,7 @@ private:
             else EmitExpression(*Statement.Children[0]);
             Emit(Op::Return); break;
         case NodeKind::Expression:
+            if (EmitLocalAddition(*Statement.Children[0])) break;
             EmitExpression(*Statement.Children[0]); Emit(Op::Pop); break;
         case NodeKind::Block:
             EmitBlock(Statement, true); break;
@@ -686,7 +732,8 @@ private:
             Function.Name = "<compiled-block>";
             Function.Parameters.push_back("context");
             Function.Body = nullptr;
-            Emitter Output(*Block.Program, Expression.At);
+            ConstantIndices BlockIndices;
+            Emitter Output(*Block.Program, BlockIndices, Expression.At);
             Output.AddParameters(Function);
             Output.EmitBlock(*Expression.Children[0], false);
             Output.Emit(Op::Null); Output.Emit(Op::Return);
@@ -729,10 +776,16 @@ private:
             break;
         }
         case NodeKind::Object: Emit(Op::NewObject); break;
-        case NodeKind::Member:
+        case NodeKind::Member: {
             EmitExpression(*Expression.Children[0]);
-            EmitExpression(*Expression.Children[1]);
+            const auto& Key = *Expression.Children[1];
+            if (Key.Kind == NodeKind::Literal && Key.Literal.GetType() == ValueType::String &&
+                Key.At.Line == Expression.At.Line) {
+                EmitU32(Op::GetField, ConstantFor(Key.Literal, Key.At)); break;
+            }
+            EmitExpression(Key);
             Emit(Op::GetMember); break;
+        }
         case NodeKind::Call: {
             if (Expression.Children.size() - 1 > std::numeric_limits<std::uint16_t>::max())
                 Fail(Expression.At, "too many call arguments");
@@ -744,7 +797,21 @@ private:
             EmitExpression(*Expression.Children[0]); Emit(Op::Negate); break;
         case NodeKind::Binary: {
             EmitExpression(*Expression.Children[0]);
-            EmitExpression(*Expression.Children[1]);
+            const auto& Right = *Expression.Children[1];
+            if (Right.Kind == NodeKind::Literal && Right.Literal.GetType() == ValueType::Number &&
+                Right.At.Line == Expression.At.Line) {
+                std::optional<Op> WithConstant;
+                switch (Expression.Operator) {
+                case TokenKind::Plus: WithConstant = Op::AddConst; break;
+                case TokenKind::Minus: WithConstant = Op::SubConst; break;
+                case TokenKind::Star: WithConstant = Op::MulConst; break;
+                default: break;
+                }
+                if (WithConstant) {
+                    EmitU32(*WithConstant, ConstantFor(Right.Literal, Right.At)); break;
+                }
+            }
+            EmitExpression(Right);
             switch (Expression.Operator) {
             case TokenKind::Plus: Emit(Op::Add); break;
             case TokenKind::Minus: Emit(Op::Sub); break;
@@ -777,6 +844,7 @@ private:
         }
     }
     Module& Program;
+    ConstantIndices& Indices;
     Token At;
     const Token* CurrentAt;
     bool CurrentBreakable = true;
@@ -842,8 +910,9 @@ CompiledProgram Compile(std::string_view Source) {
     }
     auto Initializer = std::make_shared<FunctionPrototype>();
     Result.Initializer = Result.Program->AddFunction(Initializer);
+    ConstantIndices Indices;
     for (const auto& Function : Ast.Functions) {
-        Emitter Output(*Result.Program, Function.At);
+        Emitter Output(*Result.Program, Indices, Function.At);
         Output.AddParameters(Function);
         Output.EmitFunctionBody(Function);
         auto& Prototype = *Result.Program->Constants[Result.Functions.at(Function.Name)].Function;
@@ -854,7 +923,7 @@ CompiledProgram Compile(std::string_view Source) {
         Prototype.Locations = Output.FinishLocations();
     }
     Token Start{TokenKind::End, {}, 0, 1, 1};
-    Emitter Output(*Result.Program, Start);
+    Emitter Output(*Result.Program, Indices, Start);
     Output.EmitInitializer(Ast, Result.Functions);
     Initializer->DebugName = "<initializer>";
     Initializer->LocalCount = Output.GetLocalCount();

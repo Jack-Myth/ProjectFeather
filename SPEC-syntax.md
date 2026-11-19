@@ -70,7 +70,7 @@ literal       = "null" | "true" | "false" | NUMBER | STRING ;
 
 词法或语法错误、非法赋值目标、重复声明、过多形参/实参/常量/局部槽位、超过 256 层嵌套及字节码校验失败，均使编译失败，不产生可执行的部分模块。诊断至少包含源码字节偏移及行列；行列按 UTF-8 字节计数。编译器生成的每个函数最终由 `Module::Validate()` 校验。
 
-编译成功时，内存函数原型可附带每条指令起始 PC 对应的源码字节偏移与行列，供 VM 查询 Error 来源。表达式操作一般对应运算符或调用符号；跨函数、跨模块返回保持原 Error 的来源。当前 v5 `.fbc` 不保存位置表，可由独立 `.fbs` 提供。
+编译成功时，内存函数原型可附带每条指令起始 PC 对应的源码字节偏移与行列，供 VM 查询 Error 来源。表达式操作一般对应运算符或调用符号；跨函数、跨模块返回保持原 Error 的来源。当前 v6 `.fbc` 不保存位置表，可由独立 `.fbs` 提供。
 
 ## byte 转换
 
@@ -116,7 +116,7 @@ The optional second argument is available as the local `context` (null when omit
 
 ByteBuffer can be stored in objects and written/read with stdio.IO. Invalid, truncated or incompatible bytecode returns Error; this is code execution with the caller's capabilities, not a security sandbox. Runtime faults and the existing instruction budget still apply. A block executes to completion; it does not itself record game progress or provide suspension.
 
-Bytecode artifacts use .fbc v5 / ISA 2 (binary buffer constant tag 4). Old .fbc files must be regenerated; source runs ignore incompatible caches. Native modules must be rebuilt with the updated headers. Compiled block payloads currently carry bytecode without the optional .fbs source map.
+Bytecode artifacts use ISA 2 (binary buffer constant tag 4). The compiler CLI emits .fbc v6 with the source byte count. Native modules must be rebuilt with the updated headers. Compiled block payloads currently carry bytecode without the optional .fbs source map.
 
 ## Arrays
 

@@ -9,7 +9,6 @@ namespace {
 
 constexpr std::uint8_t Magic[8] = {'F', 'T', 'H', 'R', 'S', 'Y', 0, 0};
 constexpr std::uint16_t FormatVersion = 3;
-constexpr std::uint16_t InstructionVersion = 2;
 constexpr std::uint32_t MaxFunctions = 65'536;
 
 [[noreturn]] void Invalid(const char* Message) { throw std::invalid_argument(Message); }
@@ -117,7 +116,7 @@ std::vector<std::uint8_t> SerializeSymbols(const CompiledProgram& Input,
     Writer Output(MaxBytes);
     Output.MagicBytes();
     Output.U16(FormatVersion);
-    Output.U16(InstructionVersion);
+    Output.U16(Input.Program->InstructionVersion);
     Output.U32(0); // Payload size, including the final checksum.
     Output.U32(Narrow(ProgramBytes.size()));
     Output.U64(Fingerprint(ProgramBytes));
@@ -158,7 +157,8 @@ void AttachSymbols(CompiledProgram& Input, std::span<const std::uint8_t> Bytes,
     Reader Source(Payload);
     for (auto Byte : Magic) if (Source.U8() != Byte) Invalid("invalid symbol magic");
     if (Source.U16() != FormatVersion) Invalid("unsupported symbol format version");
-    if (Source.U16() != InstructionVersion) Invalid("unsupported symbol instruction version");
+    if (!Input.Program || Source.U16() != Input.Program->InstructionVersion)
+        Invalid("symbol instruction version does not match bytecode");
     if (Source.U32() != Bytes.size() - 16) Invalid("invalid symbol payload size");
     auto ProgramBytes = SerializeProgram(Input);
     if (Source.U32() != ProgramBytes.size() || Source.U64() != Fingerprint(ProgramBytes))

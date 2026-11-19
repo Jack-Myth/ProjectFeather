@@ -1,5 +1,5 @@
 #include <Feather/Compiler.hpp>
-#include <Feather/StdIo.hpp>
+#include "../modules/stdio/StdIo.hpp"
 
 #include <cmath>
 #include <filesystem>

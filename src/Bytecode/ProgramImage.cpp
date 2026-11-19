@@ -11,8 +11,7 @@ namespace Feather {
 namespace {
 
 constexpr std::uint8_t Magic[8] = {'F', 'T', 'H', 'R', 'B', 'C', 0, 0};
-constexpr std::uint16_t FormatVersion = 5;
-constexpr std::uint16_t InstructionVersion = 2;
+constexpr std::uint16_t FormatVersion = 6;
 constexpr std::size_t HeaderSize = 16;
 constexpr std::uint32_t MaxEntries = 65'536;
 
@@ -154,15 +153,16 @@ void ValidateProgram(const CompiledProgram& Input) {
 
 } // namespace
 
-std::vector<std::uint8_t> SerializeProgram(const CompiledProgram& Input,
-                                           std::size_t MaxBytes) {
+std::vector<std::uint8_t> SerializeProgram(const CompiledProgram& Input, std::size_t MaxBytes,
+                                           std::optional<std::uint64_t> SourceBytes) {
     static_assert(std::numeric_limits<double>::is_iec559 && sizeof(double) == 8);
     ValidateProgram(Input);
     Writer Output(MaxBytes);
     Output.Raw(Magic);
     Output.U16(FormatVersion);
-    Output.U16(InstructionVersion);
+    Output.U16(Input.Program->InstructionVersion);
     Output.U32(0);
+    Output.U64(SourceBytes.value_or(std::numeric_limits<std::uint64_t>::max()));
     Output.U32(static_cast<std::uint32_t>(Input.Program->Constants.size()));
     for (const auto& Item : Input.Program->Constants) {
         switch (Item.Type) {
@@ -204,18 +204,24 @@ std::vector<std::uint8_t> SerializeProgram(const CompiledProgram& Input,
     return std::move(Output).Finish();
 }
 
-CompiledProgram DeserializeProgram(std::span<const std::uint8_t> Bytes,
-                                   std::size_t MaxBytes) {
+CompiledProgram DeserializeProgram(std::span<const std::uint8_t> Bytes, std::size_t MaxBytes,
+                                   std::optional<std::uint64_t> ExpectedSourceBytes) {
     static_assert(std::numeric_limits<double>::is_iec559 && sizeof(double) == 8);
     if (Bytes.size() > MaxBytes) Invalid("bytecode size limit exceeded");
     Reader Input(Bytes);
     for (auto Byte : Magic) if (Input.U8() != Byte) Invalid("invalid bytecode magic");
     if (Input.U16() != FormatVersion) Invalid("unsupported bytecode format version");
-    if (Input.U16() != InstructionVersion) Invalid("unsupported instruction version");
+    const auto InstructionVersion = Input.U16();
+    if (InstructionVersion != 2 && InstructionVersion != Module::CurrentInstructionVersion)
+        Invalid("unsupported instruction version");
     if (Bytes.size() < HeaderSize || Input.U32() != Bytes.size() - HeaderSize)
         Invalid("invalid bytecode payload size");
+    const auto SourceBytes = Input.U64();
+    if (ExpectedSourceBytes && *ExpectedSourceBytes != SourceBytes)
+        Invalid("source size differs from bytecode cache");
     CompiledProgram Result;
     Result.Program = std::make_shared<Module>();
+    Result.Program->InstructionVersion = InstructionVersion;
     auto ConstantCount = Input.U32();
     if (ConstantCount > MaxEntries) Invalid("too many bytecode constants");
     Result.Program->Constants.reserve(ConstantCount);

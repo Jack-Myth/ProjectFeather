@@ -51,8 +51,10 @@ CompiledProgram LoadSourceProgram(const std::filesystem::path& SourcePath) {
         Error.clear();
         const auto BytecodeTime = std::filesystem::last_write_time(BytecodePath, Error);
         if (!Error && BytecodeTime >= SourceTime) {
-            try { return DeserializeProgram(ReadFile(BytecodePath)); }
-            catch (const std::exception&) {
+            try {
+                const auto Size = std::filesystem::file_size(SourcePath);
+                return DeserializeProgram(ReadFile(BytecodePath), MaxFileBytes, Size);
+            } catch (const std::exception&) {
                 // A cache is only an optimization. Compile the authoritative source below.
             }
         }

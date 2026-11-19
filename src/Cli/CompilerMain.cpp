@@ -5,6 +5,27 @@
 #include <string_view>
 
 #ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+namespace {
+bool SameFile(const std::filesystem::path& A, const std::filesystem::path& B) {
+    const bool ExistsA = std::filesystem::exists(A);
+    const bool ExistsB = std::filesystem::exists(B);
+    if (ExistsA || ExistsB) return ExistsA && ExistsB && std::filesystem::equivalent(A, B);
+    const auto Left = std::filesystem::absolute(A);
+    const auto Right = std::filesystem::absolute(B);
+    if (!std::filesystem::equivalent(Left.parent_path(), Right.parent_path())) return false;
+#ifdef _WIN32
+    return CompareStringOrdinal(Left.filename().c_str(), -1, Right.filename().c_str(), -1, TRUE) == CSTR_EQUAL;
+#else
+    return Left.filename() == Right.filename();
+#endif
+}
+}
+
+#ifdef _WIN32
 int wmain(int ArgCount, wchar_t** Arguments) {
     const bool HasOutput = ArgCount >= 3 && std::wstring_view(Arguments[2]) == L"-o";
     const bool HasSymbols = ArgCount == 6 && std::wstring_view(Arguments[4]) == L"--symbols";
@@ -20,16 +41,22 @@ int main(int ArgCount, char** Arguments) {
     auto SourcePath = std::filesystem::path(Arguments[1]);
     auto OutputPath = std::filesystem::path(Arguments[3]);
     auto SymbolPath = HasSymbols ? std::filesystem::path(Arguments[5]) : std::filesystem::path{};
-    if (HasSymbols && OutputPath.lexically_normal() == SymbolPath.lexically_normal()) {
-        std::cerr << "featherc: bytecode and symbols need distinct output paths\n";
+    try {
+        if (SameFile(SourcePath, OutputPath) ||
+            (HasSymbols && (SameFile(SourcePath, SymbolPath) || SameFile(OutputPath, SymbolPath)))) {
+            std::cerr << "featherc: source, bytecode and symbols need distinct paths\n";
+            return 2;
+        }
+    } catch (const std::filesystem::filesystem_error& Failure) {
+        std::cerr << "featherc: " << Failure.what() << '\n';
         return 2;
     }
     std::vector<std::uint8_t> Bytes;
     std::vector<std::uint8_t> Symbols;
     try {
-        auto Program = Feather::Compile(
-            Feather::Cli::ReadSource(SourcePath));
-        Bytes = Feather::SerializeProgram(Program);
+        auto Source = Feather::Cli::ReadSource(SourcePath);
+        auto Program = Feather::Compile(Source);
+        Bytes = Feather::SerializeProgram(Program, Feather::Cli::MaxFileBytes, Source.size());
         if (HasSymbols) Symbols = Feather::SerializeSymbols(Program);
     } catch (const std::exception& Failure) {
         std::cerr << "featherc: " << Feather::Cli::PathText(SourcePath) << ": "

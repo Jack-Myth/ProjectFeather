@@ -17,9 +17,6 @@ constexpr NativeModuleGuid Guid{{0x47, 0xf1, 0x5c, 0xe1, 0xa3, 0x72, 0x45, 0x4b,
                                  0xa1, 0xe7, 0xd8, 0x68, 0xd4, 0xfb, 0x93, 0x24}};
 constexpr std::size_t MaxAudioBytes = 128 * 1024 * 1024;
 
-Value Error(std::string Message) {
-    return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message)));
-}
 class AudioFailure : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -123,13 +120,13 @@ public:
         if (auto Which = FindEvent(Key)) return Callbacks[static_cast<std::size_t>(*Which)];
         if (Key.GetType() == ValueType::String && Key.AsString() == "Duration" && !Closed)
             return Value::Number(Samples.Duration());
-        return Error("unknown or unavailable audio member");
+        return Value::Error("unknown or unavailable audio member");
     }
     Value SetMember(const Value& Key, const Value& Input) override {
         auto Which = FindEvent(Key);
-        if (!Which || Closed) return Error("audio member is not writable");
+        if (!Which || Closed) return Value::Error("audio member is not writable");
         if (Input.GetType() != ValueType::Null && !Machine().IsCallable(Input))
-            return Error("audio delegate must be callable or null");
+            return Value::Error("audio delegate must be callable or null");
         const auto Index = static_cast<std::size_t>(*Which);
         if (Input.GetType() == ValueType::Null) RemoveGcVisibleMember(EventNames[Index]);
         else SetGcVisibleMember(EventNames[Index], Input);
@@ -165,7 +162,7 @@ public:
     }
     Value Seek(double Seconds) {
         if (!std::isfinite(Seconds) || Seconds < 0 || Seconds > Samples.Duration())
-            return Error("audio seek position is outside the sound");
+            return Value::Error("audio seek position is outside the sound");
         const auto Frame = Seconds == Samples.Duration() ? Samples.Frames() :
             static_cast<std::size_t>(Seconds * Samples.Spec.freq);
         if (Output) {
@@ -230,7 +227,7 @@ private:
         const int Queued = SDL_GetAudioStreamQueued(Output->Stream);
         const int Available = SDL_GetAudioStreamAvailable(Output->Stream);
         if (Queued < 0 || Available < 0) {
-            auto Failure = Error(std::string("could not query audio: ") + SDL_GetError());
+            auto Failure = Value::Error(std::string("could not query audio: ") + SDL_GetError());
             Reset(0);
             return Failure;
         }
@@ -267,7 +264,7 @@ public:
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>& Arguments) override {
         try { return Action(Arguments); }
-        catch (const AudioFailure& Failure) { return Error(Failure.what()); }
+        catch (const AudioFailure& Failure) { return Value::Error(Failure.what()); }
     }
 private:
     Body Action;
@@ -281,7 +278,7 @@ public:
             auto It = Members.find(Key.AsString());
             if (It != Members.end()) return It->second;
         }
-        return Error("unknown audio function");
+        return Value::Error("unknown audio function");
     }
     std::unordered_map<std::string, Value> Members;
 };
@@ -301,14 +298,14 @@ Value Create(const NativeModuleContext& Context) {
     };
     Add("Open", [&Sounds](const auto& Args) {
         if (Args.size() != 1 || Args[0].GetType() != ValueType::String)
-            return Error("audio.Open expects a path string");
+            return Value::Error("audio.Open expects a path string");
         return Sounds.Open(Args[0].AsString());
     });
     auto Command = [&](const char* Name, Value (Sound::*Action)()) {
         Add(Name, [&Sounds, Action](const auto& Args) {
-            if (Args.size() != 1) return Error("audio command expects one sound");
+            if (Args.size() != 1) return Value::Error("audio command expects one sound");
             auto* Handle = GetSound(Args[0], Sounds);
-            if (!Handle || Handle->IsClosed()) return Error("invalid or closed audio sound");
+            if (!Handle || Handle->IsClosed()) return Value::Error("invalid or closed audio sound");
             return (Handle->*Action)();
         });
     };
@@ -317,9 +314,9 @@ Value Create(const NativeModuleContext& Context) {
     Command("Stop", &Sound::Stop);
     Command("Close", &Sound::Close);
     Add("Seek", [&Sounds](const auto& Args) {
-        if (Args.size() != 2 || !Args[1].IsNumeric()) return Error("audio.Seek expects a sound and seconds");
+        if (Args.size() != 2 || !Args[1].IsNumeric()) return Value::Error("audio.Seek expects a sound and seconds");
         auto* Handle = GetSound(Args[0], Sounds);
-        if (!Handle || Handle->IsClosed()) return Error("invalid or closed audio sound");
+        if (!Handle || Handle->IsClosed()) return Value::Error("invalid or closed audio sound");
         return Handle->Seek(Args[1].AsNumber());
     });
     return Value::FromObject(Library);

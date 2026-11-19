@@ -1,53 +1,16 @@
 #include "Time.hpp"
+#include <Feather/NativeModule.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <functional>
 #include <stdexcept>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 
 namespace Feather {
 namespace {
 
-Value Error(std::string Message) {
-    return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message)));
-}
-
-using Method = std::function<Value(const std::vector<Value>&)>;
-
-class Function final : public NativeObject {
-public:
-    Function(NativeObjectType& Type, Method Body)
-        : NativeObject(Type), Body(std::move(Body)) {}
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    bool IsCallable() const override { return true; }
-    Value Call(const std::vector<Value>& Arguments) override {
-        try { return Body(Arguments); }
-        catch (const IdleCallbackFault&) { throw; }
-        catch (const std::exception& Failure) { return Error(Failure.what()); }
-    }
-private:
-    Method Body;
-};
-
-class Namespace final : public NativeObject {
-public:
-    explicit Namespace(NativeObjectType& Type) : NativeObject(Type) {}
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    void Add(std::string Name, Value Input) {
-        Members.emplace(std::move(Name), std::move(Input));
-    }
-    Value GetMember(const Value& Key) override {
-        if (Key.GetType() != ValueType::String) return Error("member name must be a string");
-        auto Found = Members.find(Key.AsString());
-        return Found == Members.end() ? Error("unknown time member") : Found->second;
-    }
-private:
-    std::unordered_map<std::string, Value> Members;
-};
 
 double Duration(const Value& Input, const char* Call) {
     if (!Input.IsNumeric() || !std::isfinite(Input.AsNumber()) ||
@@ -124,51 +87,43 @@ TimeLibrary::TimeLibrary(Vm& Machine, std::shared_ptr<TimeHost> InputHost)
     : Host(std::move(InputHost)) {
     if (!Host) throw std::invalid_argument("time requires a host clock");
     auto& Clocks = Machine.CreateNativeObjectType<ClockType>(Host);
-    auto& ModuleType = Machine.CreateNativeObjectType<NativeSingletonType>(
-        TimeModuleGuid, "Module");
-    auto Module = ModuleType.Create<Namespace>();
-    auto Add = [&](std::string Name, Method Body) {
-        auto TypeName = Name;
-        auto& Type = Machine.CreateNativeObjectType<NativeSingletonType>(
-            TimeModuleGuid, std::move(TypeName));
-        Module->Add(std::move(Name), Value::FromObject(Type.Create<Function>(std::move(Body))));
-    };
+    NativeModuleBuilder Module(Machine, TimeModuleGuid, "time");
 
-    Add("Monotonic", [Clock = Host](const std::vector<Value>& A) {
-        if (!A.empty()) return Error("Monotonic expects no arguments");
+    Module.AddFunction("Monotonic", [Clock = Host](const std::vector<Value>& A) {
+        if (!A.empty()) return Value::Error("Monotonic expects no arguments");
         return Value::Number(Clock->Monotonic());
     });
-    Add("UnixTime", [Clock = Host](const std::vector<Value>& A) {
-        if (!A.empty()) return Error("UnixTime expects no arguments");
+    Module.AddFunction("UnixTime", [Clock = Host](const std::vector<Value>& A) {
+        if (!A.empty()) return Value::Error("UnixTime expects no arguments");
         return Value::Number(Clock->UnixTime());
     });
-    Add("Sleep", [Clock = Host, &Machine](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("Sleep expects one duration in seconds");
+    Module.AddFunction("Sleep", [Clock = Host, &Machine](const std::vector<Value>& A) {
+        if (A.size() != 1) return Value::Error("Sleep expects one duration in seconds");
         return Machine.Idle(Duration(A[0], "Sleep"), [Clock] { return Clock->Monotonic(); },
             [Clock](double Seconds) { Clock->Sleep(Seconds); });
     });
-    Add("SleepUntil", [Clock = Host, &Machine](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("SleepUntil expects one monotonic deadline");
+    Module.AddFunction("SleepUntil", [Clock = Host, &Machine](const std::vector<Value>& A) {
+        if (A.size() != 1) return Value::Error("SleepUntil expects one monotonic deadline");
         return Machine.Idle(std::max(0.0, Duration(A[0], "SleepUntil") - Clock->Monotonic()),
             [Clock] { return Clock->Monotonic(); }, [Clock](double Seconds) { Clock->Sleep(Seconds); });
     });
-    Add("CreateClock", [&Clocks](const std::vector<Value>& A) {
-        if (!A.empty()) return Error("CreateClock expects no arguments");
+    Module.AddFunction("CreateClock", [&Clocks](const std::vector<Value>& A) {
+        if (!A.empty()) return Value::Error("CreateClock expects no arguments");
         return Value::FromObject(Clocks.Create());
     });
-    Add("Tick", [&Clocks](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("Tick expects one Clock");
+    Module.AddFunction("Tick", [&Clocks](const std::vector<Value>& A) {
+        if (A.size() != 1) return Value::Error("Tick expects one Clock");
         return Value::Number(ClockArgument(A[0], Clocks).Tick());
     });
-    Add("Reset", [&Clocks](const std::vector<Value>& A) {
-        if (A.size() != 1) return Error("Reset expects one Clock");
+    Module.AddFunction("Reset", [&Clocks](const std::vector<Value>& A) {
+        if (A.size() != 1) return Value::Error("Reset expects one Clock");
         ClockArgument(A[0], Clocks).Reset();
         return Value{};
     });
-    ModuleObject = std::move(Module);
+    ModuleObject = Module.Build();
 }
 
 TimeLibrary::~TimeLibrary() = default;
-Value TimeLibrary::GetModule() const { return Value::FromObject(ModuleObject); }
+Value TimeLibrary::GetModule() const { return ModuleObject; }
 
 } // namespace Feather

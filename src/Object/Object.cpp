@@ -5,12 +5,6 @@
 #include <functional>
 
 namespace Feather {
-namespace {
-Value Error(std::string Message) {
-    return Value::FromObject(std::make_shared<ErrorObject>(std::move(Message)));
-}
-}
-
 std::size_t NativeTypeIdHash::operator()(const NativeTypeId& Input) const noexcept {
     std::size_t Result = 0xcbf29ce484222325ULL;
     for (auto Byte : Input.Module.Bytes)
@@ -33,9 +27,9 @@ void NativeObjectType::RegisterObject(const std::shared_ptr<NativeObject>& Input
     Machine.RegisterNativeObject(Input);
 }
 
-Value NativeObject::Call(const std::vector<Value>&) { return Error("object is not callable"); }
-Value NativeObject::GetMember(const Value&) { return Error("member does not exist"); }
-Value NativeObject::SetMember(const Value&, const Value&) { return Error("member is not writable"); }
+Value NativeObject::Call(const std::vector<Value>&) { return Value::Error("object is not callable"); }
+Value NativeObject::GetMember(const Value&) { return Value::Error("member does not exist"); }
+Value NativeObject::SetMember(const Value&, const Value&) { return Value::Error("member is not writable"); }
 void NativeObject::SetGcVisibleMember(std::string Name, Value Input) {
     GcVisibleMembers.insert_or_assign(std::move(Name), std::move(Input));
 }
@@ -50,9 +44,12 @@ bool ScriptObject::Key::operator==(const Key& Other) const {
     if (Type != Other.Type) return false;
     return Type == ValueType::String ? Text == Other.Text : Number == Other.Number;
 }
+std::size_t ScriptObject::KeyHash::operator()(std::string_view Text) const {
+    return std::hash<std::string_view>{}(Text) ^ 0x517cc1b727220a95ULL;
+}
 std::size_t ScriptObject::KeyHash::operator()(const Key& Input) const {
     if (Input.Type == ValueType::String)
-        return std::hash<std::string>{}(Input.Text) ^ 0x517cc1b727220a95ULL;
+        return (*this)(std::string_view(Input.Text));
     double Normalized = Input.Number == 0 ? 0 : Input.Number;
     return std::hash<std::uint64_t>{}(std::bit_cast<std::uint64_t>(Normalized));
 }
@@ -74,6 +71,11 @@ std::optional<Value> ScriptObject::GetRaw(const Value& Input) const {
         if (!Index) return std::nullopt;
         return (*Elements)[*Index];
     }
+    if (Input.GetType() == ValueType::String) {
+        auto Found = Members.find(std::string_view(Input.AsString()));
+        if (Found == Members.end()) return std::nullopt;
+        return Found->second;
+    }
     auto Key = ConvertKey(Input);
     if (!Key) return std::nullopt;
     auto Found = Members.find(*Key);
@@ -81,9 +83,9 @@ std::optional<Value> ScriptObject::GetRaw(const Value& Input) const {
     return Found->second;
 }
 Value ScriptObject::SetRaw(const Value& InputKey, const Value& Input) {
-    if (Elements) return Error("array members are read-only");
+    if (Elements) return Value::Error("array members are read-only");
     auto Key = ConvertKey(InputKey);
-    if (!Key) return Error("invalid ScriptObject key");
+    if (!Key) return Value::Error("invalid ScriptObject key");
     Owner->ValidateOwnedValue(Input);
     Members.insert_or_assign(std::move(*Key), Input);
     return Input;
@@ -118,6 +120,6 @@ std::size_t ScriptObject::GetArrayLength() const {
 Value ErrorObject::GetMember(const Value& Key) {
     if (Key.GetType() == ValueType::String && Key.AsString() == "message")
         return Value::String(Message);
-    return Error("member does not exist");
+    return Value::Error("member does not exist");
 }
 } // namespace Feather

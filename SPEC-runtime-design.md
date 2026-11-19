@@ -184,7 +184,8 @@
       其他未登记在该成员表中的原生状态/引用由 NativeObject 自行管理；初版
       不为任意 C++ 成员变量提供自动扫描。
 - 宿主通过 `RegisterNativeObject(shared_ptr<NativeObject>)` 登记需要被 GC
-      扫描的原生对象；VM 保存弱引用，GC 时跳过并清理已销毁的登记项。
+      扫描的原生对象。VM 保存弱引用；登记表达到自身阈值时清除过期项，完整 GC 也会在扫描时清理。
+      清理后按剩余登记数加上 `max(1024, 剩余登记数)` 设置下次阈值。登记时清表不会触发脚本 GC。
       NativeObject 的 GC 可见成员由专用 setter/移除接口维护，不扫描任意
       C++ 字段。NativeObject 本体由 C++ `shared_ptr` 持有，不由 ScriptObject GC 释放。
       RootMetaObject 随 VM 存活；string 生命周期见 1.2 节。公开宿主 API 返回
@@ -242,6 +243,9 @@
 | `SetMember` | 无 | `[对象, key, 值] → [结果]` | 执行写成员原语；成功留下写入值，语言层失败留下 Error |
 | `Add` / `Sub` / `Mul` / `Div` | 无 | `[左, 右] → [结果]` | 按 5.3 节运算规则；非法类型组合返回 Error |
 | `ToByte` | 无 | `[值] → [byte/Error]` | 严格检查 0～255 整数，不截断或回绕 |
+| `AddToLocal` / `AddConstToLocal` | 两个小端 u16，依次为目标局部槽、右侧局部槽或 number 常量索引 | 空栈 → 空栈 | 指令版本 3，opcode 24、25。将目标局部值与右操作数按普通加法求和并写回，适用于独立赋值语句 |
+| `AddConst` / `SubConst` / `MulConst` | number 常量索引 u32 | `[左] → [结果]` | 指令版本 3，opcode 26～28，常量为右操作数，沿用相应运算的数值及 Error 语义 |
+| `GetField` | string 常量索引 u32 | `[对象] → [结果]` | 指令版本 3，opcode 29，以常量字段名执行普通成员读取，包含元对象及原生对象路径 |
 | `Negate` | 无 | `[值] → [结果]` | 数值取负；非法类型返回 Error |
 | `Equal` / `Less` | 无 | `[左, 右] → [结果]` | 按 5.3 节比较规则 |
 | `JUMP` | 相对偏移 | `[] → []` | 无条件跳转 |

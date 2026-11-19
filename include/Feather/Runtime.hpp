@@ -68,6 +68,7 @@ public:
     static Value Number(double Input);
     // Checked conversion: finite integral input in [0, 255], otherwise invalid_argument.
     static Value Byte(double Input);
+    static Value Error(std::string Message);
     static Value String(std::string Input);
     static Value FromObject(std::shared_ptr<Object> Input);
     static Value FromScript(ScriptObject* Input);
@@ -195,8 +196,13 @@ private:
         std::string Text;
         double Number = 0;
         bool operator==(const Key& Other) const;
+        bool operator==(std::string_view Other) const { return Type == ValueType::String && Text == Other; }
     };
-    struct KeyHash { std::size_t operator()(const Key& Input) const; };
+    struct KeyHash {
+        using is_transparent = void;
+        std::size_t operator()(const Key& Input) const;
+        std::size_t operator()(std::string_view Text) const;
+    };
     static std::optional<Key> ConvertKey(const Value& Input);
     class ArrayMethod;
     std::optional<std::size_t> GetArrayIndex(const Value& Key) const;
@@ -204,7 +210,7 @@ private:
     Vm* Owner;
     ScriptObject* MetaObject;
     bool Marked = false;
-    std::unordered_map<Key, Value, KeyHash> Members;
+    std::unordered_map<Key, Value, KeyHash, std::equal_to<>> Members;
     std::unique_ptr<std::vector<Value>> Elements;
 };
 
@@ -234,6 +240,7 @@ struct GcStatistics {
     std::size_t TotalAllocatedScriptObjects = 0;
     std::size_t TotalCollectedScriptObjects = 0;
     std::size_t NextCollectionObjectCount = 0;
+    std::size_t NativeRegistryEntries = 0; // Includes expired entries awaiting pruning.
 };
 
 struct SourceLocation {
@@ -334,7 +341,8 @@ private:
 enum class Op : std::uint8_t {
     Const, Null, True, False, Pop, GetLocal, GetGlobal, SetLocal, SetGlobal,
     NewObject, GetMember, SetMember, Add, Sub, Mul, Div, Negate, Equal, Less,
-    Jump, JumpIf, Call, Return, ToByte
+    Jump, JumpIf, Call, Return, ToByte,
+    AddToLocal, AddConstToLocal, AddConst, SubConst, MulConst, GetField
 };
 
 struct FunctionPrototype {
@@ -364,6 +372,8 @@ struct FEATHER_API Constant {
 class FEATHER_API Module final {
 public:
     std::vector<Constant> Constants;
+    static constexpr std::uint16_t CurrentInstructionVersion = 3;
+    std::uint16_t InstructionVersion = CurrentInstructionVersion;
     std::uint32_t AddNumber(double Input);
     std::uint32_t AddByte(double Input);
     std::uint32_t AddString(std::string Input);
@@ -481,9 +491,13 @@ private:
     friend class VmDebugContext;
     friend class MessageValueArchive;
     ScriptObject* AllocateScriptObject(ScriptObject* MetaObject);
-    void MaybeCollectGarbage();
+    void MaybeCollectGarbage() {
+        if (CollectionPending || ScriptHeap.size() >= NextCollectionObjectCount)
+            CollectGarbageIfSafe();
+    }
+    void CollectGarbageIfSafe();
     std::size_t CollectGarbageImpl();
-    void UpdateCollectionThreshold();
+    void UpdateCollectionThresholds();
     void RemoveFromRoot(std::uint64_t Token);
     void RegisterNativeObjectType(std::shared_ptr<NativeObjectType> Input);
     NativeObjectType* FindNativeObjectType(const NativeTypeId& Id) const;
@@ -502,7 +516,7 @@ private:
     std::unordered_map<NativeTypeId, NativeObjectType*, NativeTypeIdHash> NativeTypes;
     std::shared_ptr<Module> Program;
     std::shared_ptr<Module> SourceProgram;
-    std::vector<std::shared_ptr<Object>> Functions;
+    std::vector<Value> ConstantValues;
     ScriptObject* RootMetaObject = nullptr;
     std::vector<std::unique_ptr<ScriptObject>> ScriptHeap;
     std::unordered_set<ScriptObject*> ScriptObjects;
@@ -523,6 +537,7 @@ private:
     std::shared_ptr<VmDebugController> DebugController;
     std::unordered_map<std::uint64_t, Value> HostRoots;
     std::vector<std::weak_ptr<NativeObject>> NativeRegistry;
+    std::size_t NextNativeRegistrySweep = 0;
     std::shared_ptr<int> Lifetime = std::make_shared<int>(0);
     std::uint64_t NextRootToken = 1;
     std::uint32_t ActiveRuns = 0;

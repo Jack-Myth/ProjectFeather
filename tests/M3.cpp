@@ -1,4 +1,5 @@
 #include <Feather/Compiler.hpp>
+#include <Feather/ByteBuffer.hpp>
 
 #include <iostream>
 #include <memory>
@@ -68,6 +69,13 @@ void CyclesAndRoots() {
     Check(Machine.GetScriptObjectCount() == 1, "only RootMetaObject remains");
     Check(Machine.GetGcStatistics().ScriptMemberCount == 0, "GC statistics after collection");
 
+    auto Array = Machine.CreateArray();
+    auto EmptyBytes = Machine.GetGcStatistics().EstimatedScriptBytes;
+    for (int I = 0; I < 256; ++I) Array->AppendArray(Value::Number(I));
+    Check(Machine.GetGcStatistics().EstimatedScriptBytes >= EmptyBytes + 256 * sizeof(Value),
+          "array storage missing from GC statistics");
+    Machine.CollectGarbage();
+
     A = Machine.CreateScriptObject();
     A->SetRaw(Value::String("self"), Value::FromScript(A));
     auto Handle = Machine.AddToRoot(Value::FromScript(A));
@@ -86,7 +94,9 @@ void CyclesAndRoots() {
 void NativeVisibilityAndBoundaries() {
     Vm Machine(Program());
     auto Native = std::make_shared<HostNative>();
+    for (int I = 0; I < 64; ++I) Machine.RegisterNativeObject(std::make_shared<HostNative>());
     Machine.RegisterNativeObject(Native);
+    for (int I = 0; I < 64; ++I) Machine.RegisterNativeObject(std::make_shared<HostNative>());
     auto Script = Machine.CreateScriptObject();
     Native->SetGcVisibleMember("held", Value::FromScript(Script));
     Check(Machine.CollectGarbage() == 0, "registered NativeObject member should retain");
@@ -121,6 +131,31 @@ void NativeVisibilityAndBoundaries() {
     Check(CallbackVm.Run(Id, {Value::FromObject(std::make_shared<GcDuringCall>(CallbackVm))}).AsBool(),
           "GC during active VM call should reject");
     Check(CallbackVm.GetNativeCallDepth() == 0, "native call depth must unwind");
+}
+void NativeRegistryChurn() {
+    auto Source = Compile(R"(
+        def read(buffer, count) {
+            var i = 0;
+            while (i < count) { buffer.Get(0); i = i + 1; }
+            return buffer.Get(0);
+        }
+    )");
+    Vm Machine(Source.Program);
+    Source.Initialize(Machine);
+    auto Native = std::make_shared<HostNative>();
+    Machine.RegisterNativeObject(Native);
+    Native->SetGcVisibleMember("held", Value::FromScript(Machine.CreateScriptObject()));
+    auto Buffer = ByteBufferLibrary(Machine).Create("x");
+    const auto Before = Machine.GetGcStatistics();
+    auto Result = Machine.Run(Source.Functions.at("read"), {Buffer, Value::Number(100'000)});
+    Check(Result.AsByte() == 'x', "buffer read failed during registry churn");
+    const auto After = Machine.GetGcStatistics();
+    Check(After.CollectionCount == Before.CollectionCount, "registry churn triggered script GC");
+    Check(After.NativeRegistryEntries <= Before.NativeRegistryEntries + 1024,
+          "short-lived native method registrations accumulated");
+    Check(Machine.CollectGarbage() == 0, "registry pruning lost a live native root");
+    Native.reset();
+    Check(Machine.CollectGarbage() == 1, "expired native registration retained a script object");
 }
 void GlobalRoots() {
     auto ModuleValue = std::make_shared<Module>();
@@ -209,7 +244,7 @@ void FatalAllocationPath() {
 int main() {
     try {
         CyclesAndRoots(); NativeVisibilityAndBoundaries(); GlobalRoots();
-        AutomaticCollection(); NativeCollectionDeferral(); FatalAllocationPath();
+        AutomaticCollection(); NativeCollectionDeferral(); FatalAllocationPath(); NativeRegistryChurn();
         std::cout << "M3 tests passed\n";
         return 0;
     } catch (const std::exception& Failure) {

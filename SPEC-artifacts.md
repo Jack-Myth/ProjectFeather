@@ -1,10 +1,10 @@
 # 编译产物格式
 
-## 字节码（.fbc v5）
+## 字节码（.fbc v6）
 
 `.fbc` 是单个源码文件编译结果的磁盘表示，供 `featherc` 生成，并由 `feather run` 或精简的 `feathervm` 执行。它保存代码、初始化入口、命名函数索引、快捷行需求标记和 `export` 名称表，不保存 VM 全局变量、对象堆、调用栈或依赖图。当前格式实验性，同一版本的编码必须确定性。
 
-快速开发期不保证旧格式兼容；当前加载器拒绝 v1/v2/v3/v4，测试以 v5 产物的编译、确定性往返和执行验收。
+当前加载器仅接受 v6。
 
 `import("name")` 仅作为普通全局调用保存于函数代码中；本格式不记录或打包它指向的依赖。宿主提供的导入契约见 [SPEC-modules.md](SPEC-modules.md#导入)。
 
@@ -15,9 +15,10 @@
 | 字段 | 编码 | 含义 |
 |---|---|---|
 | magic | 8 bytes | `46 54 48 52 42 43 00 00`（`FTHRBC` 加两个零字节） |
-| format version | u16 | 当前为 5；旧版产物拒绝 |
-| instruction version | u16 | 当前为 2；新增无操作数 ToByte（opcode 23），其余 opcode 编号不变；指令语义和编码改变时提升 |
+| format version | u16 | 6 |
+| instruction version | u16 | 新编译的程序为 3。加载器也接受指令版本 2，按文件声明的版本验证 opcode |
 | payload size | u32 | 后续负载的精确字节数 |
+| source size | u64 | 源文件字节数，计入 payload size；无源文件大小信息时为 UINT64_MAX |
 | constant count | u32 | 常量条数，最多 65536 |
 | constants | 逐条 | 见下文 |
 | initializer | u32 | 必须指向无参数函数常量 |
@@ -29,13 +30,13 @@
 
 常量以一个 `u8` tag 开始。tag 4 后跟 u32 长度和任意二进制字节，Const 将其物化为不可变 ByteBuffer；tag 3 后跟单个 u8 byte 载荷；tag 0 后跟 binary64 原始 64 位；tag 1 后跟字符串；tag 2 后跟 `parameter count: u32`、`local count: u32`、`default count: u32`、逐个默认值及代码字节串。默认值 tag 为：0 缺省、1 `null`、2 `false`、3 `true`、4 后跟 binary64、5 后跟 UTF-8 字符串、6 后跟单个 u8 byte。默认值数量必须与形参数相等；不编码 object 默认值。
 
-编译器当前还会在内存函数原型中生成指令位置表；v5 `.fbc` 不编码它。可选的独立 `.fbs` 保存这些位置，见[符号格式](#符号fbs-v3)。精简 `feathervm` 不加载符号文件，因而保持无位置回退；嵌入宿主可以显式附加匹配的 `.fbs`。
+编译器当前还会在内存函数原型中生成指令位置表；v6 不编码它。可选的独立 `.fbs` 保存这些位置，见[符号格式](#符号fbs-v3)。精简 `feathervm` 不加载符号文件，因而保持无位置回退；嵌入宿主可以显式附加匹配的 `.fbs`。
 
 加载器在运行任何代码前核对 magic、两个版本、文件总长、各字段边界、常量和函数索引、重复函数名、默认值、UTF-8、标记合法性，并调用 `Module::Validate()` 检查每个函数的指令、跳转、局部槽位及栈效应。CLI 对整个输入文件和输出文件采用 64 MiB 上限，单个函数代码仍受内存模块的 1 MiB 上限。文件没有签名或完整性校验；加载校验保证格式与 VM 不变量，不限制合法脚本的运行时间或副作用。
 
 `featherc input.fe -o output.fbc [--symbols output.fbs]` 只编译和写文件，不执行顶层代码。`feather run input.fbc` 与 `feathervm input.fbc` 都加载字节码、执行初始化函数，再调用存在时的无参数 `main`；`feathervm` 是不包含调试协议、Socket transport 或源码编译器的最小字节码 CLI，也不加载 `.fbs`。独立运行程序拒绝仍需要宿主提供快捷函数的模块。脚本可自行声明同名顶层函数。
 
-`feather run input.fe` 在源码旁存在同名 `input.fbc` 且 `.fbc` 修改时间不早于 `.fe` 时，优先加载并完整验证该字节码；缓存不存在、较旧、无法读取或验证失败时重新读取并编译源码。该时间戳规则是本地开发便利机制，不是内容身份证明；需要确定性部署时应显式执行 `.fbc`。`feather debug` 总是编译 `.fe`，避免缓存字节码缺少内存调试表。
+`feather run input.fe` 在源码旁存在同名 `input.fbc` 且 `.fbc` 修改时间不早于 `.fe`、v6 中的源码字节数与当前文件大小一致时，优先加载并完整验证该字节码；缓存不存在、较旧、无法读取或验证失败时重新读取并编译源码。相同大小的不同内容可能命中缓存；需要确定性部署时应显式执行 `.fbc`。`feather debug` 总是编译 `.fe`，避免缓存字节码缺少内存调试表。
 
 ## 符号（.fbs v3）
 
@@ -49,10 +50,10 @@
 |---|---|---|
 | magic | 8 bytes | `FTHRSY` 后接两个零字节 |
 | format version | u16 | 3 |
-| instruction version | u16 | 2，与 `.fbc` 的指令版本一致 |
+| instruction version | u16 | 2 或 3，必须匹配对应 `.fbc` 的指令版本 |
 | payload size | u32 | 从头部结束到文件末尾的精确字节数，含校验和 |
 | bytecode size | u32 | 对应 `.fbc` 的总字节数 |
-| bytecode fingerprint | u64 | 完整、确定性 v5 `.fbc` 字节的 FNV-1a 64 位指纹 |
+| bytecode fingerprint | u64 | 标准 v6 程序编码的 FNV-1a 64 位指纹（计算时将源码大小字段统一为 UINT64_MAX） |
 | function count | u32 | 模块中的函数常量数，最多 65536 |
 | functions | 逐个 | 按常量索引升序编码，见下文 |
 | CRC32 | u32 | 前面所有字节的 IEEE CRC32 |
