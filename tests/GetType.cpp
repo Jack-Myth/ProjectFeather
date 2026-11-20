@@ -40,6 +40,16 @@ int main() {
         Child.LoadInto(Machine, "child");
         Child.InitializeModule(Machine, "child");
         auto Fn = Machine.GetModuleGlobal("child", "inspect");
+        auto* ScriptFn = Fn.AsObject();
+        auto* Builtin = Machine.GetGlobal("alias").AsObject();
+        auto FunctionBit = Object::Flag::ScriptFunction;
+        Check(ScriptFn->HasFlag(FunctionBit), "script function flag");
+        Check(!Builtin->HasFlag(FunctionBit) && !Result.AsObject()->HasFlag(FunctionBit),
+              "native callable and script object have no script function flag");
+        *Builtin = *ScriptFn;
+        *ScriptFn = *Builtin;
+        Check(ScriptFn->HasFlag(FunctionBit) && !Builtin->HasFlag(FunctionBit),
+              "base assignment preserves the concrete object's flags");
         Check(Machine.Call(Fn, {}).AsString() == "byte", "module builtin isolated from root shadow");
         auto Loaded = DeserializeProgram(SerializeProgram(Program));
         Vm BytecodeMachine(Loaded.Program);

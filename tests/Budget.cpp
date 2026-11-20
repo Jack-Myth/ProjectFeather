@@ -43,13 +43,12 @@ void CheckCompareBranchBudget() {
     const auto Original = SerializeProgram(Branch);
     const std::vector<Value> Taken{Value::Byte(0), Value::Number(1)};
     const std::vector<Value> NotTaken{Value::Number(1), Value::Number(0)};
-    // Two loads, comparison, JumpIf, then the constant and Return. The false
-    // path executes one additional Jump before loading its result.
-    Vm Six(Branch.Program, 100, 6);
-    Check(Six.Run(Entry, Taken).AsNumber() == 1, "taken branch charged an extra jump");
-    BudgetExceeded([&] { Six.Run(Entry, NotTaken); }, "false branch lost its jump charge");
-    Vm Seven(Branch.Program, 100, 7);
-    Check(Seven.Run(Entry, NotTaken).AsNumber() == 2, "false branch exceeded its exact budget");
+    // The mixed numeric path dispatches two loads, one fused branch, Const and Return.
+    Vm Four(Branch.Program, 100, 4), Five(Branch.Program, 100, 5);
+    BudgetExceeded([&] { Four.Run(Entry, Taken); }, "mixed branch fit below its dispatch count");
+    Check(Five.Run(Entry, Taken).AsNumber() == 1, "mixed branch exceeded its dispatch count");
+    Vm Three(Branch.Program, 100, 3);
+    Check(Three.Run(Entry, NotTaken).AsNumber() == 2, "numeric comparison block exceeded its budget");
     Check(SerializeProgram(Branch) == Original, "branch preparation modified the source program");
 }
 
@@ -58,15 +57,15 @@ void CheckNumericAssignment() {
     const auto Entry = Program.Functions.at("adjust");
     const auto Image = SerializeProgram(Program);
     const std::vector<Value> Args{Value::Number(7)};
-    // GetLocal, MulConst, AddConst, SetLocal, Pop, GetLocal, Return.
-    for (unsigned Limit = 1; Limit < 7; ++Limit) {
+    // One arithmetic block, GetLocal and Return.
+    for (unsigned Limit = 1; Limit < 3; ++Limit) {
         Vm Limited(Program.Program, 100, Limit);
         BudgetExceeded([&] { Limited.Run(Entry, Args); }, "folded assignment lost an instruction charge");
     }
-    Vm Exact(Program.Program, 100, 7);
+    Vm Exact(Program.Program, 100, 3), Fallback(Program.Program, 100, 7);
     Check(Exact.Run(Entry, Args).AsNumber() == 15, "folded assignment failed at exact budget");
-    Check(Exact.Run(Entry, {Value::Byte(7)}).GetType() == ValueType::Number, "byte promotion failed");
-    Check(Exact.Run(Entry, {Value::String("x")}).IsError(), "assignment lost its arithmetic error");
+    Check(Fallback.Run(Entry, {Value::Byte(7)}).GetType() == ValueType::Number, "byte promotion failed");
+    Check(Fallback.Run(Entry, {Value::String("x")}).IsError(), "assignment lost its arithmetic error");
     Check(SerializeProgram(Program) == Image, "optimization changed the source bytecode");
 }
 
@@ -102,10 +101,10 @@ void CheckBinaryAssignment() {
     auto Program = Compile("def divide(x,y) { y = x / y; return y; }");
     const auto Entry = Program.Functions.at("divide");
     const std::vector<Value> Args{Value::Number(7), Value::Number(2)};
-    Vm Short(Program.Program, 100, 6), Exact(Program.Program, 100, 7);
+    Vm Short(Program.Program, 100, 2), Exact(Program.Program, 100, 3), Fallback(Program.Program, 100, 7);
     BudgetExceeded([&] { (void)Short.Run(Entry, Args); }, "binary assignment skipped a budget charge");
     Check(Exact.Run(Entry, Args).AsNumber() == 3.5, "binary assignment overwrote its right operand");
-    Check(Exact.Run(Entry, {Value::Number(7), Value::Byte(2)}).AsNumber() == 3.5,
+    Check(Fallback.Run(Entry, {Value::Number(7), Value::Byte(2)}).AsNumber() == 3.5,
           "binary assignment lost byte promotion");
     const auto Infinity = Exact.Run(Entry, {Value::Number(1), Value::Number(-0.0)}).AsNumber();
     Check(std::isinf(Infinity) && std::signbit(Infinity), "division by negative zero lost its sign");
@@ -118,19 +117,26 @@ void CheckSlotCall() {
         def difference(a,b) { return a-b; }
         def run(f,a,b) { a=f(b,a); return a; }
     )");
+    // Obtain the function value without spending this deliberately tiny budget on module initialization.
+    Builder LoadTarget;
+    LoadTarget.EmitU32(Op::Const, Program.Functions.at("difference"));
+    LoadTarget.Emit(Op::Return);
+    auto Getter = std::make_shared<FunctionPrototype>();
+    Getter->Code = std::move(LoadTarget).Finish();
+    const auto GetTarget = Program.Program->AddFunction(Getter);
     auto CheckBudget = [&](std::size_t Limit, bool ExpectSuccess) {
         Vm Machine(Program.Program, 100, Limit);
-        Program.Initialize(Machine);
+        auto Target = Machine.Run(GetTarget);
         auto Run = [&] {
             return Machine.Run(Program.Functions.at("run"),
-                               {Machine.GetGlobal("difference"), Value::Number(2), Value::Number(7)});
+                               {Target, Value::Number(2), Value::Number(7)});
         };
         if (ExpectSuccess) Check(Run().AsNumber() == 5, "call-site argument order or return destination");
         else BudgetExceeded(Run, "slot call skipped an instruction charge");
     };
-    // Three loads and Call; four instructions for the callee; SetLocal, Pop, GetLocal, Return.
-    CheckBudget(11, false);
-    CheckBudget(12, true);
+    // One slot call, four callee instructions, then GetLocal and Return.
+    CheckBudget(6, false);
+    CheckBudget(7, true);
 }
 
 } // namespace

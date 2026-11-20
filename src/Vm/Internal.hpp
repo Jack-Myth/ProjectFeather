@@ -9,7 +9,14 @@ namespace Feather {
 class FunctionObject : public NativeObject {
 public:
     FunctionObject(std::shared_ptr<Module> Owner, std::shared_ptr<FunctionPrototype> Body)
-        : Owner(std::move(Owner)), Body(std::move(Body)) {}
+        : Owner(std::move(Owner)), Body(std::move(Body)) {
+        Flags |= static_cast<std::uint8_t>(Flag::ScriptFunction);
+    }
+    FunctionObject(const FunctionObject&) = delete;
+    FunctionObject& operator=(const FunctionObject&) = delete;
+    static FunctionObject* FromObject(Object* Input) noexcept {
+        return Input->HasFlag(Flag::ScriptFunction) ? static_cast<FunctionObject*>(Input) : nullptr;
+    }
     ObjectType GetObjectType() const override { return ObjectType::Function; }
     bool IsCallable() const override { return true; }
     const FunctionPrototype& GetBody() const { return *Body; }

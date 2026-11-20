@@ -212,6 +212,28 @@ void AutomaticCollection() {
           Statistics.NextCollectionObjectCount <= 8,
           "automatic GC statistics are incomplete");
 }
+void CollectionPendingAtThreshold() {
+    auto Source = Compile("def idle() { return 7; }");
+    auto Idle = Source.Functions.at("idle");
+    Vm Machine(Source.Program, 3);
+    Machine.Run(Idle);
+    Check(Machine.GetGcStatistics().CollectionCount == 0, "root creation requested a premature GC");
+
+    Machine.CreateScriptObject();
+    Machine.CreateScriptObject();
+    Check(Machine.GetGcStatistics().CollectionCount == 0, "host allocation collected while idle");
+    Machine.Run(Idle);
+    Check(Machine.GetGcStatistics().ScriptObjectCount == 1, "idle allocation missed the next safe point");
+
+    auto Kept = Machine.AddToRoot(Value::FromScript(Machine.CreateScriptObject()));
+    {
+        auto Temporary = Machine.AddToRoot(Value::FromScript(Machine.CreateScriptObject()));
+        Check(Machine.CollectGarbage() == 0, "rooted objects must survive collection at the limit");
+    }
+    Machine.Run(Idle);
+    Check(Machine.GetGcStatistics().ScriptObjectCount == 2,
+          "full live heap lost its pending collection when the threshold was recomputed");
+}
 void NativeCollectionDeferral() {
     auto ModuleValue = std::make_shared<Module>();
     auto Body = std::make_shared<FunctionPrototype>();
@@ -244,7 +266,8 @@ void FatalAllocationPath() {
 int main() {
     try {
         CyclesAndRoots(); NativeVisibilityAndBoundaries(); GlobalRoots();
-        AutomaticCollection(); NativeCollectionDeferral(); FatalAllocationPath(); NativeRegistryChurn();
+        AutomaticCollection(); CollectionPendingAtThreshold(); NativeCollectionDeferral();
+        FatalAllocationPath(); NativeRegistryChurn();
         std::cout << "M3 tests passed\n";
         return 0;
     } catch (const std::exception& Failure) {

@@ -109,8 +109,20 @@ private:
 
 class FEATHER_API Object {
 public:
+    enum class Flag : std::uint8_t { ScriptFunction = 1u << 0 };
+
+    Object() = default;
+    // Flags describe the concrete object and must not transfer through base copies.
+    Object(const Object&) noexcept {}
+    Object& operator=(const Object&) noexcept { return *this; }
     virtual ~Object() = default;
     virtual ObjectType GetObjectType() const = 0;
+    bool HasFlag(Flag Bit) const noexcept {
+        return (Flags & static_cast<std::uint8_t>(Bit)) != 0;
+    }
+private:
+    friend class FunctionObject;
+    std::uint8_t Flags = 0;
 };
 
 class FEATHER_API NativeObject : public Object {
@@ -493,7 +505,7 @@ private:
     friend class MessageValueArchive;
     ScriptObject* AllocateScriptObject(ScriptObject* MetaObject);
     void MaybeCollectGarbage() {
-        if (CollectionPending || ScriptHeap.size() >= NextCollectionObjectCount)
+        if (CollectionPending)
             CollectGarbageIfSafe();
     }
     void CollectGarbageIfSafe();

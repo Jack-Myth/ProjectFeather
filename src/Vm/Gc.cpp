@@ -16,6 +16,7 @@ std::size_t NextSweepSize(std::size_t Live) {
 
 void Vm::UpdateCollectionThresholds() {
     NextCollectionObjectCount = std::min(NextSweepSize(ScriptHeap.size()), ScriptObjectLimit);
+    CollectionPending = ScriptHeap.size() >= NextCollectionObjectCount;
     NextNativeRegistrySweep = NextSweepSize(NativeRegistry.size());
 }
 
@@ -106,7 +107,6 @@ std::size_t Vm::CollectGarbageImpl() {
     auto Collected = Before - ScriptHeap.size();
     ++CollectionCount;
     TotalCollectedScriptObjects += Collected;
-    CollectionPending = false;
     UpdateCollectionThresholds();
     return Collected;
 }

@@ -696,7 +696,7 @@ ScriptObject* Vm::AllocateScriptObject(ScriptObject* MetaObject) {
     try { ScriptObjects.insert(Result); }
     catch (...) { ScriptHeap.pop_back(); throw; }
     ++TotalAllocatedScriptObjects;
-    if (ActiveRuns != 0 && ScriptHeap.size() >= NextCollectionObjectCount)
+    if (ScriptHeap.size() >= NextCollectionObjectCount)
         CollectionPending = true;
     return Result;
 }
@@ -727,7 +727,7 @@ void Vm::ValidateOwnedValue(const Value& Input) const {
         throw std::invalid_argument("ScriptObject belongs to another VM");
     if (Input.GetType() == ValueType::Object &&
         Input.GetObjectType() == ObjectType::Function) {
-        auto* Function = dynamic_cast<FunctionObject*>(Input.AsObject());
+        auto* Function = FunctionObject::FromObject(Input.AsObject());
         if (!Function || (Function->GetOwner() != Program &&
                           !ModuleByProgram.contains(Function->GetOwner().get())))
             throw std::invalid_argument("function belongs to another VM module");
@@ -882,7 +882,7 @@ Value Vm::Call(Value Target, std::vector<Value> Arguments) {
             for (const auto& Argument : Arguments) Roots.push_back(AddToRoot(Argument));
             continue;
         }
-        if (Native->GetObjectType() == ObjectType::Function) {
+        if (Native->HasFlag(Object::Flag::ScriptFunction)) {
             ExecutionState Execution;
             InitializeFrame(Execution.Frames.Enter(),
                 std::static_pointer_cast<FunctionObject>(Target.AsNativeObject()), Arguments);
@@ -1026,7 +1026,7 @@ Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t F
         std::static_pointer_cast<FunctionObject>(Instance->ConstantValues[FunctionConstant].AsNativeObject()), Arguments);
     auto Result = Execute(Evaluation);
     if (Result.GetType() == ValueType::Object && Result.GetObjectType() == ObjectType::Function) {
-        auto* Function = dynamic_cast<FunctionObject*>(Result.AsObject());
+        auto* Function = FunctionObject::FromObject(Result.AsObject());
         if (Function && Function->GetOwner() == Instance->Program)
             throw std::invalid_argument("debug expression cannot return a temporary function");
     }
@@ -1092,10 +1092,10 @@ bool Vm::TryEnterSlotCall(ExecutionState& Execution, const Value*& Target) {
     }
 
     const auto Count = Call.Arguments.size();
-    if (DebugController || Frames.size() >= 1024 || InstructionsRemaining < Count + 1 ||
+    if (DebugController || Frames.size() >= 1024 ||
         Count + 1 > MaxOperandStackSize - Caller.Stack.size() || Target->GetType() != ValueType::Object)
         return false;
-    auto* Callee = dynamic_cast<FunctionObject*>(Target->AsObject());
+    auto* Callee = FunctionObject::FromObject(Target->AsObject());
     if (!Callee || Callee->GetOwner() != Function.GetOwner()) return false;
     for (auto Slot : Call.Arguments) {
         const auto& Arg = Caller.Locals[Slot];
@@ -1106,7 +1106,6 @@ bool Vm::TryEnterSlotCall(ExecutionState& Execution, const Value*& Target) {
 
     auto Owner = std::static_pointer_cast<FunctionObject>(Target->AsNativeObject());
     Caller.Pc = Call.ResumePc;
-    InstructionsRemaining -= Count + 1; // The initial target load was already charged.
     auto& Next = Frames.Enter();
     const auto& Locals = Frames[Frames.size() - 2].Locals; // Enter can relocate Caller.
     Next.Function = std::move(Owner);
@@ -1237,7 +1236,7 @@ Value Vm::Execute(ExecutionState& Execution) {
                     return;
                 }
                 Self(Self, std::move(Target), std::move(Args), Depth + 1, false);
-            } else if (Native->GetObjectType() == ObjectType::Function) {
+            } else if (Native->HasFlag(Object::Flag::ScriptFunction)) {
                 auto Function = std::static_pointer_cast<FunctionObject>(Target.AsNativeObject());
                 if (Function->GetOwner() != Program &&
                     !ModuleByProgram.contains(Function->GetOwner().get()))
@@ -1270,8 +1269,7 @@ Value Vm::Execute(ExecutionState& Execution) {
             const auto& Source = Current.Locals[Block.Source];
             if (!DebugController && Source.GetType() == ValueType::Number) {
                 if (Block.Operation == SlotBlock::Kind::Arithmetic) {
-                    // GetLocal has already been charged. Keep the original path near a budget fault.
-                    if (InstructionsRemaining >= Block.StepCount + 2 && Current.Stack.size() < MaxOperandStackSize &&
+                    if (Current.Stack.size() < MaxOperandStackSize &&
                         Current.Locals[Block.Operand].GetType() == ValueType::Number) {
                         double Result = Source.Data.Numeric;
                         for (std::size_t I = 0; I < Block.StepCount; ++I) {
@@ -1285,11 +1283,10 @@ Value Vm::Execute(ExecutionState& Execution) {
                             }
                         }
                         Current.Locals[Block.Operand].Data.Numeric = Result;
-                        InstructionsRemaining -= Block.StepCount + 2;
                         Current.Pc = Block.EndPc;
                         break;
                     }
-                } else if (InstructionsRemaining >= 4 && Current.Stack.size() <= MaxOperandStackSize - 2) {
+                } else if (Current.Stack.size() <= MaxOperandStackSize - 2) {
                     const auto& Right = (Block.Operation == SlotBlock::Kind::CompareLocal ||
                                          Block.Operation == SlotBlock::Kind::BinaryLocal) ?
                         Current.Locals[Block.Operand] : FrameConstants[Block.Operand];
@@ -1297,7 +1294,6 @@ Value Vm::Execute(ExecutionState& Execution) {
                         if (Block.Operation == SlotBlock::Kind::CompareLocal ||
                             Block.Operation == SlotBlock::Kind::CompareConstant) {
                             const bool Taken = Source.Data.Numeric < Right.Data.Numeric;
-                            InstructionsRemaining -= Taken ? 3 : 4;
                             Current.Pc = Taken ? Block.EndPc : Block.FalsePc;
                             break;
                         }
@@ -1305,7 +1301,6 @@ Value Vm::Execute(ExecutionState& Execution) {
                         if (Destination.GetType() == ValueType::Number) {
                             Destination.Data.Numeric = ArithmeticResult(Block.BinaryOp, Source.Data.Numeric,
                                                                        Right.Data.Numeric);
-                            InstructionsRemaining -= 4;
                             Current.Pc = Block.EndPc;
                             break;
                         }
@@ -1398,9 +1393,7 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         case BranchEqual: case BranchLess: {
             Instruction = Instruction == BranchLess ? Op::Less : Op::Equal;
-            // Near the budget boundary execute individually so faults retain
-            // their original PC. A debugger must see the intermediate boolean.
-            if (!DebugController && InstructionsRemaining >= 2) {
+            if (!DebugController) {
                 const auto Size = Current.Stack.size();
                 const auto& Left = Current.Stack[Size - 2];
                 const auto& Right = Current.Stack[Size - 1];
@@ -1409,11 +1402,9 @@ Value Vm::Execute(ExecutionState& Execution) {
                     const bool Taken = Instruction == Op::Less ? A < B : A == B;
                     Current.Stack.pop_back();
                     Current.Stack.pop_back();
-                    --InstructionsRemaining;
                     Current.Pc += JumpSize; // JumpIf skips the unconditional jump when true.
                     if (Taken) Current.Pc += JumpSize;
                     else {
-                        --InstructionsRemaining;
                         ++Current.Pc;
                         const auto Offset = std::bit_cast<std::int32_t>(ReadU32(Code, Current.Pc));
                         Current.Pc = static_cast<std::size_t>(static_cast<std::int64_t>(Current.Pc) + Offset);
@@ -1472,7 +1463,7 @@ Value Vm::Execute(ExecutionState& Execution) {
             if (Current.Stack.size() > Count && Frames.size() < 1024) {
                 const auto& Target = Current.Stack[Current.Stack.size() - Count - 1];
                 auto* Function = Target.GetType() == ValueType::Object ?
-                    dynamic_cast<FunctionObject*>(Target.AsObject()) : nullptr;
+                    FunctionObject::FromObject(Target.AsObject()) : nullptr;
                 if (Function) {
                     const auto& CalleeOwner = Function->GetOwner();
                     ModuleInstance* CalleeInstance = nullptr;
@@ -1513,12 +1504,11 @@ Value Vm::Execute(ExecutionState& Execution) {
             }
             auto& Caller = Frames.back();
             const auto& Bytes = Caller.Function->GetBody().Code;
-            if (!DebugController && InstructionsRemaining >= 2 && Caller.Pc < Bytes.size() &&
+            if (!DebugController && Caller.Pc < Bytes.size() &&
                 static_cast<Op>(Bytes[Caller.Pc]) == ReturnDestination) {
                 ++Caller.Pc;
                 const auto Slot = ReadU32(Bytes, Caller.Pc);
                 ++Caller.Pc; // Pop after SetLocal
-                InstructionsRemaining -= 2;
                 Caller.Locals[Slot] = std::move(Result);
             } else {
                 Caller.Stack.push_back(std::move(Result));
@@ -1535,7 +1525,7 @@ Value Vm::Execute(ExecutionState& Execution) {
                 Push(Value::Error("value has no members"), DebugErrorOrigin::Operation); break;
             }
             auto ObjectValue = Target.AsObject();
-            if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue)) {
+            if (auto Script = Target.IsScriptObject() ? Target.AsScriptObject() : nullptr) {
                 if ((Key.GetType() != ValueType::String && !Key.IsNumeric()) ||
                     (Key.GetType() == ValueType::Number && std::isnan(Key.AsNumber()))) {
                     Push(Value::Error("invalid ScriptObject key"), DebugErrorOrigin::Operation); break;
