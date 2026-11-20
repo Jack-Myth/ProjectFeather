@@ -88,6 +88,7 @@ public:
     bool IsTruthy() const;
 
 private:
+    friend class Vm;
     explicit Value(ValueType NewType);
     void Destroy();
     void CopyFrom(const Value& Other);
@@ -508,6 +509,7 @@ private:
                                   std::uint32_t FunctionConstant,
                                   const std::vector<Value>& Arguments);
     Value Execute(ExecutionState& Execution);
+    bool TryEnterSlotCall(ExecutionState& Execution, const Value*& Target);
     void ReachDebugSafePoint(ExecutionState& Execution);
     void ReachDebugError(ExecutionState& Execution, const Value& Error,
                          DebugErrorOrigin Origin, std::size_t InstructionPc);

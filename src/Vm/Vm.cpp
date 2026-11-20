@@ -16,16 +16,19 @@ namespace Feather {
 namespace {
 constexpr std::size_t MaxOperandStackSize = 65'536;
 
+void InitializeParameterLocals(Frame& Next) {
+    const auto& Body = Next.Function->GetBody();
+    Next.Locals.resize(Body.LocalCount);
+    for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
+        if (I < Next.Arguments.size()) Next.Locals[I] = Next.Arguments[I];
+        else if (Body.Defaults[I]) Next.Locals[I] = *Body.Defaults[I];
+    }
+}
 void InitializeFrame(Frame& Next, std::shared_ptr<FunctionObject> Function, const std::vector<Value>& Args) {
-    const auto& Body = Function->GetBody();
     Next.Function = std::move(Function);
     Next.Pc = 0;
     Next.Arguments = Args;
-    Next.Locals.resize(Body.LocalCount);
-    for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
-        if (I < Args.size()) Next.Locals[I] = Args[I];
-        else if (Body.Defaults[I]) Next.Locals[I] = *Body.Defaults[I];
-    }
+    InitializeParameterLocals(Next);
 }
 void InitializeFrameFromStack(Frame& Next, std::shared_ptr<FunctionObject> Function,
                               std::vector<Value>& Stack, std::size_t Count) {
@@ -42,22 +45,19 @@ void InitializeFrameFromStack(Frame& Next, std::shared_ptr<FunctionObject> Funct
     // The callee frame now owns the arguments.
     Stack.resize(Start - 1);
 }
-Value NumericResult(Op Instruction, double A, double B) {
+double ArithmeticResult(Op Instruction, double A, double B) {
     switch (Instruction) {
-    case Op::Add: return Value::Number(A + B);
-    case Op::Sub: return Value::Number(A - B);
-    case Op::Mul: return Value::Number(A * B);
+    case Op::Add: case Op::AddConst: return A + B;
+    case Op::Sub: case Op::SubConst: return A - B;
+    case Op::Mul: case Op::MulConst: return A * B;
     case Op::Div:
         // Preserve explicit IEEE-754 behavior with host divide-by-zero traps.
         if (B == 0) {
             if (A == 0 || std::isnan(A))
-                return Value::Number(std::numeric_limits<double>::quiet_NaN());
-            return Value::Number(std::copysign(std::numeric_limits<double>::infinity(),
-                A * std::copysign(1.0, B)));
+                return std::numeric_limits<double>::quiet_NaN();
+            return std::copysign(std::numeric_limits<double>::infinity(), A * std::copysign(1.0, B));
         }
-        return Value::Number(A / B);
-    case Op::Less: return Value::Bool(A < B);
-    case Op::Equal: return Value::Bool(A == B);
+        return A / B;
     default: throw std::logic_error("invalid arithmetic opcode");
     }
 }
@@ -305,7 +305,7 @@ std::vector<Value> BindConstants(const std::shared_ptr<Module>& Program) {
         case Constant::Kind::String: Values.push_back(Value::String(Item.Text)); break;
         case Constant::Kind::Function: {
             auto Plan = OptimizeFunction(*Item.Function, *Program);
-            if (Plan.Blocks.empty())
+            if (Plan.Blocks.empty() && Plan.Calls.empty())
                 Values.push_back(Value::FromObject(std::make_shared<FunctionObject>(Program, Item.Function)));
             else
                 Values.push_back(Value::FromObject(std::make_shared<OptimizedFunction>(Program, Item.Function, std::move(Plan))));
@@ -1070,6 +1070,54 @@ std::optional<SourceLocation> Vm::GetErrorLocation(const Value& Input) const {
     return Found->second.Source;
 }
 
+// Keep argument preparation out of the dispatch loop, including in release LTO builds.
+#if defined(_MSC_VER)
+__declspec(noinline)
+#elif defined(__GNUC__)
+__attribute__((noinline))
+#endif
+bool Vm::TryEnterSlotCall(ExecutionState& Execution, const Value*& Target) {
+    auto& Frames = Execution.Frames;
+    auto& Caller = Frames.back();
+    const auto& Function = static_cast<const OptimizedFunction&>(*Caller.Function);
+    const auto& Call = Function.Plan.Calls[ReadU32(Function.GetBody().Code, Caller.Pc)];
+    auto* Instance = Caller.Instance;
+    if (Call.Global) {
+        auto& Scope = Instance ? (Instance->GlobalScope ? *Instance->GlobalScope : Instance->Globals) : Globals;
+        const auto Found = Scope.find(Function.GetOwner()->Constants[Call.Target].Text);
+        if (Found == Scope.end()) return false;
+        Target = &Found->second;
+    } else {
+        Target = &Caller.Locals[Call.Target];
+    }
+
+    const auto Count = Call.Arguments.size();
+    if (DebugController || Frames.size() >= 1024 || InstructionsRemaining < Count + 1 ||
+        Count + 1 > MaxOperandStackSize - Caller.Stack.size() || Target->GetType() != ValueType::Object)
+        return false;
+    auto* Callee = dynamic_cast<FunctionObject*>(Target->AsObject());
+    if (!Callee || Callee->GetOwner() != Function.GetOwner()) return false;
+    for (auto Slot : Call.Arguments) {
+        const auto& Arg = Caller.Locals[Slot];
+        // Replay loads that need native ownership checks or error-location tracking at their own PC.
+        if (Arg.GetType() == ValueType::Object && !(Arg.IsScriptObject() && OwnsScript(Arg.AsScriptObject())))
+            return false;
+    }
+
+    auto Owner = std::static_pointer_cast<FunctionObject>(Target->AsNativeObject());
+    Caller.Pc = Call.ResumePc;
+    InstructionsRemaining -= Count + 1; // The initial target load was already charged.
+    auto& Next = Frames.Enter();
+    const auto& Locals = Frames[Frames.size() - 2].Locals; // Enter can relocate Caller.
+    Next.Function = std::move(Owner);
+    Next.Pc = 0;
+    Next.Instance = Instance;
+    Next.Arguments.reserve(Count);
+    for (auto Slot : Call.Arguments) Next.Arguments.push_back(Locals[Slot]);
+    InitializeParameterLocals(Next);
+    return true;
+}
+
 Value Vm::Execute(ExecutionState& Execution) {
     if (ActiveRuns == 0) {
         FaultLocation.reset();
@@ -1225,10 +1273,10 @@ Value Vm::Execute(ExecutionState& Execution) {
                     // GetLocal has already been charged. Keep the original path near a budget fault.
                     if (InstructionsRemaining >= Block.StepCount + 2 && Current.Stack.size() < MaxOperandStackSize &&
                         Current.Locals[Block.Operand].GetType() == ValueType::Number) {
-                        double Result = Source.AsNumber();
+                        double Result = Source.Data.Numeric;
                         for (std::size_t I = 0; I < Block.StepCount; ++I) {
                             const auto& Step = Plan.Steps[Block.FirstStep + I];
-                            const double Right = FrameConstants[Step.Constant].AsNumber();
+                            const double Right = FrameConstants[Step.Constant].Data.Numeric;
                             switch (Step.Operation) {
                             case Op::MulConst: Result *= Right; break;
                             case Op::AddConst: Result += Right; break;
@@ -1236,24 +1284,44 @@ Value Vm::Execute(ExecutionState& Execution) {
                             default: throw std::logic_error("invalid optimized arithmetic operation");
                             }
                         }
-                        Current.Locals[Block.Operand] = Value::Number(Result);
+                        Current.Locals[Block.Operand].Data.Numeric = Result;
                         InstructionsRemaining -= Block.StepCount + 2;
                         Current.Pc = Block.EndPc;
                         break;
                     }
                 } else if (InstructionsRemaining >= 4 && Current.Stack.size() <= MaxOperandStackSize - 2) {
-                    const auto& Right = Block.Operation == SlotBlock::Kind::CompareLocal ?
+                    const auto& Right = (Block.Operation == SlotBlock::Kind::CompareLocal ||
+                                         Block.Operation == SlotBlock::Kind::BinaryLocal) ?
                         Current.Locals[Block.Operand] : FrameConstants[Block.Operand];
                     if (Right.GetType() == ValueType::Number) {
-                        const bool Taken = Source.AsNumber() < Right.AsNumber();
-                        InstructionsRemaining -= Taken ? 3 : 4;
-                        Current.Pc = Taken ? Block.EndPc : Block.FalsePc;
-                        break;
+                        if (Block.Operation == SlotBlock::Kind::CompareLocal ||
+                            Block.Operation == SlotBlock::Kind::CompareConstant) {
+                            const bool Taken = Source.Data.Numeric < Right.Data.Numeric;
+                            InstructionsRemaining -= Taken ? 3 : 4;
+                            Current.Pc = Taken ? Block.EndPc : Block.FalsePc;
+                            break;
+                        }
+                        auto& Destination = Current.Locals[Block.Destination];
+                        if (Destination.GetType() == ValueType::Number) {
+                            Destination.Data.Numeric = ArithmeticResult(Block.BinaryOp, Source.Data.Numeric,
+                                                                       Right.Data.Numeric);
+                            InstructionsRemaining -= 4;
+                            Current.Pc = Block.EndPc;
+                            break;
+                        }
                     }
                 }
             }
             // Replay the original GetLocal; subsequent instructions still have their original PCs.
             Push(Source);
+            break;
+        }
+        case CallFromSlots: {
+            const Value* Target = nullptr;
+            if (!TryEnterSlotCall(Execution, Target)) {
+                if (Target) Push(*Target);
+                else Push(Value::Error("undefined global"), DebugErrorOrigin::Operation);
+            }
             break;
         }
         case Op::GetLocal: {
@@ -1265,7 +1333,7 @@ Value Vm::Execute(ExecutionState& Execution) {
                 Push(Local);
             break;
         }
-        case Op::SetLocal: {
+        case ReturnDestination: case Op::SetLocal: {
             auto Id = ReadU32(Code, Current.Pc);
             Current.Locals[Id] = Current.Stack.back(); break;
         }
@@ -1286,7 +1354,9 @@ Value Vm::Execute(ExecutionState& Execution) {
             auto& Left = Current.Locals[Slots & 0xffff];
             const auto& Right = Instruction == Op::AddToLocal ?
                 Current.Locals[Slots >> 16] : FrameConstants[Slots >> 16];
-            if (Left.IsNumeric() && Right.IsNumeric()) {
+            if (Left.Type == ValueType::Number && Right.Type == ValueType::Number) {
+                Left.Data.Numeric += Right.Data.Numeric;
+            } else if (Left.IsNumeric() && Right.IsNumeric()) {
                 Left = Value::Number(Left.AsNumber() + Right.AsNumber());
             } else {
                 // Keep the operation result visible to the debugger before assigning it.
@@ -1296,17 +1366,34 @@ Value Vm::Execute(ExecutionState& Execution) {
             break;
         }
         case Op::AddConst: case Op::SubConst: case Op::MulConst: {
-            const auto Right = FrameConstants[ReadU32(Code, Current.Pc)].AsNumber();
+            const auto Right = FrameConstants[ReadU32(Code, Current.Pc)].Data.Numeric;
             auto& Left = Current.Stack.back();
-            if (Left.IsNumeric()) {
-                const auto A = Left.AsNumber();
-                const auto Result = Instruction == Op::AddConst ? A + Right :
-                    Instruction == Op::SubConst ? A - Right : A * Right;
-                Left = Value::Number(Result);
+            if (Left.Type == ValueType::Number) {
+                Left.Data.Numeric = ArithmeticResult(Instruction, Left.Data.Numeric, Right);
+            } else if (Left.IsNumeric()) {
+                Left = Value::Number(ArithmeticResult(Instruction, Left.AsNumber(), Right));
             } else {
                 Pop();
                 Push(Value::Error("invalid operands"), DebugErrorOrigin::Operation);
             }
+            break;
+        }
+        case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: {
+            if (Current.Stack.size() < 2) throw std::runtime_error("VM stack underflow");
+            auto& Left = Current.Stack[Current.Stack.size() - 2];
+            const auto& Right = Current.Stack.back();
+            if (Left.Type == ValueType::Number && Right.Type == ValueType::Number) {
+                Left.Data.Numeric = ArithmeticResult(Instruction, Left.Data.Numeric, Right.Data.Numeric);
+            } else if (Left.IsNumeric() && Right.IsNumeric()) {
+                Left = Value::Number(ArithmeticResult(Instruction, Left.AsNumber(), Right.AsNumber()));
+            } else {
+                auto B = Pop();
+                auto A = Pop();
+                Push(Instruction == Op::Add ? NonNumericSum(A, B) : Value::Error("invalid operands"),
+                     DebugErrorOrigin::Operation);
+                break;
+            }
+            Current.Stack.pop_back();
             break;
         }
         case BranchEqual: case BranchLess: {
@@ -1336,7 +1423,6 @@ Value Vm::Execute(ExecutionState& Execution) {
             }
             [[fallthrough]];
         }
-        case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
         case Op::Equal: case Op::Less: {
             const auto Size = Current.Stack.size();
             if (Size >= 2 && Current.Stack[Size - 2].IsNumeric() &&
@@ -1345,19 +1431,13 @@ Value Vm::Execute(ExecutionState& Execution) {
                 const double B = Current.Stack[Size - 1].AsNumber();
                 // Numeric/bool results cannot need ownership or Error hooks;
                 // replacing two values with one also cannot exceed the stack limit.
-                Current.Stack[Size - 2] = NumericResult(Instruction, A, B);
+                Current.Stack[Size - 2] = Value::Bool(Instruction == Op::Equal ? A == B : A < B);
                 Current.Stack.pop_back();
                 break;
             }
             auto Right = Pop(); auto Left = Pop();
             if (Instruction == Op::Equal) { Push(Value::Bool(Equal(Left, Right))); break; }
-            if (Instruction == Op::Add) {
-                Push(NonNumericSum(Left, Right), DebugErrorOrigin::Operation); break;
-            }
-            if (!Left.IsNumeric() || !Right.IsNumeric()) {
-                Push(Value::Error("invalid operands"), DebugErrorOrigin::Operation); break;
-            }
-            Push(NumericResult(Instruction, Left.AsNumber(), Right.AsNumber()));
+            Push(Value::Error("invalid operands"), DebugErrorOrigin::Operation);
             break;
         }
         case Op::ToByte: {
@@ -1431,7 +1511,18 @@ Value Vm::Execute(ExecutionState& Execution) {
                 }
                 return Result;
             }
-            Frames.back().Stack.push_back(std::move(Result));
+            auto& Caller = Frames.back();
+            const auto& Bytes = Caller.Function->GetBody().Code;
+            if (!DebugController && InstructionsRemaining >= 2 && Caller.Pc < Bytes.size() &&
+                static_cast<Op>(Bytes[Caller.Pc]) == ReturnDestination) {
+                ++Caller.Pc;
+                const auto Slot = ReadU32(Bytes, Caller.Pc);
+                ++Caller.Pc; // Pop after SetLocal
+                InstructionsRemaining -= 2;
+                Caller.Locals[Slot] = std::move(Result);
+            } else {
+                Caller.Stack.push_back(std::move(Result));
+            }
             break;
         }
         case Op::NewObject:

@@ -114,6 +114,14 @@ int main() {
                 if (probe(null) != null) { return false; }
                 return probe(20, 30);
             }
+            def call_target(a,b) { return target(a,b); }
+            def rebound(a,b) {
+                target = probe;
+                var result = call_target(a,b);
+                if (result != b) { return false; }
+                target = get_type;
+                return get_type(call_target(a,b)) == "Error";
+            }
         )");
         Vm ArgsVm(Arguments.Program);
         const auto VmModule = ArgsVm.GetVmModule();
@@ -121,6 +129,8 @@ int main() {
         Arguments.Initialize(ArgsVm);
         Check(ArgsVm.Run(Arguments.Functions.at("nested")).AsNumber() == 30,
               "script argument count, values and frame isolation");
+        Check(ArgsVm.Run(Arguments.Functions.at("rebound"), {Value::Number(20), Value::Number(30)}).AsBool(),
+              "slot call lost its argument snapshot or cached a rebound global");
         Check(ArgsVm.Run(Arguments.Functions.at("probe"),
                          {Value::Number(20), Value::Number(30)}).AsNumber() == 30,
               "host entry argument count and values");

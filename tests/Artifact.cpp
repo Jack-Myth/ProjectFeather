@@ -55,6 +55,10 @@ void CheckOptimizedInstructions() {
     AttachSymbols(Loaded, SerializeSymbols(Source));
     Vm Machine(Loaded.Program);
     auto Update = Loaded.Functions.at("update");
+    Check(Machine.Run(Loaded.Functions.at("doubled"), {Value::Number(1.25)}).AsNumber() == 2.5,
+          "aliased number operands changed");
+    Check(Machine.Run(Update, {Value::Number(1.5), Value::Byte(2)}).AsNumber() == 3.5,
+          "mixed local addition lost byte promotion");
     Check(Machine.Run(Update, {Value::String("a"), Value::String("b")}).AsString() == "ab",
           "local string concatenation changed");
     Check(Machine.Run(Loaded.Functions.at("doubled"), {Value::Byte(7)}).AsNumber() == 14,

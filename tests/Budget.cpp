@@ -1,4 +1,5 @@
 #include <Feather/Compiler.hpp>
+#include <cmath>
 
 #include <iostream>
 #include <limits>
@@ -97,6 +98,41 @@ void CheckEntryInsideAssignment() {
     }
 }
 
+void CheckBinaryAssignment() {
+    auto Program = Compile("def divide(x,y) { y = x / y; return y; }");
+    const auto Entry = Program.Functions.at("divide");
+    const std::vector<Value> Args{Value::Number(7), Value::Number(2)};
+    Vm Short(Program.Program, 100, 6), Exact(Program.Program, 100, 7);
+    BudgetExceeded([&] { (void)Short.Run(Entry, Args); }, "binary assignment skipped a budget charge");
+    Check(Exact.Run(Entry, Args).AsNumber() == 3.5, "binary assignment overwrote its right operand");
+    Check(Exact.Run(Entry, {Value::Number(7), Value::Byte(2)}).AsNumber() == 3.5,
+          "binary assignment lost byte promotion");
+    const auto Infinity = Exact.Run(Entry, {Value::Number(1), Value::Number(-0.0)}).AsNumber();
+    Check(std::isinf(Infinity) && std::signbit(Infinity), "division by negative zero lost its sign");
+    Check(std::isnan(Exact.Run(Entry, {Value::Number(0), Value::Number(0)}).AsNumber()),
+          "zero divided by zero must be NaN");
+}
+
+void CheckSlotCall() {
+    auto Program = Compile(R"(
+        def difference(a,b) { return a-b; }
+        def run(f,a,b) { a=f(b,a); return a; }
+    )");
+    auto CheckBudget = [&](std::size_t Limit, bool ExpectSuccess) {
+        Vm Machine(Program.Program, 100, Limit);
+        Program.Initialize(Machine);
+        auto Run = [&] {
+            return Machine.Run(Program.Functions.at("run"),
+                               {Machine.GetGlobal("difference"), Value::Number(2), Value::Number(7)});
+        };
+        if (ExpectSuccess) Check(Run().AsNumber() == 5, "call-site argument order or return destination");
+        else BudgetExceeded(Run, "slot call skipped an instruction charge");
+    };
+    // Three loads and Call; four instructions for the callee; SetLocal, Pop, GetLocal, Return.
+    CheckBudget(11, false);
+    CheckBudget(12, true);
+}
+
 } // namespace
 
 int main() {
@@ -104,6 +140,8 @@ int main() {
         CheckCompareBranchBudget();
         CheckNumericAssignment();
         CheckEntryInsideAssignment();
+        CheckBinaryAssignment();
+        CheckSlotCall();
         auto Loop = Compile("def spin() { while (true) { } } def answer() { return 42; }");
         Vm Limited(Loop.Program, std::numeric_limits<std::size_t>::max(), 40);
         Check(!Loop.Initialize(Limited).IsError(), "initializer should fit its budget");
