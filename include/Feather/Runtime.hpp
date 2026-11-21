@@ -28,6 +28,7 @@ class ScriptObject;
 class NativeObject;
 class NativeObjectType;
 class MessageValueArchive;
+struct Frame;
 struct ExecutionState;
 struct ModuleInstance;
 
@@ -217,6 +218,7 @@ private:
         std::size_t operator()(std::string_view Text) const;
     };
     static std::optional<Key> ConvertKey(const Value& Input);
+    std::optional<Value> FindSetIndex(const Value& Key) const;
     class ArrayMethod;
     std::optional<std::size_t> GetArrayIndex(const Value& Key) const;
     std::optional<Value> GetArrayMethod(std::string_view Name) const;
@@ -521,6 +523,9 @@ private:
                                   std::uint32_t FunctionConstant,
                                   const std::vector<Value>& Arguments);
     Value Execute(ExecutionState& Execution);
+    bool TryLoadLocalField(Frame& Current, Op Instruction, const Value& Receiver,
+                           const std::vector<Value>& Constants);
+    bool TryStoreLocalField(Frame& Current);
     bool TryEnterSlotCall(ExecutionState& Execution, const Value*& Target);
     void ReachDebugSafePoint(ExecutionState& Execution);
     void ReachDebugError(ExecutionState& Execution, const Value& Error,

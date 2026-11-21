@@ -139,6 +139,44 @@ void CheckSlotCall() {
     CheckBudget(7, true);
 }
 
+void CheckLocalFields() {
+    auto Program = Compile(R"(
+        def bump(p) { p.x = p.x + 1; return p.x; }
+        def rebind(p, q) { return p.x = (p = q).x; }
+    )");
+    auto Key = Value::String("x");
+    auto Bump = Program.Functions.at("bump");
+    // Prepare the assignment, read x, add, store/discard, read x, return.
+    for (std::size_t Limit : {5u, 6u}) {
+        Vm Machine(Program.Program, 100, Limit);
+        auto* Object = Machine.CreateScriptObject();
+        Object->SetRaw(Key, Value::Number(10));
+        auto Run = [&] { return Machine.Run(Bump, {Value::FromScript(Object)}); };
+        if (Limit == 5) BudgetExceeded(Run, "field update skipped a dispatch charge");
+        else Check(Run().AsNumber() == 11, "field update exceeded its fused budget");
+    }
+    Vm Machine(Program.Program);
+    auto* Left = Machine.CreateScriptObject();
+    auto* Right = Machine.CreateScriptObject();
+    Left->SetRaw(Key, Value::Number(1));
+    Right->SetRaw(Key, Value::Number(42));
+    auto Result = Machine.Run(Program.Functions.at("rebind"),
+                              {Value::FromScript(Left), Value::FromScript(Right)});
+    Check(Result.AsNumber() == 42 && Left->GetRaw(Key)->AsNumber() == 42,
+          "assignment must retain its original receiver while evaluating the RHS");
+
+    struct Steps final : VmDebugController {
+        int Count = 0;
+        void OnSafePoint(const VmDebugContext&) override { ++Count; }
+        void OnError(const VmDebugContext&, const Value&, DebugErrorOrigin) override {}
+        void OnExecutionFinished(bool) override {}
+    };
+    auto Debug = std::make_shared<Steps>();
+    Machine.SetDebugController(Debug);
+    Check(Machine.Run(Bump, {Value::FromScript(Left)}).AsNumber() == 43 && Debug->Count == 10,
+          "debugger must observe every original instruction in a local field update");
+}
+
 } // namespace
 
 int main() {
@@ -148,6 +186,7 @@ int main() {
         CheckEntryInsideAssignment();
         CheckBinaryAssignment();
         CheckSlotCall();
+        CheckLocalFields();
         auto Loop = Compile("def spin() { while (true) { } } def answer() { return 42; }");
         Vm Limited(Loop.Program, std::numeric_limits<std::size_t>::max(), 40);
         Check(!Loop.Initialize(Limited).IsError(), "initializer should fit its budget");

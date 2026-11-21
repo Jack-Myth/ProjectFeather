@@ -234,14 +234,26 @@ private:
     Vm& Machine;
 };
 
+class RawSetFunction final : public NativeObject {
+public:
+    explicit RawSetFunction(NativeObjectType& Type) : NativeObject(Type) {}
+    ObjectType GetObjectType() const override { return ObjectType::Host; }
+    bool IsCallable() const override { return true; }
+    Value Call(const std::vector<Value>& Arguments) override {
+        if (Arguments.size() != 3 || !Arguments[0].IsScriptObject())
+            return Value::Error("raw_set expects a script object, key and value");
+        return Arguments[0].AsScriptObject()->SetRaw(Arguments[1], Arguments[2]);
+    }
+};
+
 class VmModule final : public NativeObject {
 public:
     VmModule(NativeObjectType& Type, Value Eval, Value SetPaths, Value GetPaths,
-             Value GetArgc, Value GetArgv, Value Invoke, Value SetMeta)
+             Value GetArgc, Value GetArgv, Value Invoke, Value SetMeta, Value RawSet)
         : NativeObject(Type), Eval(std::move(Eval)),
           SetPaths(std::move(SetPaths)), GetPaths(std::move(GetPaths)),
           GetArgc(std::move(GetArgc)), GetArgv(std::move(GetArgv)),
-          Invoke(std::move(Invoke)), SetMeta(std::move(SetMeta)) {}
+          Invoke(std::move(Invoke)), SetMeta(std::move(SetMeta)), RawSet(std::move(RawSet)) {}
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     Value GetMember(const Value& Key) override {
         if (Key.GetType() == ValueType::String) {
@@ -252,6 +264,7 @@ public:
             if (Key.AsString() == "get_func_argv") return GetArgv;
             if (Key.AsString() == "invoke_function") return Invoke;
             if (Key.AsString() == "set_metaobject") return SetMeta;
+            if (Key.AsString() == "raw_set") return RawSet;
         }
         return Value::Error("unknown vm module member");
     }
@@ -264,6 +277,7 @@ private:
     Value GetArgv;
     Value Invoke;
     Value SetMeta;
+    Value RawSet;
 };
 
 bool Equal(const Value& Left, const Value& Right) {
@@ -599,10 +613,12 @@ Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
     auto Invoke = Value::FromObject(InvokeType.Create<InvokeFunction>(*this));
     auto& SetMetaType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "set_metaobject");
     auto SetMeta = Value::FromObject(SetMetaType.Create<SetMetaObjectFunction>(*this));
+    auto& RawSetType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "raw_set");
     auto& VmModuleType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "vm");
     BuiltinVmModule = Value::FromObject(VmModuleType.Create<VmModule>(
         std::move(Eval), std::move(SetPaths), std::move(GetPaths),
-        std::move(GetArgc), std::move(GetArgv), std::move(Invoke), std::move(SetMeta)));
+        std::move(GetArgc), std::move(GetArgv), std::move(Invoke), std::move(SetMeta),
+        Value::FromObject(RawSetType.Create<RawSetFunction>())));
     // Freeze the mutable builder's module before any execution.
     Program = std::make_shared<Module>(*Input);
     for (auto& Item : Program->Constants) {
@@ -1070,13 +1086,61 @@ std::optional<SourceLocation> Vm::GetErrorLocation(const Value& Input) const {
     return Found->second.Source;
 }
 
-// Keep argument preparation out of the dispatch loop, including in release LTO builds.
+// Keep uncommon dispatch handlers out of the interpreter loop, including in LTO builds.
 #if defined(_MSC_VER)
-__declspec(noinline)
+#define FEATHER_VM_NOINLINE __declspec(noinline)
 #elif defined(__GNUC__)
-__attribute__((noinline))
+#define FEATHER_VM_NOINLINE __attribute__((noinline))
+#else
+#define FEATHER_VM_NOINLINE
 #endif
-bool Vm::TryEnterSlotCall(ExecutionState& Execution, const Value*& Target) {
+
+FEATHER_VM_NOINLINE bool Vm::TryLoadLocalField(Frame& Current, Op Instruction, const Value& Receiver,
+                                              const std::vector<Value>& Constants) {
+    if (DebugController || !Receiver.IsScriptObject() || Current.Stack.size() > MaxOperandStackSize - 2)
+        return false;
+    auto* Object = Receiver.AsScriptObject();
+    if (Object->IsArray()) return false;
+    auto Resume = Current.Pc + 1;
+    const auto& Key = Constants[ReadU32(Current.Function->GetBody().Code, Resume)];
+    if (Instruction == PrepareLocalField) {
+        // Keep the original receiver and key rooted across arbitrary RHS calls.
+        Current.Stack.push_back(Receiver);
+        Current.Stack.push_back(Key);
+    } else {
+        const auto Found = Object->Members.find(std::string_view(Key.AsString()));
+        if (Found == Object->Members.end() || Found->second.IsError()) return false;
+        Current.Stack.push_back(Found->second);
+    }
+    Current.Pc = Resume;
+    return true;
+}
+
+FEATHER_VM_NOINLINE bool Vm::TryStoreLocalField(Frame& Current) {
+    auto& Stack = Current.Stack;
+    const auto Base = Stack.size() - 3;
+    const auto& Receiver = Stack[Base];
+    const auto& Key = Stack[Base + 1];
+    auto& Input = Stack.back();
+    if (DebugController || !Receiver.IsScriptObject() || Key.GetType() != ValueType::String || Input.IsError())
+        return false;
+    auto* Object = Receiver.AsScriptObject();
+    auto Found = Object->Members.find(std::string_view(Key.AsString()));
+    if (Found == Object->Members.end()) return false;
+    // All three operands are validated VM stack values.
+    Found->second = Input;
+    const auto& Code = Current.Function->GetBody().Code;
+    if (Current.Pc < Code.size() && static_cast<Op>(Code[Current.Pc]) == Op::Pop) {
+        ++Current.Pc;
+        Stack.resize(Base);
+    } else {
+        Stack[Base] = std::move(Input);
+        Stack.resize(Base + 1);
+    }
+    return true;
+}
+
+FEATHER_VM_NOINLINE bool Vm::TryEnterSlotCall(ExecutionState& Execution, const Value*& Target) {
     auto& Frames = Execution.Frames;
     auto& Caller = Frames.back();
     const auto& Function = static_cast<const OptimizedFunction&>(*Caller.Function);
@@ -1547,20 +1611,32 @@ Value Vm::Execute(ExecutionState& Execution) {
             else Push(Value::Error("value has no members"), DebugErrorOrigin::Operation);
             break;
         }
+        default:
+            if (Instruction == ReadLocalField || Instruction == PrepareLocalField) {
+                const auto& Receiver = Current.Locals[ReadU32(Code, Current.Pc)];
+                if (!TryLoadLocalField(Current, Instruction, Receiver, FrameConstants))
+                    Push(Receiver); // Replay GetLocal; the next instruction retains its original PC.
+                break;
+            }
+            if (Instruction != StoreLocalField) throw std::logic_error("invalid opcode");
+            if (TryStoreLocalField(Current)) break;
+            [[fallthrough]];
         case Op::SetMember: {
             auto Input = Pop(); auto Key = Pop(); auto Target = Pop();
             if (Target.GetType() != ValueType::Object) {
                 Push(Value::Error("value has no members"), DebugErrorOrigin::Operation); break;
             }
             auto ObjectValue = Target.AsObject();
-            if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue))
-                Push(Script->SetRaw(Key, Input), DebugErrorOrigin::Operation);
-            else if (auto Native = dynamic_cast<NativeObject*>(ObjectValue))
+            if (auto Script = Target.IsScriptObject() ? Target.AsScriptObject() : nullptr) {
+                if (auto Hook = Script->FindSetIndex(Key))
+                    DispatchCall(DispatchCall, *Hook, {Target, Key, Input}, 0, true);
+                else
+                    Push(Script->SetRaw(Key, Input), DebugErrorOrigin::Operation);
+            } else if (auto Native = dynamic_cast<NativeObject*>(ObjectValue))
                 Push(Native->SetMember(Key, Input), DebugErrorOrigin::Operation);
             else Push(Value::Error("value has no members"), DebugErrorOrigin::Operation);
             break;
         }
-        default: throw std::logic_error("invalid opcode");
         }
     }
     throw std::logic_error("VM ended without Return");

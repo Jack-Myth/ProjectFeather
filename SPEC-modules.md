@@ -66,7 +66,9 @@ def forward(fn) {
 }
 ```
 
-`vm.set_metaobject(object, meta)` 为普通脚本对象设置元对象并返回该对象。元对象可定义 `__call`，使对象可调用。
+`vm.set_metaobject(object, meta)` 为普通脚本对象设置元对象并返回该对象。元对象可定义 `__call`、缺失字段读取钩子 `__index` 和缺失字段写入钩子 `__set_index(self, key, value)`。赋值表达式返回写入钩子的结果。
+
+`vm.raw_set(object, key, value)` 直接写入普通脚本对象的成员或数组的已有元素，返回写入值或 Error。写入钩子可用它保存字段，避免再次调用自身。Native 对象通过各自的 `SetMember` 接口写入。
 
 ## delegate
 
@@ -167,6 +169,7 @@ Value Create(const NativeModuleContext& Context) {
 
 | C++ 接口 | 用途 |
 |---|---|
+| `SetRaw(index, value)` | 覆盖已有元素并返回写入值，非法下标返回 Error。 |
 | `AppendArray(value)` | 追加一个值。 |
 | `RemoveArrayAt(index)` | 按零基索引删除，越界返回 `false`。 |
 | `GetArrayLength()` | 读取当前元素数量。 |

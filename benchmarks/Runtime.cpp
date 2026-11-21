@@ -64,6 +64,18 @@ int main() {
         Machine.SetGlobal("child", Machine.GetModuleNamespace("child"));
 
         std::cout << std::fixed << std::setprecision(3) << "workload,median_ms,max_ms\n";
+        for (int Count : {16, 256, 2048}) {
+            std::string Source;
+            for (int I = 0; I < Count; ++I)
+                Source += "def f" + std::to_string(I) + "(x){return x * 2 + 1;}\n";
+            auto Image = DeserializeProgram(SerializeProgram(Compile(Source)));
+            auto Name = "module-load-" + std::to_string(Count);
+            Report(Name.c_str(), [&] {
+                auto Start = Clock::now();
+                Vm Loaded(Image.Program);
+                return Milliseconds(Clock::now() - Start);
+            });
+        }
         MeasureFunction("local-arithmetic", Machine, Program.Functions.at("arithmetic"), 500000);
         MeasureFunction("module-arithmetic", Machine, Program.Functions.at("module_loop"), 500000);
         MeasureFunction("member-read-write", Machine, Program.Functions.at("members"), 200000);

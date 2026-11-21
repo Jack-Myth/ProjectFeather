@@ -82,7 +82,7 @@
 - 元函数查找只对关联的 MetaObject 自身做原始哈希表查找；即使该
       MetaObject 另有关联 MetaObject，也不继续查找。RootMetaObject 自身
       可直接读写其数据表，缺失成员返回 Error。
-- 第一版元函数仅包含 `__index(self, key)` 和 `__call(self, ...args)`；
+- 元函数包含 `__index(self, key)`、`__set_index(self, key, value)` 和 `__call(self, ...args)`；
       `__index` 仅在 ScriptObject 自身缺少成员时调用，`__call` 用于调用
       ScriptObject。元函数存在但不可调用时返回 Error。
 - NativeObject 不使用 MetaObject；其行为由 `call`、`get_member`、
@@ -90,7 +90,7 @@
 - NativeObject 涵盖：`Function`（脚本中定义的函数，其本质是创建了一个
       Function 类型的 NativeObject 实例）、Native 容器、宿主对象、`Error`
   - `array()` 返回由 VM 管理的 ScriptObject 数组，元素保存在连续的 Value 容器中。
-        数组只读索引、增删方法和 Length 的规则见 [SPEC-syntax.md](SPEC-syntax.md)。
+        数组索引读写、增删方法和 Length 的规则见 [SPEC-syntax.md](SPEC-syntax.md)。
   - `Function` 必须是 NativeObject、不能是 ScriptObject：若 Function 本身是
         ScriptObject，则"调用 ScriptObject"需要委托给它内部的某个 Function
         字段，而该 Function 又是 ScriptObject 的话将导致无限递归定义，因此
@@ -102,7 +102,7 @@
 ### 1.5 三个基础原语操作（调用 / 取成员 / 写成员）
 
 > 语言中一切"行为"（函数调用、数组索引、属性访问、类似继承的委托效果）都由
-> 这三个原语组合表达。ScriptObject 的调用与缺失成员读取可经单层
+> 这三个原语组合表达。ScriptObject 的调用与缺失成员读写可经单层
 > MetaObject 元函数实现；NativeObject 由虚函数接口实现。不做任意层级的
 > 隐式查找链或运算符重载。
 
@@ -129,21 +129,20 @@
 - 宿主可用 `CreateMetaObject()` 创建普通 ScriptObject，并用
       `SetMetaObject(target, meta)` 替换普通 ScriptObject 的关联对象；
       target 与 meta 均须为 ScriptObject，RootMetaObject 不可作为 target。
-      脚本第一版不直接暴露替换接口。
+      脚本通过 `vm.set_metaobject` 替换普通对象的元对象。
 - 原始查找区分“key 不存在”与“存在但值为 null/Error”。`__index`
       的返回值（包括 Error）就是读取结果，不再重试查找。缺失元函数和不可调用
       元函数分别生成新的 Error；NaN key 在查找元函数前生成 Error。
 - **写成员**（对应概念上的 `Env.StoreObjectMember(obj, key, value)`）
   - 若 `obj` 是 NativeObject：调用其虚函数表中的 `set_member` 实现
-  - 若 `obj` 是 ScriptObject：朴素哈希表写入（不存在的 key 直接创建）
+  - 普通脚本对象覆盖已有键（包括值为 null 或 Error 的键）。写入缺失的合法键时，原始查找其元对象上的 `__set_index`。存在时调用它并返回其结果；缺少钩子时创建成员。数组直接覆盖已有元素。
 - **NativeObject 虚函数表（vtable）现阶段确定的槽位**：`call`、
       `get_member`、`set_member` —— 先解决"完备性"（三个操作足以表达目前所有
       已讨论的语义），GC 相关钩子（标记子对象、释放资源）等后续按需在第 2 节
       GC 设计时补充，不在此阶段展开
 - **取成员对不存在的 key**：ScriptObject 先尝试 `__index`；无有效
       元函数时返回 Error（不是 null）。NativeObject 由其实现决定。
-- **ScriptObject 写入不存在的 key**：自动创建该成员；NativeObject 的
-      写入行为由对应 `set_member` 实现决定，不要求自动创建。
+- `vm.raw_set` 直接写入脚本对象，复用 C++ 的 `ScriptObject::SetRaw`。调试器对脚本对象的属性编辑也使用该原始写入路径。
 - NativeObject 的 `set_member` 返回一个 Value：成功必须返回传入的写入值，
       语言层失败返回新的 Error。未知 key 的 `get_member` 默认返回新的 Error。
 
@@ -242,7 +241,7 @@
 | `SetLocal` / `SetGlobal` | 槽位/名称索引 | `[值] → [结果]` | 写入变量，成功时结果是被写入的值 |
 | `NewObject` | 无 | `[] → [对象]` | 新建 ScriptObject，默认关联 RootMetaObject |
 | `GetMember` | 无 | `[对象, key] → [结果]` | 执行取成员原语；点访问由编译器压入字符串 key |
-| `SetMember` | 无 | `[对象, key, 值] → [结果]` | 执行写成员原语；成功留下写入值，语言层失败留下 Error |
+| `SetMember` | 无 | `[对象, key, 值] → [结果]` | 执行写成员原语，留下原始写入结果、Native 接口结果或写入钩子的返回值 |
 | `Add` / `Sub` / `Mul` / `Div` | 无 | `[左, 右] → [结果]` | 按 5.3 节运算规则；非法类型组合返回 Error |
 | `ToByte` | 无 | `[值] → [byte/Error]` | 严格检查 0～255 整数，不截断或回绕 |
 | `AddToLocal` / `AddConstToLocal` | 两个小端 u16，依次为目标局部槽、右侧局部槽或 number 常量索引 | 空栈 → 空栈 | 指令版本 3，opcode 24、25。将目标局部值与右操作数按普通加法求和并写回，适用于独立赋值语句 |
@@ -256,6 +255,10 @@
 | `Return` | 无 | `[返回值] → []` | 结束当前帧，向调用者交付一个返回值；调用者栈上取得它 |
 
 ### 3.2 指令执行约定
+
+加载器可将局部对象的常量名字段读写转换成 VM 私有指令。读取命中普通对象已有字段时直接查成员表。
+赋值先将接收对象和字段键保存在操作数栈中，再求右侧表达式，因此右侧调用或重新绑定局部变量时仍写入原对象。
+写回已有字段时可合并紧随的丢弃结果指令。调试单步、缺失字段、原生对象及 Error 结果沿用原指令路径和源码位置。
 
 - `JUMP_IF` 为 true 时跳转，且无论是否跳转都消耗条件值。`JUMP`
       不读写值栈。`if/else` 可由编译器排列代码并组合这两条指令实现。
@@ -308,7 +311,7 @@
       `GetLocal` 读取已分配槽位，`SetLocal` 写入并留下写入值。
       全局变量存入 VM 私有的字符串键哈希表；全局名称索引必须引用 string
       常量。`GetGlobal` 读取不存在的名称返回新 Error；`SetGlobal` 创建或覆盖。
-- `__index`、`__call` 元成员存在但不是可调用值时，当前操作返回 Error。
+- `__index`、`__set_index`、`__call` 元成员存在但不是可调用值时，当前操作返回 Error。
 - 普通 number 相等比较遵循浮点语义：NaN 不等于自身；`+0` 等于 `-0`。
 - 普通赋值操作成功时留下右侧值，失败时留下 Error；独立的赋值语句
       可以丢弃结果，但不会自动传播 Error。

@@ -1,6 +1,15 @@
 var vm = import("vm");
 var count = 0;
 var code = @{ count = count + 1; context.value = context.value + 1; return context.value; };
+def store(self, key, value) {
+    vm.raw_set(self, key, value);
+    return 73;
+}
+
+def forward(self, key, value) {
+    return vm.raw_set(self.backing, key, value);
+}
+
 def main() {
     if (vm != import("vm")) { return byte(-1); }
     if (get_type(code) != "NativeObject") { return byte(-1); }
@@ -17,7 +26,11 @@ def main() {
     if (paths.add(12) != true) { return byte(-1); }
     paths.add(13);
     paths.add(12);
-    if (get_type(paths[0] = 99) != "Error") { return byte(-1); }
+    if ((paths[byte(0)] = 99) != 99) { return byte(-1); }
+    if (paths[0] != 99) { return byte(-1); }
+    if (get_type(paths[-1] = 1) != "Error") { return byte(-1); }
+    if (get_type(paths[0.5] = 1) != "Error") { return byte(-1); }
+    if (vm.raw_set(paths, 0, 12) != 12) { return byte(-1); }
     if (get_type(paths.extra) != "Error") { return byte(-1); }
     if (get_type(paths.extra = 99) != "Error") { return byte(-1); }
     if (get_type(paths[3]) != "Error") { return byte(-1); }
@@ -37,6 +50,23 @@ def main() {
     if (get_type(stdio) != "NativeObject") { return byte(-1); }
     if (count != 0) { return byte(-1); }
     var state = object(); state.value = 40;
+    var meta = object();
+    meta.__set_index = store;
+    vm.set_metaobject(state, meta);
+    if ((state.extra = null) != 73) { return byte(-1); }
+    if ((state["extra"] = 9) != 9) { return byte(-1); }
+    if ((state[byte(2)] = 18) != 73) { return byte(-1); }
+    if (state[2] != 18) { return byte(-1); }
+    if (get_type(state[false] = 1) != "Error") { return byte(-1); }
+    if (get_type(vm.raw_set(vm, "key", 1)) != "Error") { return byte(-1); }
+    vm.raw_set(state, "backing", object());
+    meta.__set_index = forward;
+    if ((state.redirected = 8) != 8) { return byte(-1); }
+    if (state.backing.redirected != 8) { return byte(-1); }
+    if (get_type(state.redirected) != "Error") { return byte(-1); }
+    meta.__set_index = null;
+    if (get_type(state.absent = 1) != "Error") { return byte(-1); }
+    if (get_type(state.absent) != "Error") { return byte(-1); }
     vm.eval_bytecode(code, state);
     if (vm.eval_bytecode(code, state) != 42) { return byte(-1); }
     var handle = stdio.IO.OpenFile("compiled-block-test.bin", "w");

@@ -82,8 +82,24 @@ std::optional<Value> ScriptObject::GetRaw(const Value& Input) const {
     if (Found == Members.end()) return std::nullopt;
     return Found->second;
 }
+std::optional<Value> ScriptObject::FindSetIndex(const Value& Key) const {
+    if (Elements || !MetaObject || MetaObject->Members.empty()) return std::nullopt;
+    if (Key.GetType() != ValueType::String && (!Key.IsNumeric() || std::isnan(Key.AsNumber())))
+        return std::nullopt;
+    const auto Hook = MetaObject->Members.find(std::string_view("__set_index"));
+    if (Hook == MetaObject->Members.end() || GetRaw(Key).has_value()) return std::nullopt;
+    return Hook->second;
+}
+
 Value ScriptObject::SetRaw(const Value& InputKey, const Value& Input) {
-    if (Elements) return Value::Error("array members are read-only");
+    if (Elements) {
+        if (InputKey.GetType() == ValueType::String) return Value::Error("array members are read-only");
+        const auto Index = GetArrayIndex(InputKey);
+        if (!Index) return Value::Error("invalid array index");
+        Owner->ValidateOwnedValue(Input);
+        (*Elements)[*Index] = Input;
+        return Input;
+    }
     auto Key = ConvertKey(InputKey);
     if (!Key) return Value::Error("invalid ScriptObject key");
     Owner->ValidateOwnedValue(Input);

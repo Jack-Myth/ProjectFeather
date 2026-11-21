@@ -1,0 +1,196 @@
+var io = import("stdio");
+var time = import("time");
+
+def buffer() {
+    var values = array();
+    values.Add(0);
+    return values;
+}
+
+def next_value(x) {
+    var value = x * 3 + 1;
+    while (65535 < value) {
+        value = value - 65536;
+    }
+    return value;
+}
+
+def merge_sort() {
+    var values = buffer();
+    var scratch = buffer();
+    var state = 17;
+    var i = 1;
+    while (i < 4097) {
+        state = next_value(state);
+        values.Add(state);
+        scratch.Add(0);
+        i = i + 1;
+    }
+    var width = 1;
+    while (width < 4096) {
+        var left = 1;
+        while (left < 4097) {
+            var middle = left + width;
+            var stop = middle + width;
+            var a = left;
+            var b = middle;
+            var out = left;
+            while (out < stop) {
+                var take_left = false;
+                if (b == stop) {
+                    take_left = true;
+                } else {
+                    if (a < middle) {
+                        take_left = values[a] < values[b];
+                    }
+                }
+                if (take_left) {
+                    scratch[out] = values[a];
+                    a = a + 1;
+                } else {
+                    scratch[out] = values[b];
+                    b = b + 1;
+                }
+                out = out + 1;
+            }
+            left = stop;
+        }
+        var swap = values;
+        values = scratch;
+        scratch = swap;
+        width = width * 2;
+    }
+    var checksum = 0;
+    i = 1;
+    while (i < 4097) {
+        checksum = checksum + i * values[i];
+        i = i + 1;
+    }
+    return checksum;
+}
+
+def sequence(seed) {
+    var values = buffer();
+    var i = 1;
+    while (i < 257) {
+        seed = next_value(seed);
+        values.Add(seed < 32768);
+        i = i + 1;
+    }
+    return values;
+}
+
+def edit_distance() {
+    var a = sequence(17);
+    var b = sequence(43);
+    var previous = buffer();
+    var current = buffer();
+    var j = 1;
+    while (j < 257) {
+        previous.Add(j);
+        current.Add(0);
+        j = j + 1;
+    }
+    var i = 1;
+    while (i < 257) {
+        current[0] = i;
+        j = 1;
+        while (j < 257) {
+            var best = previous[j - 1];
+            if ((a[i] == b[j]) == false) {
+                best = best + 1;
+            }
+            var deletion = previous[j] + 1;
+            if (deletion < best) {
+                best = deletion;
+            }
+            var insertion = current[j - 1] + 1;
+            if (insertion < best) {
+                best = insertion;
+            }
+            current[j] = best;
+            j = j + 1;
+        }
+        var swap = previous;
+        previous = current;
+        current = swap;
+        i = i + 1;
+    }
+    return previous[256];
+}
+
+def advance(p) {
+    p.x = p.x + p.vx;
+    p.y = p.y + p.vy;
+    if (255 < p.x) {
+        p.x = 510 - p.x;
+        p.vx = 0 - p.vx;
+    }
+    if (p.x < 0) {
+        p.x = 0 - p.x;
+        p.vx = 0 - p.vx;
+    }
+    if (255 < p.y) {
+        p.y = 510 - p.y;
+        p.vy = 0 - p.vy;
+    }
+    if (p.y < 0) {
+        p.y = 0 - p.y;
+        p.vy = 0 - p.vy;
+    }
+}
+
+def particles() {
+    var items = buffer();
+    var i = 1;
+    while (i < 257) {
+        var p = object();
+        p.x = i - 1;
+        p.y = 256 - i;
+        p.vx = 3;
+        p.vy = 2;
+        items.Add(p);
+        i = i + 1;
+    }
+    var frame = 0;
+    while (frame < 256) {
+        i = 1;
+        while (i < 257) {
+            advance(items[i]);
+            i = i + 1;
+        }
+        frame = frame + 1;
+    }
+    var checksum = 0;
+    i = 1;
+    while (i < 257) {
+        var p = items[i];
+        checksum = checksum + i * (p.x + 257 * p.y + 11 * p.vx + p.vy);
+        i = i + 1;
+    }
+    return checksum;
+}
+
+def measure(name, run) {
+    var start = time.Monotonic();
+    var i = 0;
+    var result = 0;
+    while (i < 4) {
+        result = run();
+        i = i + 1;
+    }
+    var elapsed = time.Monotonic() - start;
+    io.Console.PrintLine(name);
+    io.Console.PrintLine(elapsed * 250);
+    io.Console.PrintLine(result);
+}
+
+def main() {
+    var i = 0;
+    while (i < 4) {
+        measure("merge_sort", merge_sort);
+        measure("edit_distance", edit_distance);
+        measure("particles", particles);
+        i = i + 1;
+    }
+}

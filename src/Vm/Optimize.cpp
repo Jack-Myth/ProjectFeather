@@ -23,6 +23,42 @@ bool IsArithmetic(Op Instruction) {
     return Instruction == Op::MulConst || Instruction == Op::AddConst || Instruction == Op::SubConst;
 }
 
+// Starting after [receiver, literal key], follow the RHS to the store. Bound the
+// lookahead so nested expressions cannot make load-time optimization quadratic.
+std::optional<std::size_t> FieldStore(const Code& Bytes, std::size_t Pc) {
+    int Values = 0;
+    for (unsigned I = 0; I < 32 && Pc < Bytes.size(); ++I) {
+        const auto OpCode = At(Bytes, Pc);
+        switch (OpCode) {
+        case Op::GetLocal: case Op::GetGlobal: case Op::Const: case Op::Null:
+        case Op::True: case Op::False: case Op::NewObject: ++Values; break;
+        case Op::GetField: case Op::AddConst: case Op::SubConst: case Op::MulConst:
+        case Op::Negate: case Op::ToByte: case Op::SetLocal: case Op::SetGlobal:
+            if (Values < 1) return {};
+            break;
+        case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::GetMember:
+        case Op::Equal: case Op::Less:
+            if (Values < 2) return {};
+            --Values;
+            break;
+        case Op::SetMember:
+            if (Values == 1) return Pc;
+            if (Values < 3) return {};
+            Values -= 2;
+            break;
+        case Op::Call: {
+            const int Args = Bytes[Pc + 1] | (Bytes[Pc + 2] << 8);
+            if (Values <= Args) return {};
+            Values -= Args;
+            break;
+        }
+        default: return {};
+        }
+        Pc += 1 + OperandWidth(OpCode);
+    }
+    return {};
+}
+
 bool MatchBlock(const Code& Bytes, std::size_t Start, const Module& Program, SlotBlock& Block) {
     auto Pc = Start + LoadSize;
     if (Pc == Bytes.size()) return false;
@@ -84,6 +120,24 @@ SlotPlan OptimizeFunction(FunctionPrototype& Body, const Module& Program) {
     std::size_t LoadStart = 0;
     for (std::size_t Pc = 0; Pc < Bytes.size();) {
         const auto Instruction = static_cast<Op>(Bytes[Pc] & 0x7f);
+        if (Instruction == Op::GetLocal && Bytes.size() - Pc > LoadSize) {
+            const auto Next = Pc + LoadSize;
+            const auto Entry = std::upper_bound(Targets.begin(), Targets.end(), Pc);
+            if (At(Bytes, Next) == Op::GetField && (Entry == Targets.end() || *Entry > Next)) {
+                Bytes[Pc] = static_cast<std::uint8_t>(ReadLocalField);
+                LoadStart = Pc = Next + LoadSize;
+                continue;
+            }
+            if (At(Bytes, Next) == Op::Const && Program.Constants[Operand(Bytes, Next)].Type == Constant::Kind::String) {
+                auto Store = FieldStore(Bytes, Next + LoadSize);
+                if (Store && (Entry == Targets.end() || *Entry > *Store)) {
+                    Bytes[Pc] = static_cast<std::uint8_t>(PrepareLocalField);
+                    Bytes[*Store] = static_cast<std::uint8_t>(StoreLocalField);
+                    LoadStart = Pc = Next + LoadSize;
+                    continue;
+                }
+            }
+        }
         if (Instruction == Op::GetGlobal) LoadStart = Pc;
         if (Instruction == Op::Call) {
             const auto Resume = Pc + 1 + sizeof(std::uint16_t);

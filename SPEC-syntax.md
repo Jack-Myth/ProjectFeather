@@ -120,7 +120,7 @@ Bytecode artifacts use ISA 2 (binary buffer constant tag 4). The compiler CLI em
 
 ## Arrays
 
-`array()` returns an empty, zero-indexed array. Indices and `Length` are read-only. An out-of-range read, unknown member, or any member assignment returns Error. Indices must be finite non-negative integers. Arrays can hold any Feather value and `get_type(a)` returns `"Array"`. Ordinary `object()` values use numeric keys as properties.
+`array()` returns an empty, zero-indexed array. `a[i] = value` replaces an existing element and returns the assigned value. Both reads and writes outside the array bounds return Error. Named members, including `Length`, are read-only; unknown members return Error. Indices must be finite non-negative integers. Arrays can hold any Feather value and `get_type(a)` returns `"Array"`. Ordinary `object()` values use numeric keys as properties.
 
 - `a.Add(value)` appends an element and returns `true`. `a.add(value)` is an alias.
 - `a.remove(value)` removes the first element that compares equal under `==`. It returns `true` when it removes an element and `false` otherwise.
@@ -132,6 +132,7 @@ Removing an element shifts the later elements left and updates `Length`.
 var items = array();
 items.Add("first");
 items.Add("second");
+items[0] = "updated";
 var first = items[0];
 items.RemoveAt(0);
 ```
