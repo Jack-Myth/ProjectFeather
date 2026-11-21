@@ -1,5 +1,3 @@
-#include <Feather/ByteBuffer.hpp>
-#include <Feather/Compiler.hpp>
 #include <Feather/Runtime.hpp>
 #include "Internal.hpp"
 #include "Optimize.hpp"
@@ -76,19 +74,6 @@ struct ActiveRunGuard {
 // Core builtin type identities belong to this VM.
 constexpr NativeModuleGuid CoreBuiltinsGuid{{0x46,0x65,0x61,0x74,0x68,0x65,0x72,0x00,
                                              0xb1,0x17,0x49,0x81,0x96,0x27,0xa5,0x01}};
-class EvalBytecodeFunction final : public NativeObject {
-public:
-    EvalBytecodeFunction(NativeObjectType& Type, Vm& Machine) : NativeObject(Type), Machine(Machine) {}
-    ObjectType GetObjectType() const override { return ObjectType::Host; }
-    bool IsCallable() const override { return true; }
-    Value Call(const std::vector<Value>& Arguments) override {
-        if (Arguments.empty() || Arguments.size() > 2)
-            return Value::Error("eval_bytecode expects ByteBuffer and optional context");
-        return Machine.EvalBytecode(Arguments[0], Arguments.size() == 2 ? Arguments[1] : Value{});
-    }
-private:
-    Vm& Machine;
-};
 class ArrayFunction final : public NativeObject {
 public:
     ArrayFunction(NativeObjectType& Type, Vm& Machine) : NativeObject(Type), Machine(Machine) {}
@@ -248,16 +233,14 @@ public:
 
 class VmModule final : public NativeObject {
 public:
-    VmModule(NativeObjectType& Type, Value Eval, Value SetPaths, Value GetPaths,
+    VmModule(NativeObjectType& Type, Value SetPaths, Value GetPaths,
              Value GetArgc, Value GetArgv, Value Invoke, Value SetMeta, Value RawSet)
-        : NativeObject(Type), Eval(std::move(Eval)),
-          SetPaths(std::move(SetPaths)), GetPaths(std::move(GetPaths)),
+        : NativeObject(Type), SetPaths(std::move(SetPaths)), GetPaths(std::move(GetPaths)),
           GetArgc(std::move(GetArgc)), GetArgv(std::move(GetArgv)),
           Invoke(std::move(Invoke)), SetMeta(std::move(SetMeta)), RawSet(std::move(RawSet)) {}
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     Value GetMember(const Value& Key) override {
         if (Key.GetType() == ValueType::String) {
-            if (Key.AsString() == "eval_bytecode") return Eval;
             if (Key.AsString() == "set_module_paths") return SetPaths;
             if (Key.AsString() == "get_module_paths") return GetPaths;
             if (Key.AsString() == "get_func_argc") return GetArgc;
@@ -270,7 +253,6 @@ public:
     }
     std::vector<std::string> Paths;
 private:
-    Value Eval;
     Value SetPaths;
     Value GetPaths;
     Value GetArgc;
@@ -325,7 +307,6 @@ std::vector<Value> BindConstants(const std::shared_ptr<Module>& Program) {
                 Values.push_back(Value::FromObject(std::make_shared<OptimizedFunction>(Program, Item.Function, std::move(Plan))));
             break;
         }
-        case Constant::Kind::Buffer: Values.emplace_back(); break; // A mutable buffer is created on each load.
         }
     }
     return Values;
@@ -479,7 +460,7 @@ std::vector<DebugNamedValue> VmDebugContext::GetGlobals(std::size_t FrameId) con
         auto Instance = Machine->ModuleByProgram.find(Owner.get());
         if (Instance == Machine->ModuleByProgram.end())
             throw std::logic_error("debug frame has no module instance");
-        Values = Instance->second->GlobalScope ? Instance->second->GlobalScope : &Instance->second->Globals;
+        Values = &Instance->second->Globals;
     }
     std::vector<DebugNamedValue> Result;
     Result.reserve(Values->size());
@@ -560,8 +541,7 @@ void VmDebugContext::SetGlobal(std::size_t FrameId, std::string Name, Value Inpu
         auto Found = Machine->ModuleByProgram.find(Owner.get());
         if (Found == Machine->ModuleByProgram.end())
             throw std::logic_error("debug frame has no module instance");
-        auto& Values = Found->second->GlobalScope ? *Found->second->GlobalScope : Found->second->Globals;
-        Values.insert_or_assign(std::move(Name), std::move(Input));
+        Found->second->Globals.insert_or_assign(std::move(Name), std::move(Input));
     }
 }
 
@@ -599,8 +579,6 @@ Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
     auto& ArrayType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "array");
     BuiltinArray = Value::FromObject(ArrayType.Create<ArrayFunction>(*this));
     Globals.emplace("array", BuiltinArray);
-    auto& EvalType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "eval_bytecode");
-    auto Eval = Value::FromObject(EvalType.Create<EvalBytecodeFunction>(*this));
     auto& SetPathsType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "set_module_paths");
     auto& GetPathsType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "get_module_paths");
     auto SetPaths = Value::FromObject(SetPathsType.Create<ModulePathsFunction>(*this, true));
@@ -616,7 +594,7 @@ Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
     auto& RawSetType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "raw_set");
     auto& VmModuleType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "vm");
     BuiltinVmModule = Value::FromObject(VmModuleType.Create<VmModule>(
-        std::move(Eval), std::move(SetPaths), std::move(GetPaths),
+        std::move(SetPaths), std::move(GetPaths),
         std::move(GetArgc), std::move(GetArgv), std::move(Invoke), std::move(SetMeta),
         Value::FromObject(RawSetType.Create<RawSetFunction>())));
     // Freeze the mutable builder's module before any execution.
@@ -904,11 +882,6 @@ Value Vm::Call(Value Target, std::vector<Value> Arguments) {
                 std::static_pointer_cast<FunctionObject>(Target.AsNativeObject()), Arguments);
             return Execute(Execution);
         }
-        if (dynamic_cast<EvalBytecodeFunction*>(Native)) {
-            auto Result = Native->Call(Arguments);
-            ValidateOwnedValue(Result);
-            return Result;
-        }
         ActiveRunGuard Guard(ActiveNativeCalls);
         auto Result = Native->Call(Arguments);
         ValidateOwnedValue(Result);
@@ -946,54 +919,6 @@ void Vm::SetModulePaths(std::vector<std::string> Paths) {
     static_cast<VmModule*>(BuiltinVmModule.AsObject())->Paths = std::move(Paths);
 }
 
-Value Vm::EvalBytecode(const Value& Code, Value Context) {
-    const auto* Bytes = ByteBufferData(Code);
-    if (!Bytes) return Value::Error("eval_bytecode expects a ByteBuffer");
-    CompiledProgram Compiled;
-    try {
-        Compiled = DeserializeProgram({reinterpret_cast<const std::uint8_t*>(Bytes->data()), Bytes->size()});
-        if (Compiled.Functions.size() != 1 || !Compiled.Functions.contains("__compiled_block") || !Compiled.Exports.empty())
-            return Value::Error("eval_bytecode requires a compiled block without module declarations");
-    } catch (const std::exception& Failure) {
-        return Value::Error(std::string("invalid compiled bytecode: ") + Failure.what());
-    }
-    auto Entry = Compiled.Functions.at("__compiled_block");
-    auto& Body = Compiled.Program->Constants.at(Entry).Function;
-    if (Body->ParameterCount != 1) return Value::Error("eval_bytecode requires a compiled block");
-    auto Instance = std::make_shared<ModuleInstance>();
-    Instance->Program = Compiled.Program;
-    Instance->Id = GetActiveModuleId();
-    Instance->GlobalScope = &Globals;
-    if (ActiveExecution && !ActiveExecution->Frames.empty()) {
-        auto Owner = ActiveExecution->Frames.back().Function->GetOwner();
-        if (Owner != Program) {
-            auto Caller = ModuleByProgram.at(Owner.get());
-            Instance->GlobalScope = Caller->GlobalScope ? Caller->GlobalScope : &Caller->Globals;
-        }
-    }
-    Instance->ConstantValues = BindConstants(Compiled.Program);
-    ModuleByProgram.emplace(Instance->Program.get(), Instance);
-    struct Guard {
-        Vm& Machine; const Module* Program;
-        ~Guard() { Machine.ModuleByProgram.erase(Program); }
-    } Cleanup{*this, Instance->Program.get()};
-    // Nested execution replaces ActiveExecution; keep all caller frames rooted.
-    std::vector<RootHandle> CallerRoots;
-    if (ActiveExecution) for (const auto& Frame : ActiveExecution->Frames) {
-        for (const auto& Value : Frame.Arguments) CallerRoots.push_back(AddToRoot(Value));
-        for (const auto& Value : Frame.Locals) CallerRoots.push_back(AddToRoot(Value));
-        for (const auto& Value : Frame.Stack) CallerRoots.push_back(AddToRoot(Value));
-    }
-    struct EvalDepthGuard {
-        Vm& Machine; bool Nested;
-        EvalDepthGuard(Vm& Machine) : Machine(Machine), Nested(Machine.ActiveRuns != 0) {
-            if (Nested) ++Machine.RootedEvalDepth;
-        }
-        ~EvalDepthGuard() { if (Nested) --Machine.RootedEvalDepth; }
-    } RootedDepth(*this);
-    return Call(Instance->ConstantValues[Entry], {Context});
-}
-
 Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t FrameId,
                                   const std::shared_ptr<Module>& EvaluationProgram,
                                   std::uint32_t FunctionConstant,
@@ -1010,7 +935,7 @@ Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t F
     if (PausedOwner != Program) {
         auto Found = ModuleByProgram.find(PausedOwner.get());
         if (Found == ModuleByProgram.end()) throw std::logic_error("debug frame has no module instance");
-        PausedGlobals = Found->second->GlobalScope ? Found->second->GlobalScope : &Found->second->Globals;
+        PausedGlobals = &Found->second->Globals;
     }
 
     auto Instance = std::make_shared<ModuleInstance>();
@@ -1193,7 +1118,7 @@ FEATHER_VM_NOINLINE bool Vm::TryEnterSlotCall(ExecutionState& Execution, const V
     const auto& Call = Function.Plan.Calls[ReadU32(Function.GetBody().Code, Caller.Pc)];
     auto* Instance = Caller.Instance;
     if (Call.Global) {
-        auto& Scope = Instance ? (Instance->GlobalScope ? *Instance->GlobalScope : Instance->Globals) : Globals;
+        auto& Scope = Instance ? Instance->Globals : Globals;
         const auto Found = Scope.find(Function.GetOwner()->Constants[Call.Target].Text);
         if (Found == Scope.end()) return false;
         Target = &Found->second;
@@ -1278,7 +1203,7 @@ Value Vm::Execute(ExecutionState& Execution) {
         auto* FrameInstance = Next.Instance;
         FaultModuleId = FrameInstance ? std::string_view(FrameInstance->Id) : std::string_view{};
         const auto& FrameConstants = FrameInstance ? FrameInstance->ConstantValues : ConstantValues;
-        auto& FrameGlobals = FrameInstance ? (FrameInstance->GlobalScope ? *FrameInstance->GlobalScope : FrameInstance->Globals) : Globals;
+        auto& FrameGlobals = FrameInstance ? FrameInstance->Globals : Globals;
         if (InstructionsRemaining == 0)
             throw std::runtime_error("VM instruction budget exceeded");
         --InstructionsRemaining;
@@ -1352,11 +1277,6 @@ Value Vm::Execute(ExecutionState& Execution) {
                     !ModuleByProgram.contains(Function->GetOwner().get()))
                     throw std::invalid_argument("function belongs to another VM module");
                 PushFrame(Function, Args);
-            } else if (dynamic_cast<EvalBytecodeFunction*>(Native)) {
-                // This builtin runs interpreter code, not an arbitrary native
-                // callback. Caller values are rooted by EvalBytecode, so normal
-                // instruction-boundary GC remains available inside the block.
-                Push(Native->Call(Args), DebugErrorOrigin::FunctionReturn);
             } else {
                 ActiveRunGuard NativeGuard(ActiveNativeCalls);
                 Push(Native->Call(Args), DebugErrorOrigin::FunctionReturn);
@@ -1365,8 +1285,7 @@ Value Vm::Execute(ExecutionState& Execution) {
         switch (Instruction) {
         case Op::Const: {
             auto Id = ReadU32(Code, Current.Pc);
-            const auto& Item = FrameOwner->Constants[Id];
-            Push(Item.Type == Constant::Kind::Buffer ? ByteBufferLibrary(*this).Create(Item.Text) : FrameConstants[Id]);
+            Push(FrameConstants[Id]);
             break;
         }
         case Op::Null: Push({}); break;

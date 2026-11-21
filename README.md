@@ -74,7 +74,7 @@ build\debug\feather-debugger.exe --connect 127.0.0.1:4711
 
 | 文档 | 内容 |
 |---|---|
-| [源码语法](SPEC-syntax.md) | 文法、快捷行、数组、`@{ ... }` 编译块 |
+| [源码语法](SPEC-syntax.md) | 文法、快捷行、数组、`@{ ... }` 匿名函数 |
 | [模块与标准库](SPEC-modules.md) | 文件与 Native 导入、VM 模块路径、stdio、time、text、network、render2d |
 | [运行时](SPEC-runtime-design.md) | 值、对象、GC、指令、错误与嵌入 API |
 | [编译产物](SPEC-artifacts.md) | `.fbc`、`.fbs` 格式和校验 |

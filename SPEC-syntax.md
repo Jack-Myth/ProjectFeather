@@ -49,7 +49,8 @@ factor        = unary { ( "*" | "/" ) unary } ;
 unary         = "-" unary | postfix ;
 postfix       = primary { "(" [ expression { "," expression } ] ")"
               | "." IDENT | "[" expression "]" } ;
-primary       = literal | IDENT | "object" "(" ")" | "byte" "(" expression ")" | "(" expression ")" ;
+anonymous     = "@" [ "(" [ parameter { "," parameter } ] ")" ] block ;
+primary       = anonymous | literal | IDENT | "object" "(" ")" | "byte" "(" expression ")" | "(" expression ")" ;
 literal       = "null" | "true" | "false" | NUMBER | STRING ;
 ```
 
@@ -57,7 +58,7 @@ literal       = "null" | "true" | "false" | NUMBER | STRING ;
 
 ## 名称、作用域和执行
 
-- 顶层允许函数声明及语句。`export` 只可修饰顶层 `var` 或 `def`，记录该模块公开的名字；在块内或其他语句前使用报编译错误。函数声明只允许在顶层；同名函数、同一作用域重复 `var`、重复形参均报编译错误。函数无闭包。
+- 顶层允许函数声明及语句。`export` 只可修饰顶层 `var` 或 `def`，记录该模块公开的名字；在块内或其他语句前使用报编译错误。具名函数声明只允许在顶层；同名函数、同一作用域重复 `var`、重复形参均报编译错误。函数无闭包。
 - 形参和 `var` 占用函数局部槽位；块按词法作用域查找，允许内层遮蔽。离开块后名字不可见。其他标识符读写当前函数所属模块的字符串键全局表。顶层 `var` 声明该模块的全局名；顶层不支持局部变量。
 - 赋值右结合，左边只允许标识符、点成员或方括号成员。赋值是表达式。`var` 无初值、`return;`、函数末尾和初始化函数末尾均产生 `null`。
 - 函数默认参数只能是字面量，且带默认值的形参后面不允许无默认值的形参。调用参数从左到右求值，可用 [VM 实参接口](SPEC-modules.md#当前函数的实参) 读取。
@@ -92,31 +93,15 @@ if (get_type(value) == "Error") {
 }
 ```
 
-## Compiled bytecode blocks
+## 匿名函数
 
-`@{ ... }` expressions compile their body into immutable ByteBuffer constants. Creating a block does not execute it; `vm.eval_bytecode(code, context)` validates and executes the stored bytecode without compiling source at runtime.
+表达式 `@(参数列表) { ... }` 产生普通的 Feather 函数值。零参数时可省略括号，`@{ ... }` 等价于 `@() { ... }`。函数体在调用时执行。参数、默认值和返回值遵循 `def` 的规则。匿名函数可嵌套，不捕获外层函数的局部变量，全局名解析到定义模块。
 
 ```feather
-var vm = import("vm");
-var reward = @{
-    context.affection = context.affection + 1;
-    return context.affection;
-};
-
-def main() {
-    var state = object();
-    state.affection = 0;
-    return vm.eval_bytecode(reward, state);
-}
+var add = @(a, b = 1) { return a + b; };
+var answer = @{ return add(41); };
+var result = answer();
 ```
-
-`import("vm")` exposes `eval_bytecode` alongside [module search paths](SPEC-modules.md#模块搜索路径) and [argument accessors](SPEC-modules.md#当前函数的实参). The language builtin `get_type(value)` is global.
-
-The optional second argument is available as the local `context` (null when omitted). Each call has fresh locals; outer function locals are not captured. Other names use the globals of the module calling eval_bytecode. Blocks support expressions, local declarations, if/while, break/continue within their own loops, return, shortcut calls, and nested block literals. Function/export declarations inside a block are not supported. A return exits only that block.
-
-ByteBuffer can be stored in objects and written/read with stdio.IO. Invalid, truncated or incompatible bytecode returns Error; this is code execution with the caller's capabilities, not a security sandbox. Runtime faults and the existing instruction budget still apply. A block executes to completion; it does not itself record game progress or provide suspension.
-
-Bytecode artifacts use ISA 2 (binary buffer constant tag 4). The compiler CLI emits .fbc v6 with the source byte count. Native modules must be rebuilt with the updated headers. Compiled block payloads currently carry bytecode without the optional .fbs source map.
 
 ## Arrays
 

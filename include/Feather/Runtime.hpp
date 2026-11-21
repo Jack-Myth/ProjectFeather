@@ -372,7 +372,7 @@ struct FunctionPrototype {
 };
 
 struct FEATHER_API Constant {
-    enum class Kind { Number, String, Function, Byte, Buffer } Type;
+    enum class Kind { Number, String, Function, Byte } Type;
     double Numeric = 0;
     std::uint8_t ByteValue = 0;
     std::string Text;
@@ -380,7 +380,6 @@ struct FEATHER_API Constant {
     static Constant Number(double Input);
     static Constant Byte(double Input);
     static Constant String(std::string Input);
-    static Constant Buffer(std::string Input);
     static Constant FunctionRef(std::shared_ptr<FunctionPrototype> Input);
 };
 
@@ -392,7 +391,6 @@ public:
     std::uint32_t AddNumber(double Input);
     std::uint32_t AddByte(double Input);
     std::uint32_t AddString(std::string Input);
-    std::uint32_t AddBuffer(std::string Input);
     std::uint32_t AddFunction(std::shared_ptr<FunctionPrototype> Input);
     void Validate() const;
 private:
@@ -447,7 +445,6 @@ public:
     std::vector<std::uint8_t> SerializeArguments(std::span<const Value> Arguments) const;
     // Root returned script objects if retaining them across GC.
     std::vector<Value> DeserializeArguments(std::span<const std::uint8_t> Bytes);
-    Value EvalBytecode(const Value& Code, Value Context = {});
     Value GetVmModule() const { return BuiltinVmModule; }
     const std::vector<std::string>& GetModulePaths() const;
     void SetModulePaths(std::vector<std::string> Paths);
@@ -562,7 +559,6 @@ private:
     std::shared_ptr<int> Lifetime = std::make_shared<int>(0);
     std::uint64_t NextRootToken = 1;
     std::uint32_t ActiveRuns = 0;
-    std::uint32_t RootedEvalDepth = 0;
     std::uint32_t ActiveNativeCalls = 0;
     std::uint32_t DebugCallbackSuppression = 0;
     ExecutionState* ActiveExecution = nullptr;

@@ -28,7 +28,7 @@
 | export count | u32 | 显式 `export` 名称数，最多 65536 |
 | exports | 逐条 | UTF-8 标识符字符串，按名称字节序升序编码，不重复 |
 
-常量以一个 `u8` tag 开始。tag 4 后跟 u32 长度和任意二进制字节，Const 将其物化为不可变 ByteBuffer；tag 3 后跟单个 u8 byte 载荷；tag 0 后跟 binary64 原始 64 位；tag 1 后跟字符串；tag 2 后跟 `parameter count: u32`、`local count: u32`、`default count: u32`、逐个默认值及代码字节串。默认值 tag 为：0 缺省、1 `null`、2 `false`、3 `true`、4 后跟 binary64、5 后跟 UTF-8 字符串、6 后跟单个 u8 byte。默认值数量必须与形参数相等；不编码 object 默认值。
+常量以一个 `u8` tag 开始。tag 3 后跟单个 u8 byte 载荷；tag 0 后跟 binary64 原始 64 位；tag 1 后跟字符串；tag 2 后跟 `parameter count: u32`、`local count: u32`、`default count: u32`、逐个默认值及代码字节串。默认值 tag 为：0 缺省、1 `null`、2 `false`、3 `true`、4 后跟 binary64、5 后跟 UTF-8 字符串、6 后跟单个 u8 byte。默认值数量必须与形参数相等；不编码 object 默认值。
 
 编译器当前还会在内存函数原型中生成指令位置表；v6 不编码它。可选的独立 `.fbs` 保存这些位置，见[符号格式](#符号fbs-v3)。精简 `feathervm` 不加载符号文件，因而保持无位置回退；嵌入宿主可以显式附加匹配的 `.fbs`。
 

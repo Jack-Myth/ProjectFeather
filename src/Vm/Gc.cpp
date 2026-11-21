@@ -32,7 +32,7 @@ void Vm::RegisterNativeObject(const std::shared_ptr<NativeObject>& Input) {
 }
 
 void Vm::CollectGarbageIfSafe() {
-    if (ActiveRuns != 1 + RootedEvalDepth || ActiveNativeCalls != 0 || !ActiveExecution)
+    if (ActiveRuns != 1 || ActiveNativeCalls != 0 || !ActiveExecution)
         return;
     (void)CollectGarbageImpl();
 }

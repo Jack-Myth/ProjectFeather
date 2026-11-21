@@ -29,3 +29,10 @@ test('declarations in comments and strings are ignored', () => {
   const masked = maskCommentsAndStrings(source);
   assert.equal(masked.split('\n')[0].trim(), '');
 });
+
+test('anonymous functions have snippets and contribute parameter names', () => {
+  const model = completionModel('var f = @(x = byte(1), y = "),") { return x; }; var g = @{};');
+  assert.ok(model.snippets.some(item => item.name === 'lambda' && item.insertText.startsWith('@(')));
+  assert.ok(model.snippets.some(item => item.name === 'lambda0' && item.insertText.startsWith('@{')));
+  assert.deepEqual(model.symbols.map(item => item.name), ['f', 'g', 'x', 'y']);
+});

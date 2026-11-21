@@ -169,7 +169,6 @@ Constant Constant::Byte(double Input) {
     Constant Result{Kind::Byte}; Result.ByteValue = Value::Byte(Input).AsByte(); return Result;
 }
 Constant Constant::String(std::string Input) { Constant Result{Kind::String}; Result.Text = std::move(Input); return Result; }
-Constant Constant::Buffer(std::string Input) { Constant Result{Kind::Buffer}; Result.Text = std::move(Input); return Result; }
 Constant Constant::FunctionRef(std::shared_ptr<FunctionPrototype> Input) {
     Constant Result{Kind::Function}; Result.Function = std::move(Input); return Result;
 }
@@ -181,9 +180,6 @@ std::uint32_t Module::AddByte(double Input) {
 }
 std::uint32_t Module::AddString(std::string Input) {
     Constants.push_back(Constant::String(std::move(Input))); return static_cast<std::uint32_t>(Constants.size() - 1);
-}
-std::uint32_t Module::AddBuffer(std::string Input) {
-    Constants.push_back(Constant::Buffer(std::move(Input))); return static_cast<std::uint32_t>(Constants.size() - 1);
 }
 std::uint32_t Module::AddFunction(std::shared_ptr<FunctionPrototype> Input) {
     Constants.push_back(Constant::FunctionRef(std::move(Input))); return static_cast<std::uint32_t>(Constants.size() - 1);

@@ -1,6 +1,6 @@
 var vm = import("vm");
 var count = 0;
-var code = @{ count = count + 1; context.value = context.value + 1; return context.value; };
+var code = @(context) { count = count + 1; context.value = context.value + 1; return context.value; };
 def store(self, key, value) {
     vm.raw_set(self, key, value);
     return 73;
@@ -12,9 +12,9 @@ def forward(self, key, value) {
 
 def main() {
     if (vm != import("vm")) { return byte(-1); }
-    if (get_type(code) != "NativeObject") { return byte(-1); }
+    if (get_type(code) != "Function") { return byte(-1); }
     if (get_type(vm.get_type) != "Error") { return byte(-1); }
-    if (get_type(eval_bytecode) != "Error") { return byte(-1); }
+    if (get_type(vm.eval_bytecode) != "Error") { return byte(-1); }
     var defaults = vm.get_module_paths();
     var paths = array();
     if (vm.set_module_paths(paths) != true) { return byte(-1); }
@@ -67,16 +67,7 @@ def main() {
     meta.__set_index = null;
     if (get_type(state.absent = 1) != "Error") { return byte(-1); }
     if (get_type(state.absent) != "Error") { return byte(-1); }
-    vm.eval_bytecode(code, state);
-    if (vm.eval_bytecode(code, state) != 42) { return byte(-1); }
-    var handle = stdio.IO.OpenFile("compiled-block-test.bin", "w");
-    var written = stdio.IO.Write(handle, code);
-    stdio.IO.CloseFile(handle);
-    if (written != code.Length) { return byte(-1); }
-    handle = stdio.IO.OpenFile("compiled-block-test.bin", "r");
-    var loaded = stdio.IO.Read(handle, code.Length);
-    stdio.IO.CloseFile(handle);
-    if (vm.eval_bytecode(loaded, state) != 43) { return byte(-1); }
-    stdio.Console.PrintLine("compiled bytecode persisted and executed");
+    code(state);
+    if (code(state) != 42) { return byte(-1); }
     return null;
 }

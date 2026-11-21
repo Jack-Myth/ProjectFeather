@@ -4,6 +4,17 @@
 
 这是 Project Feather 的实验版 VS Code 语言与调试扩展。它为 `.fe` 文件提供语法高亮、括号与注释编辑配置，以及关键字、常用语句片段和当前文件声明的基础补全。扩展也在 VS Code extension host 内完成 DAP 与 Feather 调试协议的转换，并通过一条 `Content-Length` framing 的全双工 TCP 连接直接访问解释器；不需要额外的 DAP 中继进程。
 
+## 匿名函数
+
+在 `.fe` 文件中输入 `lambda` 并接受补全，会插入带参数的匿名函数。输入 `lambda0` 会插入零参数简写 `@{ ... }`。带括号的 `@() { ... }` 同样合法。匿名函数的参数名也会出现在当前文件的补全列表里。
+
+```feather
+var add = @(a, b = 1) { return a + b; };
+var answer = @{ return add(41); };
+```
+
+参数、作用域和调用规则见[匿名函数语法](../../SPEC-syntax.md#匿名函数)。
+
 ## 本地安装
 
 仓库中已生成可安装的 `feather-debug-0.3.1.vsix`，可在 VS Code 中执行 **Extensions: Install from VSIX...**，或运行：

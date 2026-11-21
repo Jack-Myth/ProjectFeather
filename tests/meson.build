@@ -163,10 +163,11 @@ endif
 GetTypeTests = executable('get-type-tests', 'GetType.cpp', dependencies : FeatherDependency)
 test('get-type', GetTypeTests)
 
-CompiledBlockTests = executable('compiled-block-tests', 'CompiledBlock.cpp', dependencies : FeatherDependency)
-test('compiled-block', CompiledBlockTests)
-CompiledBlockBytecode = custom_target('compiled-block-bytecode', input : 'fixtures/compiled-block.fe', output : 'compiled-block.fbc', command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'], build_by_default : true)
-test('cli-compiled-block-bytecode', FeatherVmCli, args : [CompiledBlockBytecode], depends : [StdioNativeModule, CompiledBlockBytecode])
+AnonymousFunctionTests = executable('anonymous-function-tests', 'AnonymousFunction.cpp', dependencies : FeatherDependency)
+test('anonymous-function', AnonymousFunctionTests)
+test('cli-anonymous-function', FeatherCli, args : ['run', files('fixtures/anonymous-function.fe')], depends : StdioNativeModule)
+AnonymousFunctionBytecode = custom_target('anonymous-function-bytecode', input : 'fixtures/anonymous-function.fe', output : 'anonymous-function.fbc', command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'], build_by_default : true)
+test('cli-anonymous-function-bytecode', FeatherVmCli, args : [AnonymousFunctionBytecode], depends : [StdioNativeModule, AnonymousFunctionBytecode])
 
 DelegateTestSource = files('fixtures/delegate.fe')
 test('cli-delegate', FeatherCli, args : ['run', DelegateTestSource])

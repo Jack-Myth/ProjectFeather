@@ -208,12 +208,14 @@ private:
     std::size_t Position = 0, Line = 1, Column = 1;
 };
 
-enum class NodeKind { CompiledBlock, Literal, Name, Byte, Object, Member, Call, Unary, Binary, Assign,
+struct FunctionAst;
+enum class NodeKind { AnonymousFunction, Literal, Name, Byte, Object, Member, Call, Unary, Binary, Assign,
     Var, Return, If, While, Break, Continue, Block, Expression };
 struct Node {
     NodeKind Kind;
     Token At;
     std::string Name;
+    std::unique_ptr<FunctionAst> Function;
     Value Literal;
     TokenKind Operator = TokenKind::End;
     std::vector<std::unique_ptr<Node>> Children;
@@ -244,7 +246,9 @@ public:
         while (!Check(TokenKind::End)) {
             bool Exported = Match(TokenKind::Export);
             if (Match(TokenKind::Def)) {
-                auto Function = ParseFunction(Previous());
+                auto At = Previous();
+                auto Name = Expect(TokenKind::Name, "expected function name").Text;
+                auto Function = ParseFunction(At, std::move(Name));
                 if (!Declared.insert(Function.Name).second) Fail(Function.At, "duplicate global declaration");
                 if (Exported) Result.Exports.push_back(Function.Name);
                 Result.Functions.push_back(std::move(Function));
@@ -294,9 +298,14 @@ private:
         default: Fail(Item, "expected literal");
         }
     }
-    FunctionAst ParseFunction(const Token& At) {
+    FunctionAst ParseFunction(const Token& At, std::string Name) {
         FunctionAst Result; Result.At = At;
-        Result.Name = Expect(TokenKind::Name, "expected function name").Text;
+        Result.Name = std::move(Name);
+        if (!Result.Name.empty() || Check(TokenKind::LeftParen)) ParseParameters(Result);
+        Result.Body = ParseBlock();
+        return Result;
+    }
+    void ParseParameters(FunctionAst& Result) {
         Expect(TokenKind::LeftParen, "expected '('");
         std::unordered_set<std::string> Names;
         bool SawDefault = false;
@@ -308,8 +317,6 @@ private:
             else { if (SawDefault) Fail(Parameter, "required parameter after default"); Result.Defaults.push_back(std::nullopt); }
         } while (Match(TokenKind::Comma));
         Expect(TokenKind::RightParen, "expected ')'");
-        Result.Body = ParseBlock();
-        return Result;
     }
     NodePtr ParseBlock() {
         auto At = Expect(TokenKind::LeftBrace, "expected '{'");
@@ -463,8 +470,8 @@ private:
             DepthGuard Guard(Depth, At);
             auto SavedLoopDepth = LoopDepth;
             LoopDepth = 0;
-            auto Result = Make(NodeKind::CompiledBlock, At);
-            Result->Children.push_back(ParseBlock());
+            auto Result = Make(NodeKind::AnonymousFunction, At);
+            Result->Function = std::make_unique<FunctionAst>(ParseFunction(At, ""));
             LoopDepth = SavedLoopDepth;
             return Result;
         }
@@ -506,6 +513,19 @@ public:
         : Program(Program), Indices(Indices), At(At), CurrentAt(&this->At) {
         Scopes.emplace_back();
         ScopeSymbols.emplace_back();
+    }
+    static void CompileFunction(Module& Program, ConstantIndices& Indices, const FunctionAst& Function,
+                                FunctionPrototype& Prototype) {
+        Emitter Output(Program, Indices, Function.At);
+        Output.AddParameters(Function);
+        Output.EmitFunctionBody(Function);
+        Prototype.DebugName = Function.Name.empty() ? "<anonymous>" : Function.Name;
+        Prototype.ParameterCount = static_cast<std::uint32_t>(Function.Parameters.size());
+        Prototype.Defaults = Function.Defaults;
+        Prototype.LocalCount = Output.GetLocalCount();
+        Prototype.LocalVariables = Output.FinishLocalVariables();
+        Prototype.Code = Output.Finish();
+        Prototype.Locations = Output.FinishLocations();
     }
     void AddParameters(const FunctionAst& Function) {
         if (Function.Parameters.size() > 65'536) Fail(Function.At, "too many parameters");
@@ -716,35 +736,11 @@ private:
         DepthGuard Guard(Depth, Expression.At);
         SourceGuard Source(CurrentAt, Expression.At);
         switch (Expression.Kind) {
-        case NodeKind::CompiledBlock: {
-            CompiledProgram Block;
-            Block.Program = std::make_shared<Module>();
+        case NodeKind::AnonymousFunction: {
             auto Prototype = std::make_shared<FunctionPrototype>();
-            Prototype->ParameterCount = 1;
-            Prototype->Defaults.push_back(std::nullopt);
-            auto Entry = Block.Program->AddFunction(Prototype);
-            Block.Functions.emplace("__compiled_block", Entry);
-            auto Init = std::make_shared<FunctionPrototype>();
-            Init->Code = {static_cast<std::uint8_t>(Op::Null), static_cast<std::uint8_t>(Op::Return)};
-            Block.Initializer = Block.Program->AddFunction(Init);
-            FunctionAst Function;
-            Function.At = Expression.At;
-            Function.Name = "<compiled-block>";
-            Function.Parameters.push_back("context");
-            Function.Body = nullptr;
-            ConstantIndices BlockIndices;
-            Emitter Output(*Block.Program, BlockIndices, Expression.At);
-            Output.AddParameters(Function);
-            Output.EmitBlock(*Expression.Children[0], false);
-            Output.Emit(Op::Null); Output.Emit(Op::Return);
-            Prototype->DebugName = Function.Name;
-            Prototype->LocalCount = Output.GetLocalCount();
-            Prototype->LocalVariables = Output.FinishLocalVariables();
-            Prototype->Code = Output.Finish();
-            Prototype->Locations = Output.FinishLocations();
-            auto Bytes = SerializeProgram(Block);
+            CompileFunction(Program, Indices, *Expression.Function, *Prototype);
             if (Program.Constants.size() >= 65'536) Fail(Expression.At, "too many constants");
-            EmitU32(Op::Const, Program.AddBuffer(std::string(Bytes.begin(), Bytes.end())));
+            EmitU32(Op::Const, Program.AddFunction(std::move(Prototype)));
             break;
         }
         case NodeKind::Literal:
@@ -862,26 +858,10 @@ private:
 
 CompiledProgram Compile(std::string_view Source) {
     auto Tokens = Lexer(Source).Scan();
-    bool UsesQuickOperators = false;
-    for (const auto& Token : Tokens)
-        if (Token.Kind == TokenKind::QuickHash || Token.Kind == TokenKind::QuickDollar ||
-            Token.Kind == TokenKind::QuickAmpersand || Token.Kind == TokenKind::QuickRightAngle)
-            UsesQuickOperators = true;
     // A script may provide its own shortcut handlers. Only unresolved handlers
     // require host injection; preserve the existing CLI rejection otherwise.
     std::vector<std::string> QuickHandlers;
-    for (std::size_t I = 0; I < Tokens.size(); ++I) {
-        const auto& Token = Tokens[I];
-        // Quoted statements are data until eval_bytecode runs them. They must
-        // not make the enclosing initializer require a shortcut handler.
-        if (Token.Kind == TokenKind::At) {
-            std::size_t Braces = 0;
-            while (++I < Tokens.size()) {
-                if (Tokens[I].Kind == TokenKind::LeftBrace) ++Braces;
-                if (Tokens[I].Kind == TokenKind::RightBrace && Braces != 0 && --Braces == 0) break;
-            }
-            continue;
-        }
+    for (const auto& Token : Tokens) {
         switch (Token.Kind) {
         case TokenKind::QuickHash: QuickHandlers.emplace_back("__QuickOperatorHash"); break;
         case TokenKind::QuickDollar: QuickHandlers.emplace_back("__QuickOperatorDollar"); break;
@@ -891,7 +871,7 @@ CompiledProgram Compile(std::string_view Source) {
         }
     }
     auto Ast = Parser(std::move(Tokens)).Parse();
-    UsesQuickOperators = false;
+    bool UsesQuickOperators = false;
     for (const auto& Handler : QuickHandlers) {
         bool Defined = false;
         for (const auto& Function : Ast.Functions)
@@ -904,23 +884,14 @@ CompiledProgram Compile(std::string_view Source) {
     Result.Program = std::make_shared<Module>();
     for (const auto& Function : Ast.Functions) {
         auto Prototype = std::make_shared<FunctionPrototype>();
-        Prototype->ParameterCount = static_cast<std::uint32_t>(Function.Parameters.size());
-        Prototype->Defaults = Function.Defaults;
         Result.Functions.emplace(Function.Name, Result.Program->AddFunction(std::move(Prototype)));
     }
     auto Initializer = std::make_shared<FunctionPrototype>();
     Result.Initializer = Result.Program->AddFunction(Initializer);
     ConstantIndices Indices;
     for (const auto& Function : Ast.Functions) {
-        Emitter Output(*Result.Program, Indices, Function.At);
-        Output.AddParameters(Function);
-        Output.EmitFunctionBody(Function);
-        auto& Prototype = *Result.Program->Constants[Result.Functions.at(Function.Name)].Function;
-        Prototype.DebugName = Function.Name;
-        Prototype.LocalCount = Output.GetLocalCount();
-        Prototype.LocalVariables = Output.FinishLocalVariables();
-        Prototype.Code = Output.Finish();
-        Prototype.Locations = Output.FinishLocations();
+        auto Prototype = Result.Program->Constants[Result.Functions.at(Function.Name)].Function;
+        Emitter::CompileFunction(*Result.Program, Indices, Function, *Prototype);
     }
     Token Start{TokenKind::End, {}, 0, 1, 1};
     Emitter Output(*Result.Program, Indices, Start);

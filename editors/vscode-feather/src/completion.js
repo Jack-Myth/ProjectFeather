@@ -22,6 +22,8 @@ const BUILTINS = [
 ];
 
 const SNIPPETS = [
+  ['lambda', '@(${1:arg}) {\n\t${0}\n}', 'Anonymous function'],
+  ['lambda0', '@{\n\t${0}\n}', 'Zero-parameter anonymous function'],
   ['def', 'def ${1:name}(${2}) {\n\t${0}\n}', 'Function declaration'],
   ['if', 'if (${1:condition}) {\n\t${0}\n}', 'If statement'],
   ['while', 'while (${1:condition}) {\n\t${0}\n}', 'While loop'],
@@ -69,8 +71,9 @@ function documentSymbols(source) {
   };
   for (const match of clean.matchAll(/\bvar\s+([A-Za-z_][A-Za-z0-9_]*)/g))
     add(match[1], 'variable', 'Feather variable');
-  for (const match of clean.matchAll(/\bdef\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/g)) {
-    add(match[1], 'function', 'Feather function');
+  // byte(...) defaults can contain parentheses inside the parameter list.
+  for (const match of clean.matchAll(/(?:\bdef\s+([A-Za-z_][A-Za-z0-9_]*)|@)\s*\(((?:[^()]|\([^()]*\))*)\)/g)) {
+    if (match[1]) add(match[1], 'function', 'Feather function');
     for (const parameter of match[2].split(',')) {
       const name = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(parameter);
       if (name) add(name[1], 'variable', 'Feather parameter');
