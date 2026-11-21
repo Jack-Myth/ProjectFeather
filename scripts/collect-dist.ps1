@@ -99,6 +99,7 @@ foreach ($Name in @('debugger', 'network', 'render2d', 'audio')) {
 $Executables = @('feather', 'featherc', 'feathervm')
 if ($Options['debugger']) { $Executables += 'feather-debugger' }
 $Modules = @('stdio.felib', 'time.felib', 'text.felib', 'threads.felib')
+if (@($Targets | Where-Object { $_.name -eq 'ffi.felib' }).Count) { $Modules += 'ffi.felib' }
 if ($Options['network']) { $Modules += 'network.felib' }
 if ($Options['audio']) { $Modules += 'audio.felib' }
 if ($Options['render2d'] -eq 'enabled' -or
@@ -175,6 +176,12 @@ if ($Options['audio']) {
     $Source = Join-Path $Project 'modules/audio/THIRD-PARTY.txt'
     RejectLinks $Source
     $Files += [pscustomobject]@{ Source = $Source; Path = 'modules/audio-licenses.txt'; Sha256 = (Sha256 $Source) }
+}
+
+if ($Modules -contains 'ffi.felib') {
+    $Source = Join-Path $Project 'modules/ffi/THIRD-PARTY.txt'
+    RejectLinks $Source
+    $Files += [pscustomobject]@{ Source = $Source; Path = 'modules/ffi-licenses.txt'; Sha256 = (Sha256 $Source) }
 }
 
 $MarkerName = '.feather-dist.json'

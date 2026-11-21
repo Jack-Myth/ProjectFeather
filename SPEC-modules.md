@@ -450,3 +450,45 @@ render.SetViewport(context,
 - 新增 `FocusLost/FocusGained/PointerLeave/PointerEnter` 窗口事件，仅有 Type；无文本/IME/键盘修饰键扩展。
 
 这些接口只增加 render2d 包装层能力，不修改原有函数签名、VM/语言语义或磁盘格式。后端 C++ 协议的新增虚函数有默认不支持错误，原有测试后端可不实现；提供这些新功能的后端需实现相应方法。
+
+## ffi（Windows x64）
+
+`import("ffi")` 加载外部函数绑定模块。调用 `ffi.bind(库名, 导出名, 返回描述符, 参数描述符...)` 时解析导出并准备固定参数签名。成功时返回可调用对象，失败时返回 Feather Error。裸 DLL 名使用 Windows 默认安全搜索目录；带目录的相对路径按进程工作目录解析。绑定持有 DLL 句柄。
+
+```feather
+var ffi = import("ffi");
+var len = ffi.bind("kernel32.dll", "lstrlenW", ffi.Int32ByVal, ffi.str.utf16);
+var getExitCode = ffi.bind("kernel32.dll", "GetExitCodeProcess",
+    ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByRef);
+var current = ffi.bind("kernel32.dll", "GetCurrentProcess", ffi.PointerByVal);
+
+def main() {
+    var count = len("雪😀"); // 3 个 UTF-16 码元
+    var code = ffi.Ref(0);
+    if (getExitCode(current(), code) == 1) { return code.Val; }
+}
+```
+
+- 标量名称为 `Int8`、`UInt8`、`Int16`、`UInt16`、`Int32`、`UInt32`、`Float32`、`Float64`、`Pointer`，各有 `ByVal` 和 `ByRef` 后缀。返回位置接受 ByVal 类型或 `ffi.Void`。整数输入检查范围和小数部分，UInt8 读回为 Feather byte。指针接受 null 或 FFI 返回的不透明指针对象。
+- ByRef 参数接受 `ffi.Ref(initial)`，调用前后通过 `Val` 读写。一个调用中同类型的重复引用共享地址，冲突类型返回 Error。
+- `ffi.str.utf8` 和 `ffi.str.utf16` 接受字符串或 null，分别传入只读、以零结尾的 UTF-8 或 UTF-16 数据。带内嵌 NUL 的字符串返回 Error。
+- `ffi.Param(n)` 接受恰有 n 个 byte 元素的 Feather array，按指针传递。原生端的修改在返回时写回原数组。同一数组重复传参时共享地址。字段布局、填充和编码由脚本包装函数处理。
+- 引用、字符串、数组的参数地址仅供本次同步调用使用。绑定必须与真实导出原型匹配。首版支持 Windows x64 默认 C ABI 的固定签名，结构体可按指针传入。
+
+### 原生缓冲区与回调（Windows x64）
+
+`ffi.Buffer(n)` 创建固定 n 字节的清零可写缓冲区（Length 为字节数）。`ffi.Ptr(buffer, byteOffset = 0)` 返回持有缓冲区的不透明地址。现有只读 ByteBuffer 也可取地址，但只能交给只读原生参数。DLL 保存地址时，脚本须保持相应对象存活直到 DLL 释放或注销该地址。
+
+偏移以字节计，须为 0 到缓冲区长度之间的整数。等于长度时得到尾后指针，仅供比较或作为区间终点。偏移指针持有整个缓冲区。`ffi.Ptr(callback)` 返回回调自身，回调不接受偏移参数。
+
+`ffi.SamePtr(a, b)` 比较两个原生地址，返回布尔值。两侧均可传入 FFI 指针、回调或 null，其他类型返回 Error。
+
+`ffi.Struct.SetUint32(buf, byteOffset, value)` 等按本机字节序写入，返回 null；`GetUint32(buf, byteOffset)` 读取。类型后缀为 Int8、Uint8、Int16、Uint16、Int32、Uint32、Float32、Float64、IntPtr、Pointer。支持未对齐字段，参数、数值范围和访问越界错误返回 Error。只有 ffi.Buffer 可写。IntPtr 来回转换的整数限于 ±(2^53−1)，完整的地址和值应按 Pointer 原样传递。
+
+SetPointer 接受 null、FFI 指针或回调，并持有目标。脚本覆盖字段或其部分字节后，解除原字段对目标的持有。循环缓冲区引用返回 Error。GetPointer 读取通过 SetPointer 存入且仍然匹配的地址时保留其所有者；原生函数写入的新地址按外部借用指针处理，其有效期由该函数决定。
+
+`ffi.Callback(scriptFunction, returnType, argType...)` 创建可传入 PointerByVal 或 SetPointer 的回调。支持按值标量、指针和 Void 返回，在创建线程上同步进入 VM。应将回调保留到原生代码完成注销并结束最后一次调用。脚本错误、返回类型不匹配或外线程调用时返回零值，读取 `callback.LastError` 取得并清除错误。回调收到的外部指针遵循原生 API 的借用期限。
+
+### text 二进制编解码
+
+`text.Encode(string, encoding)` 返回只读 ByteBuffer，`text.Decode(buffer, encoding)` 解码整个缓冲区，保留内嵌 NUL。`text.UTF8` 和 `text.UTF16LE` 均按指定编码直接转换，不额外添加 BOM。EncodeZ 拒绝内嵌 NUL 并追加一个零码元，DecodeZ 在边界内按码元寻找终止符。非法编码序列、缺失终止符均返回 Error。

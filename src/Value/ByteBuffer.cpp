@@ -22,11 +22,11 @@ bool Integer(const Value& Input, std::uint64_t& Result, std::uint64_t Limit) {
 
 class BufferMethodType;
 
-class ByteBuffer final : public NativeObject {
+class ByteBuffer final : public ByteBufferView {
 public:
     ByteBuffer(NativeObjectType& Type, std::string Input,
                BufferMethodType* InputMethodType)
-        : NativeObject(Type), Bytes(std::make_shared<const std::string>(std::move(Input))),
+        : ByteBufferView(Type), Bytes(std::make_shared<const std::string>(std::move(Input))),
           MethodType(InputMethodType) {}
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     const std::string& Data() const { return *Bytes; }
@@ -119,7 +119,7 @@ Value ByteBufferLibrary::Create(std::string Bytes) const {
 }
 const std::string* ByteBufferData(const Value& Input) {
     if (Input.GetType() != ValueType::Object || Input.IsScriptObject()) return nullptr;
-    auto* Buffer = dynamic_cast<BufferDetail::ByteBuffer*>(Input.AsObject());
+    auto* Buffer = dynamic_cast<ByteBufferView*>(Input.AsObject());
     return Buffer ? &Buffer->Data() : nullptr;
 }
 } // namespace Feather

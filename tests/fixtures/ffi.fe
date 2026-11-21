@@ -1,0 +1,101 @@
+var ffi = import("ffi");
+var lib = "./ffi-fixture.dll";
+
+var text = import("text");
+var count = 0;
+def stopHere(locale, flags, data) {
+    count = count + 1;
+    return 0;
+}
+def negative(n) { return 0 - n; }
+def wrongReturn(n) { return "wrong type"; }
+def checkMemory() {
+    var S = ffi.Struct;
+    var buf = ffi.Buffer(16);
+    S.SetUint32(buf, 1, 4294967295);
+    if (S.GetUint32(buf, 1) != 4294967295) { return badUnaligned; }
+    if (get_type(S.SetUint32(buf, 13, 1)) != "Error") { return badBounds; }
+    if (get_type(S.SetUint32(buf, 1, -1)) != "Error") { return badSign; }
+    if (get_type(S.SetPointer(buf, 0, ffi.Ptr(buf))) != "Error") { return badCycle; }
+    var carrier = ffi.Buffer(8);
+    S.SetPointer(carrier, 0, ffi.Ptr(buf));
+    if (get_type(S.SetPointer(buf, 0, ffi.Ptr(carrier))) != "Error") { return indirectCycle; }
+    S.SetPointer(carrier, 0, ffi.Ptr(text.EncodeZ("雪😀", text.UTF16LE)));
+    var length = ffi.bind("kernel32.dll", "lstrlenW", ffi.Int32ByVal, ffi.PointerByVal);
+    var suffix = ffi.Ptr(text.EncodeZ("abcd", text.UTF16LE), 4);
+    if (length(suffix) != 2) { return badOffsetOwner; }
+    if (ffi.SamePtr(ffi.Ptr(buf), ffi.Ptr(buf, 0)) != true) { return badBase; }
+    if (ffi.SamePtr(ffi.Ptr(buf, 3), ffi.Ptr(buf, 3)) != true) { return badEqualOffsets; }
+    if (ffi.SamePtr(ffi.Ptr(buf, 15), ffi.Ptr(buf, 16))) { return badEnd; }
+    if (ffi.SamePtr(ffi.Ptr(buf), ffi.Ptr(carrier))) { return badDistinctBuffers; }
+    if (ffi.SamePtr(null, null) != true) { return badNull; }
+    if (ffi.SamePtr(null, suffix)) { return badNullAddress; }
+    if (get_type(ffi.SamePtr(buf, null)) != "Error") { return badPointerType; }
+    if (get_type(ffi.Ptr(buf, -1)) != "Error") { return badNegativeOffset; }
+    if (get_type(ffi.Ptr(buf, 17)) != "Error") { return badLargeOffset; }
+    if (get_type(ffi.Ptr(buf, 0.5)) != "Error") { return badFractionalOffset; }
+    if (get_type(ffi.Ptr(buf, "1")) != "Error") { return badOffsetType; }
+    var empty = ffi.Buffer(0);
+    if (ffi.SamePtr(ffi.Ptr(empty), ffi.Ptr(empty, 0)) != true) { return badEmptyBase; }
+    if (length(S.GetPointer(carrier, 0)) != 3) { return lostOwner; }
+    S.SetPointer(carrier, 0, null);
+    if (S.GetPointer(carrier, 0) != null) { return badClear; }
+    var z = text.EncodeZ("雪😀", text.UTF16LE);
+    if (text.DecodeZ(z, text.UTF16LE) != "雪😀") { return badUtf16; }
+    if (get_type(text.DecodeZ(text.Encode("abc", text.UTF8), text.UTF8)) != "Error") { return badTerminator; }
+    if (text.Decode(text.Encode("雪😀", text.UTF8), text.UTF8) != "雪😀") { return badUtf8; }
+    var bad = ffi.Buffer(2);
+    S.SetUint16(bad, 0, 55296);
+    if (get_type(text.Decode(bad, text.UTF16LE)) != "Error") { return badSurrogate; }
+    var enumerate = ffi.bind("kernel32.dll", "EnumSystemLocalesEx", ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByVal, ffi.IntPtrByVal, ffi.PointerByVal);
+    var callback = ffi.Callback(stopHere, ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByVal, ffi.IntPtrByVal);
+    if (enumerate(callback, 0, 0, null) == 0) { return badEnum; }
+    if (count != 1) { return badCallbackCount; }
+    if (callback.LastError != null) { return enumCallbackFailed; }
+    var invoke = ffi.bind(lib, "InvokeCallback", ffi.Int32ByVal, ffi.PointerByVal, ffi.Int32ByVal);
+    var cb = ffi.Callback(negative, ffi.Int32ByVal, ffi.Int32ByVal);
+    if (ffi.SamePtr(cb, ffi.Ptr(cb)) != true) { return badCallbackAddress; }
+    if (get_type(ffi.Ptr(cb, 0)) != "Error") { return badCallbackOffset; }
+    if (invoke(cb, 0) != -4) { return signedResult; }
+    if (invoke(cb, 1) != 0) { return foreignThreadEntered; }
+    if (get_type(cb.LastError) != "Error") { return missingThreadError; }
+    if (cb.LastError != null) { return staleError; }
+    cb = ffi.Callback(wrongReturn, ffi.Int32ByVal, ffi.Int32ByVal);
+    if (invoke(cb, 0) != 0) { return invalidResult; }
+    if (get_type(cb.LastError) != "Error") { return missingCallbackError; }
+}
+def main() {
+    var checked = checkMemory();
+    if (checked != null) { return checked; }
+    var pid = ffi.bind("kernel32.dll", "GetCurrentProcessId", ffi.UInt32ByVal);
+    if (get_type(pid()) != "number") { return badPid; }
+    var current = ffi.bind("kernel32.dll", "GetCurrentProcess", ffi.PointerByVal);
+    var exitCode = ffi.bind("kernel32.dll", "GetExitCodeProcess",
+        ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByRef);
+    var code = ffi.Ref(0);
+    if (exitCode(current(), code) != 1) { return badProcessHandle; }
+    if (code.Val != 259) { return badExitCode; }
+    var mixed = ffi.bind(lib, "Mixed", ffi.Float64ByVal, ffi.Int8ByVal,
+        ffi.Float32ByVal, ffi.Int16ByVal, ffi.Float64ByVal, ffi.UInt32ByVal);
+    if (mixed(-8, 0.5, -20, 1.25, 32) != 5.75) { return badMixed; }
+    if (get_type(mixed(128, 0, 0, 0, 0)) != "Error") { return badRange; }
+    var update = ffi.bind(lib, "Update", ffi.Int32ByVal, ffi.UInt32ByRef, ffi.UInt32ByRef);
+    var r = ffi.Ref(7);
+    if (update(r, r) != 10) { return badAlias; }
+    if (r.Val != 10) { return badWriteback; }
+    r.Val = 100;
+    if (update(r, r) != 103) { return badReuse; }
+    if (get_type(update(1, r)) != "Error") { return badRef; }
+    var p = ffi.Param(2);
+    var fill = ffi.bind(lib, "Fill", ffi.Void, p, p);
+    var a = array();
+    a.Add(byte(0));
+    if (get_type(fill(a, a)) != "Error") { return badLength; }
+    a.Add(byte(0));
+    if (fill(a, a) != null) { return badFill; }
+    if (a[0] != byte(123)) { return badFirstByte; }
+    if (a[1] != byte(255)) { return badSecondByte; }
+    var strings = ffi.bind(lib, "Strings", ffi.Int32ByVal, ffi.str.utf8, ffi.str.utf16);
+    if (strings("雪😀", "雪😀") != 1) { return badText; }
+    if (get_type(ffi.bind(lib, "Missing", ffi.Void)) != "Error") { return badSymbol; }
+}

@@ -108,3 +108,13 @@ endif
 TextNativeModule = shared_module('text.felib', 'text/TextModule.cpp',
   dependencies : FeatherDependency, name_prefix : '', name_suffix : NativeModuleSuffix,
   install : true, install_dir : get_option('bindir') / 'modules')
+if host_machine.system() == 'windows' and host_machine.cpu_family() == 'x86_64'
+  FfiDependency = dependency('libffi', static : true,
+    default_options : ['default_library=static', 'tests=false'], allow_fallback : true)
+  FfiNativeModule = shared_module('ffi.felib', 'ffi/Ffi.cpp',
+    name_prefix : '', name_suffix : NativeModuleSuffix,
+    dependencies : [FeatherDependency, FfiDependency],
+    install : true, install_dir : get_option('bindir') / 'modules')
+  install_data('ffi/THIRD-PARTY.txt', rename : 'ffi-licenses.txt',
+    install_dir : get_option('bindir') / 'modules')
+endif

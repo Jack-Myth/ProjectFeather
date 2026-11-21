@@ -11,6 +11,7 @@ public:
     using Function = std::function<Value(const std::vector<Value>&)>;
     NativeModuleBuilder(Vm& Machine, NativeModuleGuid Id, std::string Name);
     void AddFunction(std::string Name, Function Body);
+    void AddValue(std::string Name, Value Member);
     Value Build() const;
 private:
     class Namespace;

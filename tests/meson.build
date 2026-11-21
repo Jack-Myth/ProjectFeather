@@ -187,3 +187,14 @@ if AudioEnabled
     env : AudioTestEnv, workdir : meson.current_build_dir(),
     depends : [AudioNativeModule, StdioNativeModule, TimeNativeModule, DelegateModuleBytecode])
 endif
+
+if is_variable('FfiNativeModule')
+  FfiFixture = shared_library('ffi-fixture', 'FfiFixture.cpp', name_prefix : '', install : false)
+  FfiSource = files('fixtures/ffi.fe')
+  FfiBytecode = custom_target('ffi-bytecode', input : FfiSource, output : 'ffi.fbc', build_by_default : true,
+    command : [FeatherCompilerCli, '@INPUT@', '-o', '@OUTPUT@'])
+  test('ffi-source', FeatherCli, args : ['run', FfiSource],
+    workdir : meson.current_build_dir(), depends : [FfiFixture, FfiNativeModule, TextNativeModule])
+  test('ffi-bytecode', FeatherVmCli, args : [FfiBytecode],
+    workdir : meson.current_build_dir(), depends : [FfiFixture, FfiNativeModule, TextNativeModule])
+endif

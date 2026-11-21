@@ -54,4 +54,9 @@ void NativeModuleBuilder::AddFunction(std::string Name, Function Body) {
 
 Value NativeModuleBuilder::Build() const { return Value::FromObject(Module); }
 
+void NativeModuleBuilder::AddValue(std::string Name, Value Member) {
+    Module->SetGcVisibleMember(Name, Member);
+    Module->Members.emplace(std::move(Name), std::move(Member));
+}
+
 } // namespace Feather
