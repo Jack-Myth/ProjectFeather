@@ -525,7 +525,9 @@ private:
     Value Execute(ExecutionState& Execution);
     bool TryLoadLocalField(Frame& Current, Op Instruction, const Value& Receiver,
                            const std::vector<Value>& Constants);
-    bool TryStoreLocalField(Frame& Current);
+    bool TryStoreLocalMember(Frame& Current);
+    bool TryLocalIndex(Frame& Current, Op Instruction, const Value& Receiver,
+                       const std::vector<Value>& Constants);
     bool TryEnterSlotCall(ExecutionState& Execution, const Value*& Target);
     void ReachDebugSafePoint(ExecutionState& Execution);
     void ReachDebugError(ExecutionState& Execution, const Value& Error,

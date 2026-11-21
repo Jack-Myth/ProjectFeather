@@ -12,7 +12,9 @@ constexpr auto CallFromSlots = static_cast<Op>(0x80 | static_cast<unsigned>(Op::
 constexpr auto ReturnDestination = static_cast<Op>(0x80 | static_cast<unsigned>(Op::SetLocal));
 constexpr auto ReadLocalField = static_cast<Op>(0x80 | static_cast<unsigned>(Op::GetField));
 constexpr auto PrepareLocalField = static_cast<Op>(0x80 | static_cast<unsigned>(Op::Const));
-constexpr auto StoreLocalField = static_cast<Op>(0x80 | static_cast<unsigned>(Op::SetMember));
+constexpr auto ReadLocalIndex = static_cast<Op>(0x80 | static_cast<unsigned>(Op::GetMember));
+constexpr auto PrepareLocalIndex = static_cast<Op>(0x80 | static_cast<unsigned>(Op::NewObject));
+constexpr auto StoreLocalMember = static_cast<Op>(0x80 | static_cast<unsigned>(Op::SetMember));
 constexpr std::size_t JumpSize = 1 + sizeof(std::uint32_t);
 
 struct NumericStep {

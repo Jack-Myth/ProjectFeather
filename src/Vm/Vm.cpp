@@ -1116,19 +1116,65 @@ FEATHER_VM_NOINLINE bool Vm::TryLoadLocalField(Frame& Current, Op Instruction, c
     return true;
 }
 
-FEATHER_VM_NOINLINE bool Vm::TryStoreLocalField(Frame& Current) {
+FEATHER_VM_NOINLINE bool Vm::TryLocalIndex(Frame& Current, Op Instruction, const Value& Receiver,
+                                          const std::vector<Value>& Constants) {
+    if (DebugController || !Receiver.IsScriptObject() || Current.Stack.size() > MaxOperandStackSize - 2)
+        return false;
+    auto* Array = Receiver.AsScriptObject();
+    if (!Array->IsArray()) return false;
+    const auto& Code = Current.Function->GetBody().Code;
+    auto Pc = Current.Pc;
+    const auto KeyOp = static_cast<Op>(Code[Pc++]);
+    const auto Id = ReadU32(Code, Pc);
+    const auto& Source = KeyOp == Op::GetLocal ? Current.Locals[Id] : Constants[Id];
+    if (!Source.IsNumeric()) return false;
+    const auto Adjustment = static_cast<Op>(Code[Pc]);
+    Value Adjusted;
+    const Value* Key = &Source;
+    if (Adjustment == Op::SubConst || Adjustment == Op::AddConst) {
+        // Replay byte arithmetic through its normal promotion path.
+        if (Source.GetType() != ValueType::Number) return false;
+        ++Pc;
+        const auto Delta = Constants[ReadU32(Code, Pc)].AsNumber();
+        Adjusted = Value::Number(Adjustment == Op::SubConst ? Source.AsNumber() - Delta : Source.AsNumber() + Delta);
+        Key = &Adjusted;
+    }
+    if (Instruction == ReadLocalIndex) {
+        const auto Index = Array->GetArrayIndex(*Key);
+        if (!Index) return false;
+        const auto& Result = (*Array->Elements)[*Index];
+        if (Result.IsError()) return false;
+        Current.Stack.push_back(Result);
+        ++Pc; // GetMember
+    } else {
+        // Snapshot the key, but validate bounds at the store: the RHS can resize the array.
+        Current.Stack.push_back(Receiver);
+        Current.Stack.push_back(*Key);
+    }
+    Current.Pc = Pc;
+    return true;
+}
+
+FEATHER_VM_NOINLINE bool Vm::TryStoreLocalMember(Frame& Current) {
     auto& Stack = Current.Stack;
     const auto Base = Stack.size() - 3;
     const auto& Receiver = Stack[Base];
     const auto& Key = Stack[Base + 1];
     auto& Input = Stack.back();
-    if (DebugController || !Receiver.IsScriptObject() || Key.GetType() != ValueType::String || Input.IsError())
+    if (DebugController || !Receiver.IsScriptObject() || Input.IsError())
         return false;
     auto* Object = Receiver.AsScriptObject();
-    auto Found = Object->Members.find(std::string_view(Key.AsString()));
-    if (Found == Object->Members.end()) return false;
     // All three operands are validated VM stack values.
-    Found->second = Input;
+    if (Object->IsArray()) {
+        const auto Index = Object->GetArrayIndex(Key);
+        if (!Index) return false;
+        (*Object->Elements)[*Index] = Input;
+    } else {
+        if (Key.GetType() != ValueType::String) return false;
+        auto Found = Object->Members.find(std::string_view(Key.AsString()));
+        if (Found == Object->Members.end()) return false;
+        Found->second = Input;
+    }
     const auto& Code = Current.Function->GetBody().Code;
     if (Current.Pc < Code.size() && static_cast<Op>(Code[Current.Pc]) == Op::Pop) {
         ++Current.Pc;
@@ -1612,14 +1658,19 @@ Value Vm::Execute(ExecutionState& Execution) {
             break;
         }
         default:
+            if (Instruction == ReadLocalIndex || Instruction == PrepareLocalIndex) {
+                const auto& Receiver = Current.Locals[ReadU32(Code, Current.Pc)];
+                if (!TryLocalIndex(Current, Instruction, Receiver, FrameConstants)) Push(Receiver);
+                break;
+            }
             if (Instruction == ReadLocalField || Instruction == PrepareLocalField) {
                 const auto& Receiver = Current.Locals[ReadU32(Code, Current.Pc)];
                 if (!TryLoadLocalField(Current, Instruction, Receiver, FrameConstants))
                     Push(Receiver); // Replay GetLocal; the next instruction retains its original PC.
                 break;
             }
-            if (Instruction != StoreLocalField) throw std::logic_error("invalid opcode");
-            if (TryStoreLocalField(Current)) break;
+            if (Instruction != StoreLocalMember) throw std::logic_error("invalid opcode");
+            if (TryStoreLocalMember(Current)) break;
             [[fallthrough]];
         case Op::SetMember: {
             auto Input = Pop(); auto Key = Pop(); auto Target = Pop();

@@ -23,9 +23,9 @@ bool IsArithmetic(Op Instruction) {
     return Instruction == Op::MulConst || Instruction == Op::AddConst || Instruction == Op::SubConst;
 }
 
-// Starting after [receiver, literal key], follow the RHS to the store. Bound the
+// Starting after [receiver, key], follow the RHS to the store. Bound the
 // lookahead so nested expressions cannot make load-time optimization quadratic.
-std::optional<std::size_t> FieldStore(const Code& Bytes, std::size_t Pc) {
+std::optional<std::size_t> MemberStore(const Code& Bytes, std::size_t Pc) {
     int Values = 0;
     for (unsigned I = 0; I < 32 && Pc < Bytes.size(); ++I) {
         const auto OpCode = At(Bytes, Pc);
@@ -128,12 +128,28 @@ SlotPlan OptimizeFunction(FunctionPrototype& Body, const Module& Program) {
                 LoadStart = Pc = Next + LoadSize;
                 continue;
             }
-            if (At(Bytes, Next) == Op::Const && Program.Constants[Operand(Bytes, Next)].Type == Constant::Kind::String) {
-                auto Store = FieldStore(Bytes, Next + LoadSize);
+            const auto KeyOp = At(Bytes, Next);
+            if (KeyOp == Op::GetLocal || KeyOp == Op::Const) {
+                const bool Field = KeyOp == Op::Const &&
+                    Program.Constants[Operand(Bytes, Next)].Type == Constant::Kind::String;
+                const bool Index = KeyOp == Op::GetLocal ||
+                    Program.Constants[Operand(Bytes, Next)].Type == Constant::Kind::Number ||
+                    Program.Constants[Operand(Bytes, Next)].Type == Constant::Kind::Byte;
+                auto AfterKey = Next + LoadSize;
+                if (Index && AfterKey < Bytes.size() &&
+                    (At(Bytes, AfterKey) == Op::SubConst || At(Bytes, AfterKey) == Op::AddConst))
+                    AfterKey += LoadSize;
+                if (Index && AfterKey < Bytes.size() && At(Bytes, AfterKey) == Op::GetMember &&
+                    (Entry == Targets.end() || *Entry > AfterKey)) {
+                    Bytes[Pc] = static_cast<std::uint8_t>(ReadLocalIndex);
+                    LoadStart = Pc = AfterKey + 1;
+                    continue;
+                }
+                auto Store = (Field || Index) ? MemberStore(Bytes, AfterKey) : std::nullopt;
                 if (Store && (Entry == Targets.end() || *Entry > *Store)) {
-                    Bytes[Pc] = static_cast<std::uint8_t>(PrepareLocalField);
-                    Bytes[*Store] = static_cast<std::uint8_t>(StoreLocalField);
-                    LoadStart = Pc = Next + LoadSize;
+                    Bytes[Pc] = static_cast<std::uint8_t>(Field ? PrepareLocalField : PrepareLocalIndex);
+                    Bytes[*Store] = static_cast<std::uint8_t>(StoreLocalMember);
+                    LoadStart = Pc = AfterKey;
                     continue;
                 }
             }

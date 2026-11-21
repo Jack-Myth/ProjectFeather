@@ -139,6 +139,13 @@ void CheckSlotCall() {
     CheckBudget(7, true);
 }
 
+struct CountSteps final : VmDebugController {
+    int Count = 0;
+    void OnSafePoint(const VmDebugContext&) override { ++Count; }
+    void OnError(const VmDebugContext&, const Value&, DebugErrorOrigin) override {}
+    void OnExecutionFinished(bool) override {}
+};
+
 void CheckLocalFields() {
     auto Program = Compile(R"(
         def bump(p) { p.x = p.x + 1; return p.x; }
@@ -165,16 +172,62 @@ void CheckLocalFields() {
     Check(Result.AsNumber() == 42 && Left->GetRaw(Key)->AsNumber() == 42,
           "assignment must retain its original receiver while evaluating the RHS");
 
-    struct Steps final : VmDebugController {
-        int Count = 0;
-        void OnSafePoint(const VmDebugContext&) override { ++Count; }
-        void OnError(const VmDebugContext&, const Value&, DebugErrorOrigin) override {}
-        void OnExecutionFinished(bool) override {}
-    };
-    auto Debug = std::make_shared<Steps>();
+    auto Debug = std::make_shared<CountSteps>();
     Machine.SetDebugController(Debug);
     Check(Machine.Run(Bump, {Value::FromScript(Left)}).AsNumber() == 43 && Debug->Count == 10,
           "debugger must observe every original instruction in a local field update");
+}
+
+void CheckLocalIndices() {
+    auto Program = Compile(R"(
+        def update(a,i) { a[i] = a[i-1]; return a[i]; }
+        def read(a,i) { return a[i]; }
+        def write(a,i,v) { return a[i+1] = v; }
+        def grow(a,i) { return a[i] = a.Add(9); }
+        def shrink(a,i) { return a[i] = a.RemoveAt(i); }
+        def rebind(a,i) { return a[i] = (i = 1); }
+    )");
+    const auto Update = Program.Functions.at("update");
+    for (std::size_t Limit : {4u, 5u}) {
+        Vm Machine(Program.Program, 100, Limit);
+        auto* Array = Machine.CreateArray();
+        Array->AppendArray(Value::Number(42));
+        Array->AppendArray(Value{});
+        auto Run = [&] { return Machine.Run(Update, {Value::FromScript(Array), Value::Number(1)}); };
+        if (Limit == 4) BudgetExceeded(Run, "array update skipped a dispatch charge");
+        else Check(Run().AsNumber() == 42, "array update exceeded its fused budget");
+    }
+    Vm Machine(Program.Program);
+    auto* Array = Machine.CreateArray();
+    auto Run = [&](const char* Name, Value Index) {
+        return Machine.Run(Program.Functions.at(Name), {Value::FromScript(Array), Index});
+    };
+    Check(Run("grow", Value::Byte(0)).AsBool() && Array->GetArrayElements()[0].AsBool(),
+          "store must allow a slot created by the RHS");
+    Check(Run("shrink", Value::Number(0)).IsError() && Array->GetArrayLength() == 0,
+          "store must check array bounds after the RHS");
+    Array->AppendArray(Value{});
+    Array->AppendArray(Value{});
+    Check(Run("rebind", Value::Number(0)).AsNumber() == 1 &&
+          Array->GetArrayElements()[0].AsNumber() == 1, "store lost its original index");
+    auto Write = [&](ScriptObject* Target, Value Index, Value Input) {
+        return Machine.Run(Program.Functions.at("write"), {Value::FromScript(Target), Index, Input});
+    };
+    Check(Write(Array, Value::Number(0), Value::Number(9)).AsNumber() == 9 &&
+          Run("read", Value::Byte(1)).AsNumber() == 9, "offset store and byte index read");
+    auto* Object = Machine.CreateScriptObject();
+    Check(Write(Object, Value::Number(6), Value::Number(23)).AsNumber() == 23 &&
+          Machine.Run(Program.Functions.at("read"), {Value::FromScript(Object), Value::Number(7)}).AsNumber() == 23,
+          "non-array index operations must replay the generic path");
+    for (auto Key : {Value::Number(-1), Value::Number(0.5), Value::Number(2),
+                     Value::Number(std::numeric_limits<double>::quiet_NaN()), Value::Bool(false)}) {
+        auto Error = Run("read", Key);
+        Check(Error.IsError() && Machine.GetErrorLocation(Error).has_value(), "invalid array read lost its origin");
+    }
+    auto Debug = std::make_shared<CountSteps>();
+    Machine.SetDebugController(Debug);
+    Check(Run("update", Value::Number(1)).AsNumber() == 1 && Debug->Count == 12,
+          "debugger must observe every instruction of an array update");
 }
 
 } // namespace
@@ -187,6 +240,7 @@ int main() {
         CheckBinaryAssignment();
         CheckSlotCall();
         CheckLocalFields();
+        CheckLocalIndices();
         auto Loop = Compile("def spin() { while (true) { } } def answer() { return 42; }");
         Vm Limited(Loop.Program, std::numeric_limits<std::size_t>::max(), 40);
         Check(!Loop.Initialize(Limited).IsError(), "initializer should fit its budget");
