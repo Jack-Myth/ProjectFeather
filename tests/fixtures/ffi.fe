@@ -64,6 +64,9 @@ def checkMemory() {
     if (invoke(cb, 0) != 0) { return invalidResult; }
     if (get_type(cb.LastError) != "Error") { return missingCallbackError; }
 }
+var nestedBinding = null;
+var nestedCallback = null;
+def repeatNative(n) { return nestedBinding(nestedCallback, n); }
 def main() {
     var checked = checkMemory();
     if (checked != null) { return checked; }
@@ -79,6 +82,16 @@ def main() {
         ffi.Float32ByVal, ffi.Int16ByVal, ffi.Float64ByVal, ffi.UInt32ByVal);
     if (mixed(-8, 0.5, -20, 1.25, 32) != 5.75) { return badMixed; }
     if (get_type(mixed(128, 0, 0, 0, 0)) != "Error") { return badRange; }
+    var sumNine = ffi.bind(lib, "SumNine", ffi.Int32ByVal, ffi.Int32ByVal,
+        ffi.Int32ByVal, ffi.Int32ByVal, ffi.Int32ByVal, ffi.Int32ByVal,
+        ffi.Int32ByVal, ffi.Int32ByVal, ffi.Int32ByVal, ffi.Int32ByVal);
+    if (sumNine(1, 2, 3, 4, 5, 6, 7, 8, 9) != 45) { return badHeapFallback; }
+    nestedBinding = ffi.bind(lib, "InvokeNested", ffi.Int32ByVal, ffi.PointerByVal, ffi.Int32ByVal);
+    nestedCallback = ffi.Callback(repeatNative, ffi.Int32ByVal, ffi.Int32ByVal);
+    if (nestedBinding(nestedCallback, 4) != 60) { return badNestedBinding; }
+    if (nestedCallback.LastError != null) { return badNestedCallback; }
+    nestedCallback = null;
+    nestedBinding = null;
     var update = ffi.bind(lib, "Update", ffi.Int32ByVal, ffi.UInt32ByRef, ffi.UInt32ByRef);
     var r = ffi.Ref(7);
     if (update(r, r) != 10) { return badAlias; }

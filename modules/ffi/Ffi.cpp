@@ -1,6 +1,7 @@
 #include <Feather/NativeModule.hpp>
 #include <ffi.h>
 #include <Feather/ByteBuffer.hpp>
+#include <array>
 #include <atomic>
 #include <unordered_set>
 
@@ -345,6 +346,8 @@ public:
                 Require(S.Base != Kind::Void, "void parameter in FFI signature");
                 Params.push_back(S);
                 Types.push_back(S.Abi());
+                NeedsAuxiliary |= S.ByRef || S.Base == Kind::Buffer ||
+                                  S.Base == Kind::Utf8 || S.Base == Kind::Utf16;
             }
         }
         Require(ffi_prep_cif(&Cif, FFI_DEFAULT_ABI, static_cast<unsigned>(Types.size()),
@@ -367,6 +370,20 @@ public:
 private:
     Value Invoke(const std::vector<Value>& Args) {
         Require(Args.size() == Params.size(), "wrong argument count");
+        constexpr size_t InlineArgs = 8;
+        if (!NeedsAuxiliary && !Args.empty() && Args.size() <= InlineArgs) {
+            // Invocation-local: a native callback may reenter this same Bound.
+            std::array<Scalar, InlineArgs> Slots;
+            std::array<void*, InlineArgs> Addresses;
+            for (size_t I = 0; I < Args.size(); ++I) {
+                if (Args[I].IsError()) return Args[I];
+                WriteScalar(Slots[I], Params[I].Base, Args[I]);
+                Addresses[I] = Slots[I].Data;
+            }
+            Scalar Output;
+            ffi_call(&Cif, FFI_FN(Entry), Output.Data, Addresses.data());
+            return ReadScalar(Output, Result.Base, Objects, Library);
+        }
         std::vector<Slot> Slots(Args.size());
         std::vector<void*> Addresses(Args.size());
         std::unordered_map<Ref*, size_t> Refs;
@@ -426,6 +443,7 @@ private:
     std::shared_ptr<void> Library;
     FARPROC Entry{};
     Spec Result{Kind::Void};
+    bool NeedsAuxiliary = false;
     std::vector<Spec> Params;
     std::vector<ffi_type*> Types;
     ffi_cif Cif{};

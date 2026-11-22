@@ -350,17 +350,27 @@ public:
         if (Lifetime.expired() || !Machine->OwnsScript(Receiver))
             return Value::Error("array receiver is no longer available");
 
-        const auto& Input = Arguments.front();
+        return Invoke(*Receiver, Action, Arguments.front());
+    }
+
+    static std::optional<Operation> Find(std::string_view Name) {
+        if (Name == "Add" || Name == "add") return Operation::Add;
+        if (Name == "remove") return Operation::Remove;
+        if (Name == "RemoveAt" || Name == "remove_at") return Operation::RemoveAt;
+        return std::nullopt;
+    }
+
+    static Value Invoke(ScriptObject& Receiver, Operation Action, const Value& Input) {
         if (Action == Operation::Add) {
-            Receiver->AppendArray(Input);
+            Receiver.AppendArray(Input);
             return Value::Bool(true);
         }
         if (Action == Operation::RemoveAt) {
-            auto Index = Receiver->GetArrayIndex(Input);
-            if (!Index || !Receiver->RemoveArrayAt(*Index)) return Value::Error("invalid array index");
+            auto Index = Receiver.GetArrayIndex(Input);
+            if (!Index || !Receiver.RemoveArrayAt(*Index)) return Value::Error("invalid array index");
             return Value::Bool(true);
         }
-        auto& Elements = *Receiver->Elements;
+        auto& Elements = *Receiver.Elements;
         auto Found = std::find_if(Elements.begin(), Elements.end(),
             [&](const Value& Entry) { return Equal(Entry, Input); });
         if (Found == Elements.end()) return Value::Bool(false);
@@ -376,13 +386,10 @@ private:
 };
 
 std::optional<Value> ScriptObject::GetArrayMethod(std::string_view Name) const {
-    ArrayMethod::Operation Action;
-    if (Name == "Add" || Name == "add") Action = ArrayMethod::Operation::Add;
-    else if (Name == "remove") Action = ArrayMethod::Operation::Remove;
-    else if (Name == "RemoveAt" || Name == "remove_at") Action = ArrayMethod::Operation::RemoveAt;
-    else return std::nullopt;
+    auto Action = ArrayMethod::Find(Name);
+    if (!Action) return std::nullopt;
     return Value::FromObject(std::make_shared<ArrayMethod>(
-        *const_cast<ScriptObject*>(this), Action));
+        *const_cast<ScriptObject*>(this), *Action));
 }
 
 Value ModuleNamespace::GetMember(const Value& Key) {
@@ -1021,11 +1028,14 @@ std::optional<SourceLocation> Vm::GetErrorLocation(const Value& Input) const {
 #endif
 
 FEATHER_VM_NOINLINE bool Vm::TryLoadLocalField(Frame& Current, Op Instruction, const Value& Receiver,
-                                              const std::vector<Value>& Constants) {
+                                              const std::vector<Value>& Constants, std::size_t& FaultPc) {
     if (DebugController || !Receiver.IsScriptObject() || Current.Stack.size() > MaxOperandStackSize - 2)
         return false;
     auto* Object = Receiver.AsScriptObject();
-    if (Object->IsArray()) return false;
+    if (Object->IsArray()) {
+        if (Instruction != ReadLocalField) return false;
+        return TryCallArrayMethod(Current, *Object, Constants, FaultPc);
+    }
     auto Resume = Current.Pc + 1;
     const auto& Key = Constants[ReadU32(Current.Function->GetBody().Code, Resume)];
     if (Instruction == PrepareLocalField) {
@@ -1038,6 +1048,56 @@ FEATHER_VM_NOINLINE bool Vm::TryLoadLocalField(Frame& Current, Op Instruction, c
         Current.Stack.push_back(Found->second);
     }
     Current.Pc = Resume;
+    return true;
+}
+
+bool Vm::TryCallArrayMethod(Frame& Current, ScriptObject& Receiver,
+                            const std::vector<Value>& Constants, std::size_t& FaultPc) {
+    // Only consume a read that immediately becomes a call. An extracted method
+    // keeps its identity and owns a GC-visible receiver through the normal path.
+    constexpr std::size_t SkippedInstructions = 3; // field, argument, call
+    const auto& Function = *Current.Function;
+    const auto& Code = Function.GetBody().Code;
+    const auto FieldPc = Current.Pc + 1; // GetField operand
+    constexpr std::size_t OperandBytes = 4;
+    constexpr std::size_t CallBytes = 3;
+    const auto ArgumentPc = FieldPc + OperandBytes;
+    const auto CallPc = ArgumentPc + 1 + OperandBytes;
+    if (CallPc > Code.size() || Code.size() - CallPc < CallBytes)
+        return false;
+    const auto ArgumentOp = static_cast<Op>(Code[ArgumentPc]);
+    if ((ArgumentOp != Op::GetLocal && ArgumentOp != Op::Const) ||
+        static_cast<Op>(Code[CallPc]) != Op::Call || Code[CallPc + 1] != 1 || Code[CallPc + 2] != 0)
+        return false;
+    if (CollectionPending || InstructionsRemaining < SkippedInstructions)
+        return false;
+    auto Pc = FieldPc;
+    const auto& Key = Constants[ReadU32(Code, Pc)];
+    auto Operation = ScriptObject::ArrayMethod::Find(Key.AsString());
+    if (!Operation || !OwnsScript(&Receiver)) return false;
+    Pc = ArgumentPc + 1;
+    const Value* Argument;
+    if (ArgumentOp == Op::GetLocal) {
+        Argument = &Current.Locals[ReadU32(Code, Pc)];
+        if (Argument->GetType() == ValueType::Object &&
+            !(Argument->IsScriptObject() && OwnsScript(Argument->AsScriptObject())))
+            return false; // Keep ownership and Error diagnostics on the generic path.
+    } else if (ArgumentOp == Op::Const) {
+        const auto Index = ReadU32(Code, Pc);
+        const auto Kind = Function.GetOwner()->Constants[Index].Type;
+        if (Kind != Constant::Kind::Number && Kind != Constant::Kind::Byte && Kind != Constant::Kind::String)
+            return false; // Buffer constants, for example, have allocation side effects.
+        Argument = &Constants[Index];
+    } else {
+        return false;
+    }
+    if (*Operation == ScriptObject::ArrayMethod::Operation::RemoveAt && !Receiver.GetArrayIndex(*Argument))
+        return false; // Generic path attaches the Error to the original call site.
+    FaultPc = Pc;
+    InstructionsRemaining -= SkippedInstructions;
+    Current.Pc = Pc + 3;
+    ActiveRunGuard NativeGuard(ActiveNativeCalls);
+    Current.Stack.push_back(ScriptObject::ArrayMethod::Invoke(Receiver, *Operation, *Argument));
     return true;
 }
 
@@ -1584,7 +1644,7 @@ Value Vm::Execute(ExecutionState& Execution) {
             }
             if (Instruction == ReadLocalField || Instruction == PrepareLocalField) {
                 const auto& Receiver = Current.Locals[ReadU32(Code, Current.Pc)];
-                if (!TryLoadLocalField(Current, Instruction, Receiver, FrameConstants))
+                if (!TryLoadLocalField(Current, Instruction, Receiver, FrameConstants, FaultPc))
                     Push(Receiver); // Replay GetLocal; the next instruction retains its original PC.
                 break;
             }

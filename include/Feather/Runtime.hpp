@@ -521,7 +521,9 @@ private:
                                   const std::vector<Value>& Arguments);
     Value Execute(ExecutionState& Execution);
     bool TryLoadLocalField(Frame& Current, Op Instruction, const Value& Receiver,
-                           const std::vector<Value>& Constants);
+                           const std::vector<Value>& Constants, std::size_t& FaultPc);
+    bool TryCallArrayMethod(Frame& Current, ScriptObject& Receiver, const std::vector<Value>& Constants,
+                            std::size_t& FaultPc);
     bool TryStoreLocalMember(Frame& Current);
     bool TryLocalIndex(Frame& Current, Op Instruction, const Value& Receiver,
                        const std::vector<Value>& Constants);

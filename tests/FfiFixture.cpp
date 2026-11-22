@@ -28,3 +28,12 @@ EXPORT int32_t InvokeCallback(int32_t (*Callback)(int32_t), int32_t Worker) {
     } else Result = Callback(4);
     return Result;
 }
+
+EXPORT int32_t SumNine(int32_t A, int32_t B, int32_t C, int32_t D, int32_t E,
+                       int32_t F, int32_t G, int32_t H, int32_t I) {
+    return A + B + C + D + E + F + G + H + I;
+}
+
+EXPORT int32_t InvokeNested(int32_t (*Callback)(int32_t), int32_t Depth) {
+    return Depth == 0 ? 50 : Callback(Depth - 1) + Depth;
+}

@@ -4,8 +4,6 @@
 #include <algorithm>
 #include <bit>
 #include <limits>
-#include <queue>
-#include <unordered_map>
 #include <utility>
 
 namespace Feather {
@@ -42,8 +40,14 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
             Invalid("default must be a primitive constant");
     }
     std::vector<Instruction> Instructions;
-    std::unordered_map<std::size_t, std::size_t> Indices;
     const auto& Code = Function.Code;
+    // PCs are byte offsets bounded by MaxCode; a dense table avoids one
+    // allocation per instruction and still distinguishes operand bytes.
+    constexpr std::uint32_t NotInstruction = UINT32_MAX;
+    std::vector<std::uint32_t> Indices(Code.size(), NotInstruction);
+    auto IsInstruction = [&](std::size_t Pc) {
+        return Pc < Indices.size() && Indices[Pc] != NotInstruction;
+    };
     for (std::size_t Pc = 0; Pc < Code.size();) {
         Instruction Current{static_cast<Op>(Code[Pc]), Pc, Pc + 1};
         if (Program.InstructionVersion == 2 && Current.Code > Op::ToByte)
@@ -92,7 +96,7 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
                 Program.Constants[Current.Operand].Type != Constant::Kind::String)
                 Invalid("global name must be a string constant");
         }
-        Indices[Pc] = Instructions.size();
+        Indices[Pc] = static_cast<std::uint32_t>(Instructions.size());
         Instructions.push_back(Current);
         Pc = Current.End;
     }
@@ -117,19 +121,19 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
             Invalid("invalid or duplicate debug local variable slot");
         SeenLocalSlots[Variable.Slot] = true;
         if (Variable.StartPc >= Variable.EndPc || Variable.EndPc > Code.size() ||
-            !Indices.contains(Variable.StartPc) ||
-            (Variable.EndPc != Code.size() && !Indices.contains(Variable.EndPc)))
+            !IsInstruction(Variable.StartPc) ||
+            (Variable.EndPc != Code.size() && !IsInstruction(Variable.EndPc)))
             Invalid("invalid debug local variable range");
         if (Variable.Slot < Function.ParameterCount &&
             (Variable.StartPc != 0 || Variable.EndPc != Code.size()))
             Invalid("debug parameter range must cover the function");
     }
     std::vector<int> Heights(Instructions.size(), -1);
-    std::queue<std::size_t> Pending;
+    std::vector<std::uint32_t> Pending;
     Heights[0] = 0;
-    Pending.push(0);
-    while (!Pending.empty()) {
-        auto Index = Pending.front(); Pending.pop();
+    Pending.push_back(0);
+    for (std::size_t Cursor = 0; Cursor < Pending.size(); ++Cursor) {
+        auto Index = Pending[Cursor];
         auto& Current = Instructions[Index];
         int Height = Heights[Index];
         if ((Current.Code == Op::AddToLocal || Current.Code == Op::AddConstToLocal) && Height != 0)
@@ -139,11 +143,10 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
         int NextHeight = Height - Current.Consumes + Current.Produces;
         if (NextHeight > static_cast<int>(MaxStack)) Invalid("bytecode stack limit exceeded");
         auto Enqueue = [&](std::size_t Target) {
-            auto Found = Indices.find(Target);
-            if (Found == Indices.end()) Invalid("jump or fallthrough is not an instruction");
-            auto Next = Found->second;
+            if (!IsInstruction(Target)) Invalid("jump or fallthrough is not an instruction");
+            auto Next = Indices[Target];
             if (Heights[Next] >= 0 && Heights[Next] != NextHeight) Invalid("stack height mismatch");
-            if (Heights[Next] < 0) { Heights[Next] = NextHeight; Pending.push(Next); }
+            if (Heights[Next] < 0) { Heights[Next] = NextHeight; Pending.push_back(Next); }
         };
         if (Current.Code == Op::Return) continue;
         if (Current.Code == Op::Jump || Current.Code == Op::JumpIf) {
@@ -159,7 +162,7 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
         if (Current.Code != Op::Jump && Current.Code != Op::JumpIf) continue;
         auto Target = static_cast<std::int64_t>(Current.End) + std::bit_cast<std::int32_t>(Current.Operand);
         if (Target < 0 || Target >= static_cast<std::int64_t>(Code.size()) ||
-            !Indices.contains(static_cast<std::size_t>(Target))) Invalid("invalid jump target");
+            !IsInstruction(static_cast<std::size_t>(Target))) Invalid("invalid jump target");
     }
 }
 } // namespace

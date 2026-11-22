@@ -139,7 +139,37 @@ int main() {
         Check(ArgsVm.Call(Argc, {}).IsError(), "argument lookup without a script frame");
 
         auto ArrayProgram = Compile(R"(
+            var selected = array();
+            def switch_receiver() { selected = array(); return 23; }
+            def choose(a) { return a + 1; }
             def exercise() {
+                var original = selected;
+                selected.Add(switch_receiver());
+                if (original[0] != 23) { return false; }
+                if (selected.Length != 0) { return false; }
+                var other = object();
+                other.Add = choose;
+                if (other.Add(4) != 5) { return false; }
+                var target = array();
+                var alias = target;
+                var append = target.Add;
+                if (append == target.Add) { return false; }
+                target = array();
+                append(7);
+                if (alias[0] != 7) { return false; }
+                if (target.Length != 0) { return false; }
+                var item = object(); item.marker = 19;
+                if (target.Add(item) != true) { return false; }
+                if (target[0].marker != 19) { return false; }
+                if (target.remove(item) != true) { return false; }
+                if (target.remove(item) != false) { return false; }
+                if (target.add(11) != true) { return false; }
+                if (target.remove_at(0) != true) { return false; }
+                if (get_type(target.remove_at(0)) != "Error") { return false; }
+                if (get_type(target.Add()) != "Error") { return false; }
+                if (get_type(target.Add(1, 2)) != "Error") { return false; }
+                if (target.Add(3 + 4) != true) { return false; }
+                if (target[0] != 7) { return false; }
                 var native = update_array();
                 if (native.Length != 2) { return false; }
                 if (native.RemoveAt(0) != true) { return false; }
