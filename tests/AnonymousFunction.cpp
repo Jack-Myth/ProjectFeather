@@ -63,11 +63,11 @@ int main() {
             def main() {
                 var kept = array();
                 var value = object(); value.answer = 42;
-                kept.add(value);
+                kept.Add(value);
                 value = null;
                 var other = array();
-                other.add(42);
-                var remove = other.remove;
+                other.Add(42);
+                var remove = other.Remove;
                 other = null;
                 var code = @{ var i = 0; while(i < 200) { var temp = object(); i = i + 1; } };
                 code();
@@ -87,16 +87,16 @@ int main() {
                 a = null;
                 var i = 0;
                 while (i < 200) { var temp = object(); i = i + 1; }
-                if (vm.get_func_argv(0).answer != 42) { return false; }
+                if (vm.GetArgument(0).answer != 42) { return false; }
                 var contextValue = @{
                     var i = 0;
                     while (i < 200) { var temp = object(); i = i + 1; }
-                    if (vm.get_func_argc() != 1) { return false; }
-                    return vm.get_func_argv(0);
+                    if (vm.GetArgumentCount() != 1) { return false; }
+                    return vm.GetArgument(0);
                 }(42);
                 if (contextValue != 42) { return false; }
-                if (vm.get_func_argv(0).answer != 42) { return false; }
-                return vm.get_func_argv(1).answer;
+                if (vm.GetArgument(0).answer != 42) { return false; }
+                return vm.GetArgument(1).answer;
             }
             def descend(depth) {
                 if (depth == 0) { return check(make(), make()); }

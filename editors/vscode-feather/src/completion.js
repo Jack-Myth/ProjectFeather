@@ -16,6 +16,8 @@ const KEYWORDS = [
 ];
 
 const BUILTINS = [
+  ['array', 'Create an empty array'],
+  ['get_type', 'Get the type of a value'],
   ['byte', 'Convert an integer in [0, 255] to an unsigned byte'],
   ['import', 'Import a host or Feather module'],
   ['object', 'Create a new object']
@@ -24,7 +26,7 @@ const BUILTINS = [
 const SNIPPETS = [
   ['lambda', '@(${1:arg}) {\n\t${0}\n}', 'Anonymous function'],
   ['lambda0', '@{\n\t${0}\n}', 'Zero-parameter anonymous function'],
-  ['def', 'def ${1:name}(${2}) {\n\t${0}\n}', 'Function declaration'],
+  ['def', 'def ${1:FunctionName}(${2}) {\n\t${0}\n}', 'Function declaration'],
   ['if', 'if (${1:condition}) {\n\t${0}\n}', 'If statement'],
   ['while', 'while (${1:condition}) {\n\t${0}\n}', 'While loop'],
   ['var', 'var ${1:name} = ${0:null};', 'Variable declaration'],

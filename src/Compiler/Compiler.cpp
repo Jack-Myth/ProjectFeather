@@ -381,10 +381,10 @@ private:
     NodePtr ParseQuickLine(const Token& At) {
         const char* Function = nullptr;
         switch (At.Kind) {
-        case TokenKind::QuickHash: Function = "__QuickOperatorHash"; break;
-        case TokenKind::QuickDollar: Function = "__QuickOperatorDollar"; break;
-        case TokenKind::QuickAmpersand: Function = "__QuickOperatorAmpersand"; break;
-        case TokenKind::QuickRightAngle: Function = "__QuickOperatorRightAngleBucket"; break;
+        case TokenKind::QuickHash: Function = "__quick_operator_hash"; break;
+        case TokenKind::QuickDollar: Function = "__quick_operator_dollar"; break;
+        case TokenKind::QuickAmpersand: Function = "__quick_operator_ampersand"; break;
+        case TokenKind::QuickRightAngle: Function = "__quick_operator_right_angle_bucket"; break;
         default: Fail(At, "internal invalid quick operator");
         }
         auto Statement = Make(NodeKind::Expression, At);
@@ -863,10 +863,10 @@ CompiledProgram Compile(std::string_view Source) {
     std::vector<std::string> QuickHandlers;
     for (const auto& Token : Tokens) {
         switch (Token.Kind) {
-        case TokenKind::QuickHash: QuickHandlers.emplace_back("__QuickOperatorHash"); break;
-        case TokenKind::QuickDollar: QuickHandlers.emplace_back("__QuickOperatorDollar"); break;
-        case TokenKind::QuickAmpersand: QuickHandlers.emplace_back("__QuickOperatorAmpersand"); break;
-        case TokenKind::QuickRightAngle: QuickHandlers.emplace_back("__QuickOperatorRightAngleBucket"); break;
+        case TokenKind::QuickHash: QuickHandlers.emplace_back("__quick_operator_hash"); break;
+        case TokenKind::QuickDollar: QuickHandlers.emplace_back("__quick_operator_dollar"); break;
+        case TokenKind::QuickAmpersand: QuickHandlers.emplace_back("__quick_operator_ampersand"); break;
+        case TokenKind::QuickRightAngle: QuickHandlers.emplace_back("__quick_operator_right_angle_bucket"); break;
         default: break;
         }
     }

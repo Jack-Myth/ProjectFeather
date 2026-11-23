@@ -108,7 +108,7 @@
         },
         {
           "name": "support.function.feather",
-          "match": "\\b(?:import|object|byte)\\b(?=\\s*\\()"
+          "match": "\\b(?:import|object|byte|array|get_type)\\b(?=\\s*\\()"
         }
       ]
     },

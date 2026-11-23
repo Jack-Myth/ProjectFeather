@@ -124,7 +124,7 @@ int main() {
         Check(Quick.UsesQuickOperators, "quick operator requirement was lost");
         Vm QuickMachine(Quick.Program);
         std::string Captured;
-        QuickMachine.RegisterNativeFunction("__QuickOperatorRightAngleBucket",
+        QuickMachine.RegisterNativeFunction("__quick_operator_right_angle_bucket",
             std::make_shared<CaptureCall>(Captured));
         (void)Quick.Initialize(QuickMachine);
         Check(Captured == "hello", "loaded quick operator did not reach host function");

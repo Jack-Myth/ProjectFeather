@@ -178,7 +178,7 @@ Value ModuleLoader::LoadFile(const std::filesystem::path& Candidate, bool Initia
     }
     if (Program.UsesQuickOperators)
         throw std::runtime_error("module " + Id +
-                                 ": quick operators require host-provided __QuickOperator functions");
+                                 ": quick operators require host-provided __quick_operator_ functions");
     Program.LoadInto(Machine, Id);
     auto [Found, Inserted] = Cache.emplace(Id, std::move(Program));
     (void)Inserted;

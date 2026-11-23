@@ -129,7 +129,7 @@
 - 宿主可用 `CreateMetaObject()` 创建普通 ScriptObject，并用
       `SetMetaObject(target, meta)` 替换普通 ScriptObject 的关联对象；
       target 与 meta 均须为 ScriptObject，RootMetaObject 不可作为 target。
-      脚本通过 `vm.set_metaobject` 替换普通对象的元对象。
+      脚本通过 `vm.SetMetaObject` 替换普通对象的元对象。
 - 原始查找区分“key 不存在”与“存在但值为 null/Error”。`__index`
       的返回值（包括 Error）就是读取结果，不再重试查找。缺失元函数和不可调用
       元函数分别生成新的 Error；NaN key 在查找元函数前生成 Error。
@@ -142,7 +142,7 @@
       GC 设计时补充，不在此阶段展开
 - **取成员对不存在的 key**：ScriptObject 先尝试 `__index`；无有效
       元函数时返回 Error（不是 null）。NativeObject 由其实现决定。
-- `vm.raw_set` 直接写入脚本对象，复用 C++ 的 `ScriptObject::SetRaw`。调试器对脚本对象的属性编辑也使用该原始写入路径。
+- `vm.RawSet` 直接写入脚本对象，复用 C++ 的 `ScriptObject::SetRaw`。调试器对脚本对象的属性编辑也使用该原始写入路径。
 - NativeObject 的 `set_member` 返回一个 Value：成功必须返回传入的写入值，
       语言层失败返回新的 Error。未知 key 的 `get_member` 默认返回新的 Error。
 

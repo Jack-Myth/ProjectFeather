@@ -3,25 +3,25 @@ var lib = "./ffi-fixture.dll";
 
 var text = import("text");
 var count = 0;
-def stopHere(locale, flags, data) {
+def StopHere(locale, flags, data) {
     count = count + 1;
     return 0;
 }
-def negative(n) { return 0 - n; }
-def wrongReturn(n) { return "wrong type"; }
-def checkMemory() {
+def Negative(n) { return 0 - n; }
+def WrongReturn(n) { return "wrong type"; }
+def CheckMemory() {
     var S = ffi.Struct;
     var buf = ffi.Buffer(16);
-    S.SetUint32(buf, 1, 4294967295);
-    if (S.GetUint32(buf, 1) != 4294967295) { return badUnaligned; }
-    if (get_type(S.SetUint32(buf, 13, 1)) != "Error") { return badBounds; }
-    if (get_type(S.SetUint32(buf, 1, -1)) != "Error") { return badSign; }
+    S.SetUInt32(buf, 1, 4294967295);
+    if (S.GetUInt32(buf, 1) != 4294967295) { return badUnaligned; }
+    if (get_type(S.SetUInt32(buf, 13, 1)) != "Error") { return badBounds; }
+    if (get_type(S.SetUInt32(buf, 1, -1)) != "Error") { return badSign; }
     if (get_type(S.SetPointer(buf, 0, ffi.Ptr(buf))) != "Error") { return badCycle; }
     var carrier = ffi.Buffer(8);
     S.SetPointer(carrier, 0, ffi.Ptr(buf));
     if (get_type(S.SetPointer(buf, 0, ffi.Ptr(carrier))) != "Error") { return indirectCycle; }
     S.SetPointer(carrier, 0, ffi.Ptr(text.EncodeZ("雪😀", text.UTF16LE)));
-    var length = ffi.bind("kernel32.dll", "lstrlenW", ffi.Int32ByVal, ffi.PointerByVal);
+    var length = ffi.Bind("kernel32.dll", "lstrlenW", ffi.Int32ByVal, ffi.PointerByVal);
     var suffix = ffi.Ptr(text.EncodeZ("abcd", text.UTF16LE), 4);
     if (length(suffix) != 2) { return badOffsetOwner; }
     if (ffi.SamePtr(ffi.Ptr(buf), ffi.Ptr(buf, 0)) != true) { return badBase; }
@@ -45,54 +45,54 @@ def checkMemory() {
     if (get_type(text.DecodeZ(text.Encode("abc", text.UTF8), text.UTF8)) != "Error") { return badTerminator; }
     if (text.Decode(text.Encode("雪😀", text.UTF8), text.UTF8) != "雪😀") { return badUtf8; }
     var bad = ffi.Buffer(2);
-    S.SetUint16(bad, 0, 55296);
+    S.SetUInt16(bad, 0, 55296);
     if (get_type(text.Decode(bad, text.UTF16LE)) != "Error") { return badSurrogate; }
-    var enumerate = ffi.bind("kernel32.dll", "EnumSystemLocalesEx", ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByVal, ffi.IntPtrByVal, ffi.PointerByVal);
-    var callback = ffi.Callback(stopHere, ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByVal, ffi.IntPtrByVal);
+    var enumerate = ffi.Bind("kernel32.dll", "EnumSystemLocalesEx", ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByVal, ffi.IntPtrByVal, ffi.PointerByVal);
+    var callback = ffi.Callback(StopHere, ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByVal, ffi.IntPtrByVal);
     if (enumerate(callback, 0, 0, null) == 0) { return badEnum; }
     if (count != 1) { return badCallbackCount; }
     if (callback.LastError != null) { return enumCallbackFailed; }
-    var invoke = ffi.bind(lib, "InvokeCallback", ffi.Int32ByVal, ffi.PointerByVal, ffi.Int32ByVal);
-    var cb = ffi.Callback(negative, ffi.Int32ByVal, ffi.Int32ByVal);
+    var invoke = ffi.Bind(lib, "InvokeCallback", ffi.Int32ByVal, ffi.PointerByVal, ffi.Int32ByVal);
+    var cb = ffi.Callback(Negative, ffi.Int32ByVal, ffi.Int32ByVal);
     if (ffi.SamePtr(cb, ffi.Ptr(cb)) != true) { return badCallbackAddress; }
     if (get_type(ffi.Ptr(cb, 0)) != "Error") { return badCallbackOffset; }
     if (invoke(cb, 0) != -4) { return signedResult; }
     if (invoke(cb, 1) != 0) { return foreignThreadEntered; }
     if (get_type(cb.LastError) != "Error") { return missingThreadError; }
     if (cb.LastError != null) { return staleError; }
-    cb = ffi.Callback(wrongReturn, ffi.Int32ByVal, ffi.Int32ByVal);
+    cb = ffi.Callback(WrongReturn, ffi.Int32ByVal, ffi.Int32ByVal);
     if (invoke(cb, 0) != 0) { return invalidResult; }
     if (get_type(cb.LastError) != "Error") { return missingCallbackError; }
 }
 var nestedBinding = null;
 var nestedCallback = null;
-def repeatNative(n) { return nestedBinding(nestedCallback, n); }
+def RepeatNative(n) { return nestedBinding(nestedCallback, n); }
 def main() {
-    var checked = checkMemory();
+    var checked = CheckMemory();
     if (checked != null) { return checked; }
-    var pid = ffi.bind("kernel32.dll", "GetCurrentProcessId", ffi.UInt32ByVal);
+    var pid = ffi.Bind("kernel32.dll", "GetCurrentProcessId", ffi.UInt32ByVal);
     if (get_type(pid()) != "number") { return badPid; }
-    var current = ffi.bind("kernel32.dll", "GetCurrentProcess", ffi.PointerByVal);
-    var exitCode = ffi.bind("kernel32.dll", "GetExitCodeProcess",
+    var current = ffi.Bind("kernel32.dll", "GetCurrentProcess", ffi.PointerByVal);
+    var exitCode = ffi.Bind("kernel32.dll", "GetExitCodeProcess",
         ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByRef);
     var code = ffi.Ref(0);
     if (exitCode(current(), code) != 1) { return badProcessHandle; }
     if (code.Val != 259) { return badExitCode; }
-    var mixed = ffi.bind(lib, "Mixed", ffi.Float64ByVal, ffi.Int8ByVal,
+    var mixed = ffi.Bind(lib, "Mixed", ffi.Float64ByVal, ffi.Int8ByVal,
         ffi.Float32ByVal, ffi.Int16ByVal, ffi.Float64ByVal, ffi.UInt32ByVal);
     if (mixed(-8, 0.5, -20, 1.25, 32) != 5.75) { return badMixed; }
     if (get_type(mixed(128, 0, 0, 0, 0)) != "Error") { return badRange; }
-    var sumNine = ffi.bind(lib, "SumNine", ffi.Int32ByVal, ffi.Int32ByVal,
+    var sumNine = ffi.Bind(lib, "SumNine", ffi.Int32ByVal, ffi.Int32ByVal,
         ffi.Int32ByVal, ffi.Int32ByVal, ffi.Int32ByVal, ffi.Int32ByVal,
         ffi.Int32ByVal, ffi.Int32ByVal, ffi.Int32ByVal, ffi.Int32ByVal);
     if (sumNine(1, 2, 3, 4, 5, 6, 7, 8, 9) != 45) { return badHeapFallback; }
-    nestedBinding = ffi.bind(lib, "InvokeNested", ffi.Int32ByVal, ffi.PointerByVal, ffi.Int32ByVal);
-    nestedCallback = ffi.Callback(repeatNative, ffi.Int32ByVal, ffi.Int32ByVal);
+    nestedBinding = ffi.Bind(lib, "InvokeNested", ffi.Int32ByVal, ffi.PointerByVal, ffi.Int32ByVal);
+    nestedCallback = ffi.Callback(RepeatNative, ffi.Int32ByVal, ffi.Int32ByVal);
     if (nestedBinding(nestedCallback, 4) != 60) { return badNestedBinding; }
     if (nestedCallback.LastError != null) { return badNestedCallback; }
     nestedCallback = null;
     nestedBinding = null;
-    var update = ffi.bind(lib, "Update", ffi.Int32ByVal, ffi.UInt32ByRef, ffi.UInt32ByRef);
+    var update = ffi.Bind(lib, "Update", ffi.Int32ByVal, ffi.UInt32ByRef, ffi.UInt32ByRef);
     var r = ffi.Ref(7);
     if (update(r, r) != 10) { return badAlias; }
     if (r.Val != 10) { return badWriteback; }
@@ -100,7 +100,7 @@ def main() {
     if (update(r, r) != 103) { return badReuse; }
     if (get_type(update(1, r)) != "Error") { return badRef; }
     var p = ffi.Param(2);
-    var fill = ffi.bind(lib, "Fill", ffi.Void, p, p);
+    var fill = ffi.Bind(lib, "Fill", ffi.Void, p, p);
     var a = array();
     a.Add(byte(0));
     if (get_type(fill(a, a)) != "Error") { return badLength; }
@@ -108,7 +108,7 @@ def main() {
     if (fill(a, a) != null) { return badFill; }
     if (a[0] != byte(123)) { return badFirstByte; }
     if (a[1] != byte(255)) { return badSecondByte; }
-    var strings = ffi.bind(lib, "Strings", ffi.Int32ByVal, ffi.str.utf8, ffi.str.utf16);
+    var strings = ffi.Bind(lib, "Strings", ffi.Int32ByVal, ffi.Str.UTF8, ffi.Str.UTF16);
     if (strings("雪😀", "雪😀") != 1) { return badText; }
-    if (get_type(ffi.bind(lib, "Missing", ffi.Void)) != "Error") { return badSymbol; }
+    if (get_type(ffi.Bind(lib, "Missing", ffi.Void)) != "Error") { return badSymbol; }
 }

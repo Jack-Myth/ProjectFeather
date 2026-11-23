@@ -3,21 +3,21 @@ var delegate = import("delegate");
 var time = import("time");
 var stdio = import("stdio");
 
-def record(self, event, sound) {
+def Record(self, event, sound) {
     if (sound != self.Sound) { return byte(-1); }
     self.Events = self.Events + event;
 }
 
-def exercise(path) {
+def Exercise(path) {
     var sound = audio.Open(path);
     if (get_type(sound) == "Error") { return sound; }
     var receiver = object();
     receiver.Sound = sound;
     receiver.Events = "";
-    sound.onPlay = delegate.Create(record, receiver, "P");
-    sound.OnPaused = delegate.Create(record, receiver, "A");
-    sound.OnStoped = delegate.Create(record, receiver, "S");
-    sound.OnFinished = delegate.Create(record, receiver, "F");
+    sound.onPlay = delegate.Create(Record, receiver, "P");
+    sound.OnPaused = delegate.Create(Record, receiver, "A");
+    sound.OnStoped = delegate.Create(Record, receiver, "S");
+    sound.OnFinished = delegate.Create(Record, receiver, "F");
     if (get_type(sound.OnPlay = 42) != "Error") { return byte(-1); }
     if (audio.Play(sound) != true) { return byte(-1); }
     if (audio.Pause(sound) != true) { return byte(-1); }
@@ -38,7 +38,7 @@ def exercise(path) {
 }
 
 def main() {
-    var result = exercise("audio-test.wav");
+    var result = Exercise("audio-test.wav");
     if (get_type(result) == "Error") { return result; }
-    return exercise("audio-test.opus");
+    return Exercise("audio-test.opus");
 }

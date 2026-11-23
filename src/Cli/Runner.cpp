@@ -32,7 +32,7 @@ void CheckResult(const Value& Result, const char* Stage, const Vm& Machine) {
 int RunProgram(const CompiledProgram& Program, const std::filesystem::path& EntryPath,
                ModuleFileKind Kind, std::shared_ptr<VmDebugController> DebugController) {
     if (Program.UsesQuickOperators)
-        throw std::runtime_error("quick operators require host-provided __QuickOperator functions");
+        throw std::runtime_error("quick operators require host-provided __quick_operator_ functions");
     constexpr std::size_t MaxCliScriptObjects = 100'000;
     // constexpr std::size_t MaxCliInstructions = 10'000'000;
     NativeModules Native(std::cin, std::cout);

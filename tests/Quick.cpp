@@ -58,7 +58,7 @@ int main() {
             #接受|拒绝
             $https:\//example.com
             &  保留前导空格  
-            __QuickOperatorHash("explicit");
+            __quick_operator_hash("explicit");
             def later() {
                 >inside \//not-comment // ignored
             }
@@ -68,23 +68,23 @@ int main() {
         )");
         Vm Machine(Compiled.Program);
         std::vector<Event> Events;
-        for (const auto* Name : {"__QuickOperatorRightAngleBucket", "__QuickOperatorHash",
-                                 "__QuickOperatorDollar", "__QuickOperatorAmpersand"})
+        for (const auto* Name : {"__quick_operator_right_angle_bucket", "__quick_operator_hash",
+                                 "__quick_operator_dollar", "__quick_operator_ampersand"})
             Machine.RegisterNativeFunction(Name,
                 std::make_shared<CaptureCall>(Name, Events));
         Machine.RegisterNativeFunction("hostEcho", std::make_shared<EchoCall>());
         Machine.SetGlobal("hostObject", Value::FromObject(std::make_shared<HostData>()));
         Compiled.Initialize(Machine);
         Check(Events == std::vector<Event>{
-            {"__QuickOperatorRightAngleBucket", "你好，我是XXX"},
-            {"__QuickOperatorHash", "接受|拒绝"},
-            {"__QuickOperatorDollar", "https://example.com"},
-            {"__QuickOperatorAmpersand", "  保留前导空格"},
-            {"__QuickOperatorHash", "explicit"}},
+            {"__quick_operator_right_angle_bucket", "你好，我是XXX"},
+            {"__quick_operator_hash", "接受|拒绝"},
+            {"__quick_operator_dollar", "https://example.com"},
+            {"__quick_operator_ampersand", "  保留前导空格"},
+            {"__quick_operator_hash", "explicit"}},
             "top-level quick operator mapping or text");
         Machine.Run(Compiled.Functions.at("later"));
         Check(Events.size() == 6 &&
-              Events.back() == Event{"__QuickOperatorRightAngleBucket", "inside //not-comment"},
+              Events.back() == Event{"__quick_operator_right_angle_bucket", "inside //not-comment"},
               "block quick operator or escaped comment");
         Check(Machine.Run(Compiled.Functions.at("literal")).AsString() == "//",
               "normal string comments changed");
@@ -95,10 +95,10 @@ int main() {
 
         auto EndOfFile = Compile("#tail   ");
         Vm Another(EndOfFile.Program);
-        Another.RegisterNativeFunction("__QuickOperatorHash",
-            std::make_shared<CaptureCall>("__QuickOperatorHash", Events));
+        Another.RegisterNativeFunction("__quick_operator_hash",
+            std::make_shared<CaptureCall>("__quick_operator_hash", Events));
         EndOfFile.Initialize(Another);
-        Check(Events.back() == Event{"__QuickOperatorHash", "tail"}, "EOF quick line");
+        Check(Events.back() == Event{"__quick_operator_hash", "tail"}, "EOF quick line");
 
         try { (void)Compile("var x = 1; #not-at-line-start\n"); }
         catch (const std::runtime_error&) {

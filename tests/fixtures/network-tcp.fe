@@ -3,11 +3,11 @@ var time = import("time");
 var pending = null;
 var done = false;
 var failure = null;
-def echo(event) {
+def Echo(event) {
     if (event.Kind == "data") { pending = event.Data; }
     else { done = true; failure = connectionEnded; }
 }
-def received(event) {
+def Received(event) {
     if (event.Kind == "data") {
         if (event.Data.Get(0) != 255) { failure = byte(-1); }
     }
@@ -27,8 +27,8 @@ def main() {
     }
     network.Poll(listener, true, false, 1000);
     var server = network.Accept(listener);
-    network.OnReceive(server, echo);
-    network.OnReceive(client, received);
+    network.OnReceive(server, Echo);
+    network.OnReceive(client, Received);
     network.Send(client, byte(255));
     var attempts = 0;
     while (done == false) {

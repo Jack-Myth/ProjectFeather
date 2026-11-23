@@ -3,22 +3,22 @@ var jobs = import("./threads-jobs.fe");
 var messages = import("./threads-messages.fe");
 var phase = 0;
 
-def root_init(context) {
+def RootInit(context) {
     if (phase != context) { return byte(-1); }
     phase = 8;
 }
 
-def fail_init(context) {
+def FailInit(context) {
     return byte(-1);
 }
 
-def after_main() {
+def AfterMain() {
     if (phase != 1) { return byte(-1); }
     if (messages.replies != 2) { return byte(-1); }
     import("stdio").Console.PrintLine("thread messages dispatched");
 }
 
-def check_pump() {
+def CheckPump() {
     if (get_type(threads.Pump(1)) != "Error") { return byte(-1); }
     phase = phase + 1;
 }
@@ -27,9 +27,9 @@ def main() {
     var root = threads.Current();
     if (threads.Pump(1) != 0) { return byte(-1); }
     if (get_type(threads.Pump(-1)) != "Error") { return byte(-1); }
-    threads.Post(root, check_pump);
-    threads.Post(root, fail_init, null);
-    threads.Post(root, check_pump);
+    threads.Post(root, CheckPump);
+    threads.Post(root, FailInit, null);
+    threads.Post(root, CheckPump);
     if (threads.Pump(0) != 0) { return byte(-1); }
     if (threads.Pump(1) != 1) { return byte(-1); }
     if (phase != 1) { return byte(-1); }
@@ -39,7 +39,7 @@ def main() {
     phase = 0;
     var first = threads.Start(jobs.Init, 41);
     var second = threads.Start(jobs.Init, 41);
-    var own = threads.Start(root_init, 0);
+    var own = threads.Start(RootInit, 0);
     if (get_type(first) != "number") { return byte(-1); }
     if (first == second) { return byte(-1); }
     if (threads.Post(first, messages.CheckThreadId, first) != true) { return byte(-1); }
@@ -61,7 +61,7 @@ def main() {
     var failing = threads.Start(jobs.Init, 41);
     if (threads.Post(failing, messages.Step, 3) != true) { return byte(-1); }
     if (get_type(threads.Join(failing)) != "Error") { return byte(-1); }
-    if (get_type(threads.Join(threads.Start(fail_init, null))) != "Error") { return byte(-1); }
+    if (get_type(threads.Join(threads.Start(FailInit, null))) != "Error") { return byte(-1); }
     if (get_type(threads.Post(first, messages.Step, args)) != "Error") { return byte(-1); }
     if (phase != 0) { return byte(-1); }
     if (messages.replies != 0) { return byte(-1); }
@@ -72,6 +72,6 @@ def main() {
     if (mainId != threads.Current()) { return byte(-1); }
     if (mainId < 1) { return byte(-1); }
     if (get_type(threads.Join(mainId)) != "Error") { return byte(-1); }
-    if (threads.Post(threads.Current(), after_main) != true) { return byte(-1); }
+    if (threads.Post(threads.Current(), AfterMain) != true) { return byte(-1); }
     phase = 1;
 }

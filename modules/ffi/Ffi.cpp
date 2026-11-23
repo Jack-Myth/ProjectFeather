@@ -72,8 +72,8 @@ struct Strings final : Host {
         Utf8(F.Make<Descriptor>(Spec{Kind::Utf8})), Utf16(F.Make<Descriptor>(Spec{Kind::Utf16})) {}
     Value GetMember(const Value& Key) override {
         if (Key.GetType() == ValueType::String) {
-            if (Key.AsString() == "utf8") return Utf8;
-            if (Key.AsString() == "utf16") return Utf16;
+            if (Key.AsString() == "UTF8") return Utf8;
+            if (Key.AsString() == "UTF16") return Utf16;
         }
         return Value::Error("unknown ffi.str member");
     }
@@ -330,13 +330,13 @@ class Bound final : public Host {
 public:
     Bound(NativeObjectType& Type, Factory& F, const std::vector<Value>& Args)
         : Host(Type), Objects(F) {
-        Require(Args.size() >= 3, "ffi.bind expects library, symbol and return type");
+        Require(Args.size() >= 3, "ffi.Bind expects library, symbol and return type");
         const auto Path = std::filesystem::path(Wide(TextOf(Args[0])));
         Name = TextOf(Args[1]);
         Require(!Path.empty() && !Name.empty(), "empty FFI library or symbol name");
         for (size_t I = 2; I < Args.size(); ++I) {
             auto* D = As<Descriptor>(Args[I]);
-            Require(D, "ffi.bind expected an FFI type descriptor");
+            Require(D, "ffi.Bind expected an FFI type descriptor");
             auto S = D->Signature;
             if (I == 2) {
                 Require(!S.ByRef && S.Base != Kind::Utf8 && S.Base != Kind::Utf16 &&
@@ -494,17 +494,15 @@ Value Create(const NativeModuleContext& Context) {
     StructId.Bytes.back() ^= 1;
     NativeModuleBuilder Struct(Context.Machine, StructId, "ffi.Struct");
     for (auto [Name, K] : Scalars) {
-        std::string FieldName(Name);
-        if (FieldName.starts_with("UInt")) FieldName[1] = 'i';
         for (bool Write : {false, true})
-            Struct.AddFunction((Write ? "Set" : "Get") + FieldName, [&F, K, Write](const auto& A) {
+            Struct.AddFunction(std::string(Write ? "Set" : "Get") + Name, [&F, K, Write](const auto& A) {
                 return Field(F, K, Write, A);
             });
     }
     Module.AddValue("Struct", Struct.Build());
     Module.AddValue("Void", F.Make<Descriptor>(Spec{Kind::Void}));
-    Module.AddValue("str", F.Make<Strings>(F));
-    Module.AddFunction("bind", [&F](const auto& Args) {
+    Module.AddValue("Str", F.Make<Strings>(F));
+    Module.AddFunction("Bind", [&F](const auto& Args) {
         for (const auto& Arg : Args) if (Arg.IsError()) return Arg;
         return F.Make<Bound>(F, Args);
     });

@@ -10,7 +10,7 @@ test('completion model contains Feather keywords, builtins, and snippets', () =>
   assert.ok(model.keywords.some(item => item.name === 'break'));
   assert.ok(model.keywords.some(item => item.name === 'continue'));
   assert.ok(model.builtins.some(item => item.name === 'import'));
-  assert.ok(model.snippets.some(item => item.name === 'def' && item.insertText.includes('${1:name}')));
+  assert.ok(model.snippets.some(item => item.name === 'def' && item.insertText.includes('${1:FunctionName}')));
 });
 
 test('document symbols include variables, functions, and parameters once', () => {

@@ -2,6 +2,10 @@
 
 本规范定义 Feather 源码语法。运行时值、错误、真值、调用和对象语义以 [SPEC-runtime-design.md](SPEC-runtime-design.md) 为准。源码为 UTF-8；关键字、运算符及标识符限 ASCII，字符串内容允许 UTF-8。语法区分大小写。
 
+## 命名约定
+
+语言自带的全局操作使用小写和下划线，例如 `array()`、`get_type(value)`。入口 `main`、元对象钩子 `__call`、`__index`、`__set_index` 和快捷行处理函数 `__quick_operator_*` 使用语言指定的拼写。模块名小写。库函数、脚本具名函数及公开方法使用 PascalCase，例如 `vm.GetArgumentCount()`、`items.RemoveAt(0)`。局部变量和参数使用 lowerCamelCase，公开属性沿用 PascalCase。普通标识符的命名是风格约定。
+
 ## 词法
 
 - 空格、制表符和换行分隔 token；词法器扫描时跳过 `//` 至行尾的注释，不存在先对整个源码删注释的独立预处理步骤。
@@ -17,12 +21,12 @@
 
 | 前缀 | 展开后的调用 |
 |---|---|
-| `#` | `__QuickOperatorHash(text);` |
-| `$` | `__QuickOperatorDollar(text);` |
-| `&` | `__QuickOperatorAmpersand(text);` |
-| `>` | `__QuickOperatorRightAngleBucket(text);` |
+| `#` | `__quick_operator_hash(text);` |
+| `$` | `__quick_operator_dollar(text);` |
+| `&` | `__quick_operator_ampersand(text);` |
+| `>` | `__quick_operator_right_angle_bucket(text);` |
 
-快捷行是调用语句，复用普通 `GetGlobal`、`Call`、`Pop` 指令；四个目标都是普通全局可调用值，编译器不创建或访问 `Env`。因此返回值（包括 Error 值）按普通表达式语句规则丢弃。编译结果用 `UsesQuickOperators` 标记该程序缺少同名顶层函数，需要宿主提供对应的 `__QuickOperator…` 函数，磁盘格式保留此标记。前缀只在物理行首的第一个非空白字符位置有效；同一行已有其他 token 后再写前缀是语法错误。
+快捷行是调用语句，复用普通 `GetGlobal`、`Call`、`Pop` 指令；四个目标都是普通全局可调用值，编译器不创建或访问 `Env`。因此返回值（包括 Error 值）按普通表达式语句规则丢弃。编译结果用 `UsesQuickOperators` 标记该程序缺少同名顶层函数，需要宿主提供对应的 `__quick_operator_…` 函数，磁盘格式保留此标记。前缀只在物理行首的第一个非空白字符位置有效；同一行已有其他 token 后再写前缀是语法错误。
 
 ## 文法
 
@@ -107,9 +111,9 @@ var result = answer();
 
 `array()` returns an empty, zero-indexed array. `a[i] = value` replaces an existing element and returns the assigned value. Both reads and writes outside the array bounds return Error. Named members, including `Length`, are read-only; unknown members return Error. Indices must be finite non-negative integers. Arrays can hold any Feather value and `get_type(a)` returns `"Array"`. Ordinary `object()` values use numeric keys as properties.
 
-- `a.Add(value)` appends an element and returns `true`. `a.add(value)` is an alias.
-- `a.remove(value)` removes the first element that compares equal under `==`. It returns `true` when it removes an element and `false` otherwise.
-- `a.RemoveAt(index)` removes the indexed element and returns `true`. An invalid index returns Error. `a.remove_at(index)` is an alias.
+- `a.Add(value)` appends an element and returns `true`.
+- `a.Remove(value)` removes the first element that compares equal under `==`. It returns `true` when it removes an element and `false` otherwise.
+- `a.RemoveAt(index)` removes the indexed element and returns `true`. An invalid index returns Error.
 
 Removing an element shifts the later elements left and updates `Length`.
 

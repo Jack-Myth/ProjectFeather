@@ -1,24 +1,24 @@
 var vm = import("vm");
 
-def dispatch(binding) {
+def Dispatch(binding) {
     var args = array();
     args.Add(binding.Receiver);
     if (binding.Context != null) { args.Add(binding.Context); }
     var index = 1;
-    while (index < vm.get_func_argc()) {
-        args.Add(vm.get_func_argv(index));
+    while (index < vm.GetArgumentCount()) {
+        args.Add(vm.GetArgument(index));
         index = index + 1;
     }
-    return vm.invoke_function(binding.Function, args);
+    return vm.Invoke(binding.Function, args);
 }
 
 var meta = object();
-meta.__call = dispatch;
+meta.__call = Dispatch;
 
 export def Create(fn, self, context = null) {
     var binding = object();
     binding.Function = fn;
     binding.Receiver = self;
     binding.Context = context;
-    return vm.set_metaobject(binding, meta);
+    return vm.SetMetaObject(binding, meta);
 }

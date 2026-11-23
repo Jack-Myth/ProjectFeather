@@ -13,7 +13,7 @@ def main() {
     if (text.After("a.b", ".") != "b") { return 1 + "native text after"; }
     if (get_type(text.Missing) != "Error") { return 1 + "unknown native member"; }
     if (math != mathAgain) { return 1 + "module cache"; }
-    if (math.sum(7) != 13) { return 1 + "relative module"; }
+    if (math.Sum(7) != 13) { return 1 + "relative module"; }
     if (util.answer != 6) { return 1 + "module export"; }
     if (helper.Value() != 42) { return 1 + "bare module search"; }
     if (get_type(import("math")) != "Error") { return 1 + "bare import used entry directory"; }

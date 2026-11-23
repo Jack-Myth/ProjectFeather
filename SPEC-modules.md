@@ -33,42 +33,42 @@ void RegisterModuleImport(Vm& Machine, std::string_view ModuleId,
 
 ```feather
 var vm = import("vm");
-var paths = vm.get_module_paths();
-paths.add("./game_modules");
-vm.set_module_paths(paths);
+var paths = vm.GetModulePaths();
+paths.Add("./game_modules");
+vm.SetModulePaths(paths);
 ```
 
-`vm.get_module_paths()` 返回当前 VM 路径列表的副本。`vm.set_module_paths(paths)` 验证完整列表后替换搜索路径，成功返回 `true`，无效参数返回 Error。`vm.set_module_paths(array())` 可清空搜索路径。相对目录从进程当前工作目录解释。
+`vm.GetModulePaths()` 返回当前 VM 路径列表的副本。`vm.SetModulePaths(paths)` 验证完整列表后替换搜索路径，成功返回 `true`，无效参数返回 Error。`vm.SetModulePaths(array())` 可清空搜索路径。相对目录从进程当前工作目录解释。
 
 CLI 按列表顺序搜索裸名 Native 模块，再按同样顺序搜索 Feather 文件模块。相对文件导入继续按调用方文件所在目录解析。已导入的 Native 模块仍按裸名缓存。嵌入宿主可通过 `Vm::GetModulePaths()` 获取同一列表并用于自己的导入回调。
 
 ### 当前函数的实参
 
-`vm.get_func_argc()` 返回当前 Feather 调用帧的实参数量。用 `vm.get_func_argv(index)` 按零基索引读取调用时的值。多传的实参和显式传入的 `null` 都计入。默认值只填入命名形参。重新给形参赋值时，原实参仍可通过 `get_func_argv` 读取。
+`vm.GetArgumentCount()` 返回当前 Feather 调用帧的实参数量。用 `vm.GetArgument(index)` 按零基索引读取调用时的值。多传的实参和显式传入的 `null` 都计入。默认值只填入命名形参。重新给形参赋值时，原实参仍可通过 `GetArgument` 读取。
 
 索引必须是范围内的整数，接受 number 和 byte。参数错误、索引越界或宿主在没有活动脚本帧时调用，均返回 Error。嵌套函数读取自己的实参。通过 `__call` 等元方法调用时，VM 注入的接收对象也是实参。匿名函数按普通函数规则接收实参。
 
 ### 用数组传递实参
 
-`vm.invoke_function(fn, args)` 读取 `array()` 的元素，按索引顺序作为实参调用 `fn`，并返回调用结果。空数组对应零个实参。它接受 Feather 函数、Native 函数及具有 `__call` 的对象。调用沿用普通的默认形参、实参读取和 Error 规则。目标不可调用或第二个参数不是数组时，返回 Error。
+`vm.Invoke(fn, args)` 读取 `array()` 的元素，按索引顺序作为实参调用 `fn`，并返回调用结果。空数组对应零个实参。它接受 Feather 函数、Native 函数及具有 `__call` 的对象。调用沿用普通的默认形参、实参读取和 Error 规则。目标不可调用或第二个参数不是数组时，返回 Error。
 
 ```feather
 var vm = import("vm");
 
-def forward(fn) {
+def Forward(fn) {
     var args = array();
     var index = 1;
-    while (index < vm.get_func_argc()) {
-        args.Add(vm.get_func_argv(index));
+    while (index < vm.GetArgumentCount()) {
+        args.Add(vm.GetArgument(index));
         index = index + 1;
     }
-    return vm.invoke_function(fn, args);
+    return vm.Invoke(fn, args);
 }
 ```
 
-`vm.set_metaobject(object, meta)` 为普通脚本对象设置元对象并返回该对象。元对象可定义 `__call`、缺失字段读取钩子 `__index` 和缺失字段写入钩子 `__set_index(self, key, value)`。赋值表达式返回写入钩子的结果。
+`vm.SetMetaObject(object, meta)` 为普通脚本对象设置元对象并返回该对象。元对象可定义 `__call`、缺失字段读取钩子 `__index` 和缺失字段写入钩子 `__set_index(self, key, value)`。赋值表达式返回写入钩子的结果。
 
-`vm.raw_set(object, key, value)` 直接写入普通脚本对象的成员或数组的已有元素，返回写入值或 Error。写入钩子可用它保存字段，避免再次调用自身。Native 对象通过各自的 `SetMember` 接口写入。
+`vm.RawSet(object, key, value)` 直接写入普通脚本对象的成员或数组的已有元素，返回写入值或 Error。写入钩子可用它保存字段，避免再次调用自身。Native 对象通过各自的 `SetMember` 接口写入。
 
 ## delegate
 
@@ -76,12 +76,12 @@ def forward(fn) {
 
 ```feather
 var delegate = import("delegate");
-def report(self, context, sound) {
+def Report(self, context, sound) {
     return self.Name + context;
 }
 var owner = object();
 owner.Name = "player";
-var listener = delegate.Create(report, owner, ": finished");
+var listener = delegate.Create(Report, owner, ": finished");
 ```
 
 ## 文件模块
@@ -359,14 +359,14 @@ var delegate = import("delegate");
 var time = import("time");
 var stdio = import("stdio");
 
-def finished(self, sound) {
+def Finished(self, sound) {
     stdio.Console.PrintLine(self);
 }
 
 def main() {
     var sound = audio.Open("music.opus");
     if (get_type(sound) == "Error") { return sound; }
-    sound.OnFinished = delegate.Create(finished, "播放结束");
+    sound.OnFinished = delegate.Create(Finished, "播放结束");
     var result = audio.Play(sound);
     if (get_type(result) == "Error") { return result; }
     time.Sleep(sound.Duration + 0.2);
@@ -453,14 +453,14 @@ render.SetViewport(context,
 
 ## ffi（Windows x64）
 
-`import("ffi")` 加载外部函数绑定模块。调用 `ffi.bind(库名, 导出名, 返回描述符, 参数描述符...)` 时解析导出并准备固定参数签名。成功时返回可调用对象，失败时返回 Feather Error。裸 DLL 名使用 Windows 默认安全搜索目录；带目录的相对路径按进程工作目录解析。绑定持有 DLL 句柄。
+`import("ffi")` 加载外部函数绑定模块。调用 `ffi.Bind(库名, 导出名, 返回描述符, 参数描述符...)` 时解析导出并准备固定参数签名。成功时返回可调用对象，失败时返回 Feather Error。裸 DLL 名使用 Windows 默认安全搜索目录；带目录的相对路径按进程工作目录解析。绑定持有 DLL 句柄。
 
 ```feather
 var ffi = import("ffi");
-var len = ffi.bind("kernel32.dll", "lstrlenW", ffi.Int32ByVal, ffi.str.utf16);
-var getExitCode = ffi.bind("kernel32.dll", "GetExitCodeProcess",
+var len = ffi.Bind("kernel32.dll", "lstrlenW", ffi.Int32ByVal, ffi.Str.UTF16);
+var getExitCode = ffi.Bind("kernel32.dll", "GetExitCodeProcess",
     ffi.Int32ByVal, ffi.PointerByVal, ffi.UInt32ByRef);
-var current = ffi.bind("kernel32.dll", "GetCurrentProcess", ffi.PointerByVal);
+var current = ffi.Bind("kernel32.dll", "GetCurrentProcess", ffi.PointerByVal);
 
 def main() {
     var count = len("雪😀"); // 3 个 UTF-16 码元
@@ -471,7 +471,7 @@ def main() {
 
 - 标量名称为 `Int8`、`UInt8`、`Int16`、`UInt16`、`Int32`、`UInt32`、`Float32`、`Float64`、`Pointer`，各有 `ByVal` 和 `ByRef` 后缀。返回位置接受 ByVal 类型或 `ffi.Void`。整数输入检查范围和小数部分，UInt8 读回为 Feather byte。指针接受 null 或 FFI 返回的不透明指针对象。
 - ByRef 参数接受 `ffi.Ref(initial)`，调用前后通过 `Val` 读写。一个调用中同类型的重复引用共享地址，冲突类型返回 Error。
-- `ffi.str.utf8` 和 `ffi.str.utf16` 接受字符串或 null，分别传入只读、以零结尾的 UTF-8 或 UTF-16 数据。带内嵌 NUL 的字符串返回 Error。
+- `ffi.Str.UTF8` 和 `ffi.Str.UTF16` 接受字符串或 null，分别传入只读、以零结尾的 UTF-8 或 UTF-16 数据。带内嵌 NUL 的字符串返回 Error。
 - `ffi.Param(n)` 接受恰有 n 个 byte 元素的 Feather array，按指针传递。原生端的修改在返回时写回原数组。同一数组重复传参时共享地址。字段布局、填充和编码由脚本包装函数处理。
 - 引用、字符串、数组的参数地址仅供本次同步调用使用。绑定必须与真实导出原型匹配。首版支持 Windows x64 默认 C ABI 的固定签名，结构体可按指针传入。
 
@@ -483,7 +483,7 @@ def main() {
 
 `ffi.SamePtr(a, b)` 比较两个原生地址，返回布尔值。两侧均可传入 FFI 指针、回调或 null，其他类型返回 Error。
 
-`ffi.Struct.SetUint32(buf, byteOffset, value)` 等按本机字节序写入，返回 null；`GetUint32(buf, byteOffset)` 读取。类型后缀为 Int8、Uint8、Int16、Uint16、Int32、Uint32、Float32、Float64、IntPtr、Pointer。支持未对齐字段，参数、数值范围和访问越界错误返回 Error。只有 ffi.Buffer 可写。IntPtr 来回转换的整数限于 ±(2^53−1)，完整的地址和值应按 Pointer 原样传递。
+`ffi.Struct.SetUInt32(buf, byteOffset, value)` 等按本机字节序写入，返回 null；`GetUInt32(buf, byteOffset)` 读取。类型后缀为 Int8、UInt8、Int16、UInt16、Int32、UInt32、Float32、Float64、IntPtr、Pointer。支持未对齐字段，参数、数值范围和访问越界错误返回 Error。只有 ffi.Buffer 可写。IntPtr 来回转换的整数限于 ±(2^53−1)，完整的地址和值应按 Pointer 原样传递。
 
 SetPointer 接受 null、FFI 指针或回调，并持有目标。脚本覆盖字段或其部分字节后，解除原字段对目标的持有。循环缓冲区引用返回 Error。GetPointer 读取通过 SetPointer 存入且仍然匹配的地址时保留其所有者；原生函数写入的新地址按外部借用指针处理，其有效期由该函数决定。
 

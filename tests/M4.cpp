@@ -94,8 +94,8 @@ int main() {
 
         auto Arguments = Compile(R"(
             def probe(a = 10) {
-                var argc = vm.get_func_argc;
-                var argv = vm.get_func_argv;
+                var argc = vm.GetArgumentCount;
+                var argv = vm.GetArgument;
                 if (argc() == 0) { return a; }
                 if (argc() == 1) { return argv(0); }
                 a = 99;
@@ -135,7 +135,7 @@ int main() {
                          {Value::Number(20), Value::Number(30)}).AsNumber() == 30,
               "host entry argument count and values");
         const auto Argc = static_cast<NativeObject*>(VmModule.AsObject())->GetMember(
-            Value::String("get_func_argc"));
+            Value::String("GetArgumentCount"));
         Check(ArgsVm.Call(Argc, {}).IsError(), "argument lookup without a script frame");
 
         auto ArrayProgram = Compile(R"(
@@ -161,11 +161,11 @@ int main() {
                 var item = object(); item.marker = 19;
                 if (target.Add(item) != true) { return false; }
                 if (target[0].marker != 19) { return false; }
-                if (target.remove(item) != true) { return false; }
-                if (target.remove(item) != false) { return false; }
-                if (target.add(11) != true) { return false; }
-                if (target.remove_at(0) != true) { return false; }
-                if (get_type(target.remove_at(0)) != "Error") { return false; }
+                if (target.Remove(item) != true) { return false; }
+                if (target.Remove(item) != false) { return false; }
+                if (target.Add(11) != true) { return false; }
+                if (target.RemoveAt(0) != true) { return false; }
+                if (get_type(target.RemoveAt(0)) != "Error") { return false; }
                 if (get_type(target.Add()) != "Error") { return false; }
                 if (get_type(target.Add(1, 2)) != "Error") { return false; }
                 if (target.Add(3 + 4) != true) { return false; }
@@ -195,13 +195,13 @@ int main() {
         Check(ArrayVm.Run(ArrayProgram.Functions.at("exercise")).AsBool(), "native array round trip");
 
         auto InvokeProgram = Compile(R"(
-            var invoke = vm.invoke_function;
+            var invoke = vm.Invoke;
             def inspect(a = 10) {
-                if (vm.get_func_argc() == 0) { return a; }
-                if (invoke(vm.get_func_argc, array()) != 3) { return false; }
+                if (vm.GetArgumentCount() == 0) { return a; }
+                if (invoke(vm.GetArgumentCount, array()) != 3) { return false; }
                 if (a != null) { return false; }
-                if (vm.get_func_argv(1) != 7) { return false; }
-                return vm.get_func_argv(2);
+                if (vm.GetArgument(1) != 7) { return false; }
+                return vm.GetArgument(2);
             }
             def forward(n) {
                 if (n == 0) { return 42; }
@@ -234,12 +234,12 @@ int main() {
         InvokeVm.RegisterNativeFunction("double", std::make_shared<DoubleNative>());
         InvokeProgram.Initialize(InvokeVm);
         Check(InvokeVm.Run(InvokeProgram.Functions.at("exercise")).AsBool(),
-              "invoke_function forwards arguments with normal call frames");
+              "Invoke forwards arguments with normal call frames");
         auto* NativeArgs = InvokeVm.CreateArray();
         NativeArgs->AppendArray(Value::Number(21));
         Check(InvokeVm.Call(InvokeVm.GetGlobal("invoke"),
                             {InvokeVm.GetGlobal("double"), Value::FromScript(NativeArgs)}).AsNumber() == 42,
-              "invoke_function called from the host");
+              "Invoke called from the host");
 
         auto Item = Machine.Run(Compiled.Functions.at("make"), {Value::Number(41)}).AsScriptObject();
         Check(Item->GetRaw(Value::String("answer"))->AsNumber() == 41, "dot member assignment");

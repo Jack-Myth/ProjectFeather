@@ -1,13 +1,13 @@
 var vm = import("vm");
 var count = 0;
 var code = @(context) { count = count + 1; context.value = context.value + 1; return context.value; };
-def store(self, key, value) {
-    vm.raw_set(self, key, value);
+def Store(self, key, value) {
+    vm.RawSet(self, key, value);
     return 73;
 }
 
-def forward(self, key, value) {
-    return vm.raw_set(self.backing, key, value);
+def Forward(self, key, value) {
+    return vm.RawSet(self.backing, key, value);
 }
 
 def main() {
@@ -15,52 +15,52 @@ def main() {
     if (get_type(code) != "Function") { return byte(-1); }
     if (get_type(vm.get_type) != "Error") { return byte(-1); }
     if (get_type(vm.eval_bytecode) != "Error") { return byte(-1); }
-    var defaults = vm.get_module_paths();
+    var defaults = vm.GetModulePaths();
     var paths = array();
-    if (vm.set_module_paths(paths) != true) { return byte(-1); }
-    if (vm.get_module_paths().Length != 0) { return byte(-1); }
+    if (vm.SetModulePaths(paths) != true) { return byte(-1); }
+    if (vm.GetModulePaths().Length != 0) { return byte(-1); }
     if (get_type(import("stdio")) != "Error") { return byte(-1); }
     if (get_type(paths) != "Array") { return byte(-1); }
     if (get_type(paths[1] = 12) != "Error") { return byte(-1); }
     if (get_type(paths.Length = 1) != "Error") { return byte(-1); }
-    if (paths.add(12) != true) { return byte(-1); }
-    paths.add(13);
-    paths.add(12);
+    if (paths.Add(12) != true) { return byte(-1); }
+    paths.Add(13);
+    paths.Add(12);
     if ((paths[byte(0)] = 99) != 99) { return byte(-1); }
     if (paths[0] != 99) { return byte(-1); }
     if (get_type(paths[-1] = 1) != "Error") { return byte(-1); }
     if (get_type(paths[0.5] = 1) != "Error") { return byte(-1); }
-    if (vm.raw_set(paths, 0, 12) != 12) { return byte(-1); }
+    if (vm.RawSet(paths, 0, 12) != 12) { return byte(-1); }
     if (get_type(paths.extra) != "Error") { return byte(-1); }
     if (get_type(paths.extra = 99) != "Error") { return byte(-1); }
     if (get_type(paths[3]) != "Error") { return byte(-1); }
-    if (get_type(paths.remove_at(3)) != "Error") { return byte(-1); }
+    if (get_type(paths.RemoveAt(3)) != "Error") { return byte(-1); }
     if (paths[0] != 12) { return byte(-1); }
-    if (paths.remove(12) != true) { return byte(-1); }
+    if (paths.Remove(12) != true) { return byte(-1); }
     if (paths.Length != 2) { return byte(-1); }
     if (paths[0] != 13) { return byte(-1); }
     if (paths[1] != 12) { return byte(-1); }
-    if (paths.remove_at(1) != true) { return byte(-1); }
-    if (paths.remove(12) != false) { return byte(-1); }
+    if (paths.RemoveAt(1) != true) { return byte(-1); }
+    if (paths.Remove(12) != false) { return byte(-1); }
     if (paths.Length != 1) { return byte(-1); }
-    if (get_type(vm.set_module_paths(paths)) != "Error") { return byte(-1); }
-    if (vm.get_module_paths().Length != 0) { return byte(-1); }
-    if (vm.set_module_paths(defaults) != true) { return byte(-1); }
+    if (get_type(vm.SetModulePaths(paths)) != "Error") { return byte(-1); }
+    if (vm.GetModulePaths().Length != 0) { return byte(-1); }
+    if (vm.SetModulePaths(defaults) != true) { return byte(-1); }
     var stdio = import("stdio");
     if (get_type(stdio) != "NativeObject") { return byte(-1); }
     if (count != 0) { return byte(-1); }
     var state = object(); state.value = 40;
     var meta = object();
-    meta.__set_index = store;
-    vm.set_metaobject(state, meta);
+    meta.__set_index = Store;
+    vm.SetMetaObject(state, meta);
     if ((state.extra = null) != 73) { return byte(-1); }
     if ((state["extra"] = 9) != 9) { return byte(-1); }
     if ((state[byte(2)] = 18) != 73) { return byte(-1); }
     if (state[2] != 18) { return byte(-1); }
     if (get_type(state[false] = 1) != "Error") { return byte(-1); }
-    if (get_type(vm.raw_set(vm, "key", 1)) != "Error") { return byte(-1); }
-    vm.raw_set(state, "backing", object());
-    meta.__set_index = forward;
+    if (get_type(vm.RawSet(vm, "key", 1)) != "Error") { return byte(-1); }
+    vm.RawSet(state, "backing", object());
+    meta.__set_index = Forward;
     if ((state.redirected = 8) != 8) { return byte(-1); }
     if (state.backing.redirected != 8) { return byte(-1); }
     if (get_type(state.redirected) != "Error") { return byte(-1); }

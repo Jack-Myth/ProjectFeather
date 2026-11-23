@@ -2,12 +2,12 @@ var network = import("network");
 var time = import("time");
 var done = false;
 var failure = null;
-def echo(event) {
+def Echo(event) {
     if (event.Kind == "data") {
         network.SendTo(event.Socket, event.Data, event.Address, event.Port);
     } else { failure = event.Error; done = true; }
 }
-def received(event) {
+def Received(event) {
     if (event.Kind == "data") {
         if (event.Data.Get(0) != 0) { failure = byte(-1); }
         if (event.Data.Get(1) != 255) { failure = byte(-1); }
@@ -19,8 +19,8 @@ def main() {
     var client = network.CreateUdp();
     network.Bind(server, "127.0.0.1", 0);
     network.Bind(client, "127.0.0.1", 0);
-    network.OnReceive(server, echo);
-    network.OnReceive(client, received);
+    network.OnReceive(server, Echo);
+    network.OnReceive(client, Received);
     network.SendTo(client, network.Buffer(byte(0), byte(255)),
                    "127.0.0.1", network.LocalAddress(server).Port);
     var attempts = 0;

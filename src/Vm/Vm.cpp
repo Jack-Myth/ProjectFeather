@@ -121,16 +121,16 @@ public:
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>& Arguments) override {
         if (!Write) {
-            if (!Arguments.empty()) return Value::Error("get_module_paths expects no arguments");
+            if (!Arguments.empty()) return Value::Error("GetModulePaths expects no arguments");
             const auto& Paths = Machine.GetModulePaths();
             auto* List = Machine.CreateArray();
             for (const auto& Path : Paths) List->AppendArray(Value::String(Path));
             return Value::FromScript(List);
         }
         if (Arguments.size() != 1 || !Arguments[0].IsScriptObject())
-            return Value::Error("set_module_paths expects a list of strings");
+            return Value::Error("SetModulePaths expects a list of strings");
         const auto* List = Arguments[0].AsScriptObject();
-        if (!List->IsArray()) return Value::Error("set_module_paths expects an array of strings");
+        if (!List->IsArray()) return Value::Error("SetModulePaths expects an array of strings");
         const auto Elements = List->GetArrayElements();
         if (Elements.size() > 65536) return Value::Error("too many module paths");
         std::vector<std::string> Paths;
@@ -160,11 +160,11 @@ public:
             return Value::Error("no active Feather function");
         const auto& Values = Execution->Frames.back().Arguments;
         if (Count) {
-            if (!Arguments.empty()) return Value::Error("get_func_argc expects no arguments");
+            if (!Arguments.empty()) return Value::Error("GetArgumentCount expects no arguments");
             return Value::Number(static_cast<double>(Values.size()));
         }
         if (Arguments.size() != 1 || !Arguments[0].IsNumeric())
-            return Value::Error("get_func_argv expects one numeric index");
+            return Value::Error("GetArgument expects one numeric index");
         const auto Index = Arguments[0].AsNumber();
         if (!std::isfinite(Index) || Index < 0 || std::trunc(Index) != Index ||
             Index >= static_cast<double>(Values.size()))
@@ -191,7 +191,7 @@ public:
     static Value Expand(const std::vector<Value>& Arguments, Value& Target, std::vector<Value>& Expanded) {
         if (Arguments.size() != 2 || !Arguments[1].IsScriptObject() ||
             !Arguments[1].AsScriptObject()->IsArray())
-            return Value::Error("invoke_function expects a callable and an array");
+            return Value::Error("Invoke expects a callable and an array");
         const auto Elements = Arguments[1].AsScriptObject()->GetArrayElements();
         Target = Arguments[0];
         // Snapshot the values before replacing Arguments, which may alias Expanded.
@@ -210,7 +210,7 @@ public:
     Value Call(const std::vector<Value>& Arguments) override {
         if (Arguments.size() != 2 || !Arguments[0].IsScriptObject() || !Arguments[1].IsScriptObject() ||
             Arguments[0].AsScriptObject()->IsArray() || Arguments[1].AsScriptObject()->IsArray())
-            return Value::Error("set_metaobject expects two script objects");
+            return Value::Error("SetMetaObject expects two script objects");
         try { Machine.SetMetaObject(Arguments[0].AsScriptObject(), Arguments[1].AsScriptObject()); }
         catch (const std::invalid_argument& Failure) { return Value::Error(Failure.what()); }
         return Arguments[0];
@@ -226,7 +226,7 @@ public:
     bool IsCallable() const override { return true; }
     Value Call(const std::vector<Value>& Arguments) override {
         if (Arguments.size() != 3 || !Arguments[0].IsScriptObject())
-            return Value::Error("raw_set expects a script object, key and value");
+            return Value::Error("RawSet expects a script object, key and value");
         return Arguments[0].AsScriptObject()->SetRaw(Arguments[1], Arguments[2]);
     }
 };
@@ -241,13 +241,13 @@ public:
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     Value GetMember(const Value& Key) override {
         if (Key.GetType() == ValueType::String) {
-            if (Key.AsString() == "set_module_paths") return SetPaths;
-            if (Key.AsString() == "get_module_paths") return GetPaths;
-            if (Key.AsString() == "get_func_argc") return GetArgc;
-            if (Key.AsString() == "get_func_argv") return GetArgv;
-            if (Key.AsString() == "invoke_function") return Invoke;
-            if (Key.AsString() == "set_metaobject") return SetMeta;
-            if (Key.AsString() == "raw_set") return RawSet;
+            if (Key.AsString() == "SetModulePaths") return SetPaths;
+            if (Key.AsString() == "GetModulePaths") return GetPaths;
+            if (Key.AsString() == "GetArgumentCount") return GetArgc;
+            if (Key.AsString() == "GetArgument") return GetArgv;
+            if (Key.AsString() == "Invoke") return Invoke;
+            if (Key.AsString() == "SetMetaObject") return SetMeta;
+            if (Key.AsString() == "RawSet") return RawSet;
         }
         return Value::Error("unknown vm module member");
     }
@@ -354,9 +354,9 @@ public:
     }
 
     static std::optional<Operation> Find(std::string_view Name) {
-        if (Name == "Add" || Name == "add") return Operation::Add;
-        if (Name == "remove") return Operation::Remove;
-        if (Name == "RemoveAt" || Name == "remove_at") return Operation::RemoveAt;
+        if (Name == "Add") return Operation::Add;
+        if (Name == "Remove") return Operation::Remove;
+        if (Name == "RemoveAt") return Operation::RemoveAt;
         return std::nullopt;
     }
 
@@ -586,19 +586,19 @@ Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
     auto& ArrayType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "array");
     BuiltinArray = Value::FromObject(ArrayType.Create<ArrayFunction>(*this));
     Globals.emplace("array", BuiltinArray);
-    auto& SetPathsType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "set_module_paths");
-    auto& GetPathsType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "get_module_paths");
+    auto& SetPathsType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "SetModulePaths");
+    auto& GetPathsType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "GetModulePaths");
     auto SetPaths = Value::FromObject(SetPathsType.Create<ModulePathsFunction>(*this, true));
     auto GetPaths = Value::FromObject(GetPathsType.Create<ModulePathsFunction>(*this, false));
-    auto& ArgcType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "get_func_argc");
-    auto& ArgvType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "get_func_argv");
+    auto& ArgcType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "GetArgumentCount");
+    auto& ArgvType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "GetArgument");
     auto GetArgc = Value::FromObject(ArgcType.Create<FunctionArgumentsFunction>(ActiveExecution, true));
     auto GetArgv = Value::FromObject(ArgvType.Create<FunctionArgumentsFunction>(ActiveExecution, false));
-    auto& InvokeType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "invoke_function");
+    auto& InvokeType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "Invoke");
     auto Invoke = Value::FromObject(InvokeType.Create<InvokeFunction>(*this));
-    auto& SetMetaType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "set_metaobject");
+    auto& SetMetaType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "SetMetaObject");
     auto SetMeta = Value::FromObject(SetMetaType.Create<SetMetaObjectFunction>(*this));
-    auto& RawSetType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "raw_set");
+    auto& RawSetType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "RawSet");
     auto& VmModuleType = CreateNativeObjectType<NativeSingletonType>(CoreBuiltinsGuid, "vm");
     BuiltinVmModule = Value::FromObject(VmModuleType.Create<VmModule>(
         std::move(SetPaths), std::move(GetPaths),
@@ -876,7 +876,7 @@ Value Vm::Call(Value Target, std::vector<Value> Arguments) {
         auto* Native = dynamic_cast<NativeObject*>(Target.AsObject());
         if (!Native || !Native->IsCallable()) return Value::Error("value is not callable");
         if (dynamic_cast<InvokeFunction*>(Native)) {
-            if (Depth == 63) return Value::Error("invoke_function forwarding limit exceeded");
+            if (Depth == 63) return Value::Error("Invoke forwarding limit exceeded");
             if (auto Failure = InvokeFunction::Expand(Arguments, Target, Arguments); Failure.IsError())
                 return Failure;
             Roots.push_back(AddToRoot(Target));
@@ -1323,7 +1323,7 @@ Value Vm::Execute(ExecutionState& Execution) {
             }
             if (dynamic_cast<InvokeFunction*>(Native)) {
                 if (Depth == 63) {
-                    Push(Value::Error("invoke_function forwarding limit exceeded"), DebugErrorOrigin::Operation);
+                    Push(Value::Error("Invoke forwarding limit exceeded"), DebugErrorOrigin::Operation);
                     return;
                 }
                 if (auto Failure = InvokeFunction::Expand(Args, Target, Args); Failure.IsError()) {
