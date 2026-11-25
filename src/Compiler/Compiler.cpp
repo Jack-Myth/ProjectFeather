@@ -667,25 +667,37 @@ private:
                 Fail(Statement.At, "duplicate local declaration");
             if (Statement.Children.empty()) Emit(Op::Null);
             else EmitExpression(*Statement.Children[0]);
-            if (TopLevel) EmitU32(Op::SetGlobal, StringConstant(Statement.Name));
-            else {
+            if (TopLevel) {
+                EmitU32(Op::SetGlobal, StringConstant(Statement.Name));
+                Emit(Op::Pop);
+            } else {
                 if (LocalCount >= 65'536) Fail(Statement.At, "too many local slots");
                 auto Slot = LocalCount++;
                 Scopes.back()[Statement.Name] = Slot;
-                EmitU32(Op::SetLocal, Slot);
+                EmitU32(Op::StoreLocal, Slot);
                 ScopeSymbols.back().push_back(LocalVariables.size());
                 LocalVariables.push_back({Statement.Name, Slot, Code.Offset(),
                     std::numeric_limits<std::size_t>::max()});
             }
-            Emit(Op::Pop); break;
+            break;
         }
         case NodeKind::Return:
             if (Statement.Children.empty()) Emit(Op::Null);
             else EmitExpression(*Statement.Children[0]);
             Emit(Op::Return); break;
-        case NodeKind::Expression:
-            if (EmitLocalAddition(*Statement.Children[0])) break;
-            EmitExpression(*Statement.Children[0]); Emit(Op::Pop); break;
+        case NodeKind::Expression: {
+            const auto& Expression = *Statement.Children[0];
+            if (EmitLocalAddition(Expression)) break;
+            if (Expression.Kind == NodeKind::Assign && Expression.Children[0]->Kind == NodeKind::Name) {
+                if (const auto Local = FindLocal(Expression.Children[0]->Name)) {
+                    EmitExpression(*Expression.Children[1]);
+                    SourceGuard Source(CurrentAt, Expression.At);
+                    EmitU32(Op::StoreLocal, *Local);
+                    break;
+                }
+            }
+            EmitExpression(Expression); Emit(Op::Pop); break;
+        }
         case NodeKind::Block:
             EmitBlock(Statement, true); break;
         case NodeKind::If: {

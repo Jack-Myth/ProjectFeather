@@ -69,14 +69,19 @@ void CheckOptimizedInstructions() {
     Item->SetRaw(Value::String("value"), Value::Byte(5));
     Check(Machine.Run(Loaded.Functions.at("score"), {Value::FromScript(Item)}).AsNumber() == 17,
           "constant field or arithmetic changed");
-    Bytes[10] = 2;
-    Reject([&] { DeserializeProgram(Bytes); }, "new opcode accepted under old ISA");
-    auto Legacy = Compile("def answer() { return 42; }");
-    Legacy.Program->InstructionVersion = 2;
-    auto OldBytes = SerializeProgram(Legacy);
-    auto OldProgram = DeserializeProgram(OldBytes);
-    AttachSymbols(OldProgram, SerializeSymbols(Legacy));
-    Check(SerializeProgram(OldProgram) == OldBytes, "old bytecode identity changed");
+    for (auto Version : {2, 3, 4}) {
+        auto Old = Bytes;
+        Old.at(10) = static_cast<std::uint8_t>(Version);
+        Reject([&] { DeserializeProgram(Old); }, "obsolete instruction version accepted");
+    }
+    auto Store = Compile("def move(x) { var y = x; y = 2; return y; }");
+    const auto Index = Store.Functions.at("move");
+    auto& Body = *Store.Program->Constants[Index].Function;
+    Check(Body.Code.at(5) == static_cast<std::uint8_t>(Op::StoreLocal), "expected consuming StoreLocal");
+    Vm StoreVm(Store.Program);
+    Check(StoreVm.Run(Index, {Value::Number(17)}).AsNumber() == 2, "StoreLocal failed");
+    Body.Code[6] = 0xff;
+    Reject([&] { Store.Program->Validate(); }, "invalid StoreLocal destination accepted");
 }
 
 } // namespace
@@ -84,6 +89,12 @@ void CheckOptimizedInstructions() {
 int main() {
     try {
         CheckOptimizedInstructions();
+        auto EmptyScope = Compile("def local(x) { if (true) { var unused = x + 1; } return x; }");
+        auto EmptyScopeRoundtrip = DeserializeProgram(SerializeProgram(EmptyScope));
+        AttachSymbols(EmptyScopeRoundtrip, SerializeSymbols(EmptyScope));
+        const auto EmptyScopeEntry = EmptyScopeRoundtrip.Functions.at("local");
+        const auto& Unused = EmptyScopeRoundtrip.Program->Constants[EmptyScopeEntry].Function->LocalVariables.at(1);
+        Check(Unused.StartPc == Unused.EndPc, "scope dropped at the next instruction must have an empty debug range");
         auto Source = Compile("var base = 2; def score(x = 3) { return base + x; }");
         auto Bytes = SerializeProgram(Source);
         Check(Bytes.size() > 16 && Bytes[8] == 6 && Bytes[9] == 0,

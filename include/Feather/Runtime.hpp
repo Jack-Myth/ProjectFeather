@@ -357,7 +357,7 @@ enum class Op : std::uint8_t {
     Const, Null, True, False, Pop, GetLocal, GetGlobal, SetLocal, SetGlobal,
     NewObject, GetMember, SetMember, Add, Sub, Mul, Div, Negate, Equal, Less,
     Jump, JumpIf, Call, Return, ToByte,
-    AddToLocal, AddConstToLocal, AddConst, SubConst, MulConst, GetField
+    AddToLocal, AddConstToLocal, AddConst, SubConst, MulConst, GetField, StoreLocal
 };
 
 struct FunctionPrototype {
@@ -386,7 +386,7 @@ struct FEATHER_API Constant {
 class FEATHER_API Module final {
 public:
     std::vector<Constant> Constants;
-    static constexpr std::uint16_t CurrentInstructionVersion = 3;
+    static constexpr std::uint16_t CurrentInstructionVersion = 5;
     std::uint16_t InstructionVersion = CurrentInstructionVersion;
     std::uint32_t AddNumber(double Input);
     std::uint32_t AddByte(double Input);

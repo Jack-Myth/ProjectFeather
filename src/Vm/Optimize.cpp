@@ -59,6 +59,14 @@ std::optional<std::size_t> MemberStore(const Code& Bytes, std::size_t Pc) {
     return {};
 }
 
+std::optional<std::size_t> LocalStoreEnd(const Code& Bytes, std::size_t Pc) {
+    if (Pc >= Bytes.size()) return {};
+    if (At(Bytes, Pc) == Op::StoreLocal) return Pc + LoadSize;
+    if (Bytes.size() - Pc > LoadSize && At(Bytes, Pc) == Op::SetLocal &&
+        At(Bytes, Pc + LoadSize) == Op::Pop) return Pc + LoadSize + 1;
+    return {};
+}
+
 bool MatchBlock(const Code& Bytes, std::size_t Start, const Module& Program, SlotBlock& Block) {
     auto Pc = Start + LoadSize;
     if (Pc == Bytes.size()) return false;
@@ -73,12 +81,12 @@ bool MatchBlock(const Code& Bytes, std::size_t Start, const Module& Program, Slo
         const auto Binary = At(Bytes, Pc);
         if (Binary == Op::Add || Binary == Op::Sub || Binary == Op::Mul || Binary == Op::Div) {
             ++Pc;
-            if (Bytes.size() - Pc <= LoadSize || At(Bytes, Pc) != Op::SetLocal ||
-                At(Bytes, Pc + LoadSize) != Op::Pop) return false;
+            const auto StoreEnd = LocalStoreEnd(Bytes, Pc);
+            if (!StoreEnd) return false;
             Block.Operation = Next == Op::GetLocal ? SlotBlock::Kind::BinaryLocal : SlotBlock::Kind::BinaryConstant;
             Block.BinaryOp = Binary;
             Block.Destination = Operand(Bytes, Pc);
-            Block.EndPc = Pc + LoadSize + 1;
+            Block.EndPc = *StoreEnd;
             return true;
         }
         if (Binary != BranchLess) return false;
@@ -92,11 +100,11 @@ bool MatchBlock(const Code& Bytes, std::size_t Start, const Module& Program, Slo
         ++Block.StepCount;
         Pc += LoadSize;
     }
-    if (Bytes.size() - Pc <= LoadSize || At(Bytes, Pc) != Op::SetLocal ||
-        At(Bytes, Pc + LoadSize) != Op::Pop) return false;
+    const auto StoreEnd = LocalStoreEnd(Bytes, Pc);
+    if (!StoreEnd) return false;
     Block.Operation = SlotBlock::Kind::Arithmetic;
     Block.Operand = Operand(Bytes, Pc);
-    Block.EndPc = Pc + LoadSize + 1;
+    Block.EndPc = *StoreEnd;
     return true;
 }
 } // namespace

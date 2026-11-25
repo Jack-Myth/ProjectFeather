@@ -50,8 +50,6 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
     };
     for (std::size_t Pc = 0; Pc < Code.size();) {
         Instruction Current{static_cast<Op>(Code[Pc]), Pc, Pc + 1};
-        if (Program.InstructionVersion == 2 && Current.Code > Op::ToByte)
-            Invalid("opcode requires instruction version 3");
         const auto Width = OperandWidth(Current.Code);
         if (Code.size() - Pc - 1 < Width) Invalid("truncated instruction");
         Current.End += Width;
@@ -79,7 +77,7 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
             [[fallthrough]];
         case Op::Null: case Op::True: case Op::False: case Op::NewObject:
         case Op::GetLocal: case Op::GetGlobal: Current.Produces = 1; break;
-        case Op::Pop: Current.Consumes = 1; break;
+        case Op::Pop: case Op::StoreLocal: Current.Consumes = 1; break;
         case Op::SetLocal: case Op::SetGlobal: case Op::ToByte: case Op::Negate: Current.Consumes = 1; Current.Produces = 1; break;
         case Op::GetMember: case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
         case Op::Equal: case Op::Less: Current.Consumes = 2; Current.Produces = 1; break;
@@ -89,7 +87,7 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
         case Op::Return: Current.Consumes = 1; break;
         case Op::Jump: break;
         }
-        if ((Current.Code == Op::GetLocal || Current.Code == Op::SetLocal) &&
+        if ((Current.Code == Op::GetLocal || Current.Code == Op::SetLocal || Current.Code == Op::StoreLocal) &&
             Current.Operand >= Function.LocalCount) Invalid("local index out of range");
         if (Current.Code == Op::GetGlobal || Current.Code == Op::SetGlobal) {
             if (Current.Operand >= Program.Constants.size() ||
@@ -120,7 +118,7 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
         if (Variable.Slot >= Function.LocalCount || SeenLocalSlots[Variable.Slot])
             Invalid("invalid or duplicate debug local variable slot");
         SeenLocalSlots[Variable.Slot] = true;
-        if (Variable.StartPc >= Variable.EndPc || Variable.EndPc > Code.size() ||
+        if (Variable.StartPc > Variable.EndPc || Variable.EndPc > Code.size() ||
             !IsInstruction(Variable.StartPc) ||
             (Variable.EndPc != Code.size() && !IsInstruction(Variable.EndPc)))
             Invalid("invalid debug local variable range");
@@ -188,7 +186,7 @@ std::uint32_t Module::AddFunction(std::shared_ptr<FunctionPrototype> Input) {
     Constants.push_back(Constant::FunctionRef(std::move(Input))); return static_cast<std::uint32_t>(Constants.size() - 1);
 }
 void Module::Validate() const {
-    if (InstructionVersion != 2 && InstructionVersion != CurrentInstructionVersion)
+    if (InstructionVersion != CurrentInstructionVersion)
         Invalid("unsupported instruction version");
     if (Constants.size() > MaxConstants) Invalid("too many constants");
     for (const auto& Item : Constants) {

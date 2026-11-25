@@ -1417,6 +1417,12 @@ Value Vm::Execute(ExecutionState& Execution) {
                 Push(Local);
             break;
         }
+        case Op::StoreLocal: {
+            auto Id = ReadU32(Code, Current.Pc);
+            Current.Locals[Id] = std::move(Current.Stack.back());
+            Current.Stack.pop_back();
+            break;
+        }
         case ReturnDestination: case Op::SetLocal: {
             auto Id = ReadU32(Code, Current.Pc);
             Current.Locals[Id] = Current.Stack.back(); break;
@@ -1593,15 +1599,17 @@ Value Vm::Execute(ExecutionState& Execution) {
             }
             auto& Caller = Frames.back();
             const auto& Bytes = Caller.Function->GetBody().Code;
-            if (!DebugController && Caller.Pc < Bytes.size() &&
-                static_cast<Op>(Bytes[Caller.Pc]) == ReturnDestination) {
-                ++Caller.Pc;
-                const auto Slot = ReadU32(Bytes, Caller.Pc);
-                ++Caller.Pc; // Pop after SetLocal
-                Caller.Locals[Slot] = std::move(Result);
-            } else {
-                Caller.Stack.push_back(std::move(Result));
+            if (!DebugController && Caller.Pc < Bytes.size()) {
+                const auto Resume = static_cast<Op>(Bytes[Caller.Pc]);
+                if (Resume == Op::StoreLocal || Resume == ReturnDestination) {
+                    ++Caller.Pc;
+                    const auto Slot = ReadU32(Bytes, Caller.Pc);
+                    if (Resume == ReturnDestination) ++Caller.Pc; // Pop after SetLocal
+                    Caller.Locals[Slot] = std::move(Result);
+                    break;
+                }
             }
+            Caller.Stack.push_back(std::move(Result));
             break;
         }
         case Op::NewObject:
