@@ -44,6 +44,7 @@ struct SlotCall {
 };
 
 struct SlotPlan {
+    bool WritesParameters = false;
     std::vector<SlotBlock> Blocks;
     std::vector<NumericStep> Steps;
     std::vector<SlotCall> Calls;

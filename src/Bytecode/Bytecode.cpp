@@ -1,4 +1,5 @@
 #include <Feather/Runtime.hpp>
+#include <Feather/Utf8.hpp>
 #include "InstructionWidth.hpp"
 
 #include <algorithm>
@@ -50,6 +51,7 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
     };
     for (std::size_t Pc = 0; Pc < Code.size();) {
         Instruction Current{static_cast<Op>(Code[Pc]), Pc, Pc + 1};
+        if (Current.Code == Op::NotEqual && Program.InstructionVersion < 6) Invalid("opcode requires instruction version 6");
         const auto Width = OperandWidth(Current.Code);
         if (Code.size() - Pc - 1 < Width) Invalid("truncated instruction");
         Current.End += Width;
@@ -80,7 +82,7 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
         case Op::Pop: case Op::StoreLocal: Current.Consumes = 1; break;
         case Op::SetLocal: case Op::SetGlobal: case Op::ToByte: case Op::Negate: Current.Consumes = 1; Current.Produces = 1; break;
         case Op::GetMember: case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
-        case Op::Equal: case Op::Less: Current.Consumes = 2; Current.Produces = 1; break;
+        case Op::NotEqual: case Op::Equal: case Op::Less: Current.Consumes = 2; Current.Produces = 1; break;
         case Op::SetMember: Current.Consumes = 3; Current.Produces = 1; break;
         case Op::JumpIf: Current.Consumes = 1; break;
         case Op::Call: Current.Consumes = static_cast<int>(Current.Operand) + 1; Current.Produces = 1; break;
@@ -108,13 +110,13 @@ void VerifyFunction(const Module& Program, const FunctionPrototype& Function) {
                 Invalid("invalid debug instruction location");
         }
     }
-    if (!Function.DebugName.empty()) (void)Value::String(Function.DebugName);
+    if (!Function.DebugName.empty()) ValidateUtf8(Function.DebugName);
     if (Function.LocalVariables.size() > Function.LocalCount)
         Invalid("too many debug local variables");
     std::vector<bool> SeenLocalSlots(Function.LocalCount, false);
     for (const auto& Variable : Function.LocalVariables) {
         if (Variable.Name.empty()) Invalid("empty debug local variable name");
-        (void)Value::String(Variable.Name);
+        ValidateUtf8(Variable.Name);
         if (Variable.Slot >= Function.LocalCount || SeenLocalSlots[Variable.Slot])
             Invalid("invalid or duplicate debug local variable slot");
         SeenLocalSlots[Variable.Slot] = true;
@@ -186,11 +188,11 @@ std::uint32_t Module::AddFunction(std::shared_ptr<FunctionPrototype> Input) {
     Constants.push_back(Constant::FunctionRef(std::move(Input))); return static_cast<std::uint32_t>(Constants.size() - 1);
 }
 void Module::Validate() const {
-    if (InstructionVersion != CurrentInstructionVersion)
+    if (InstructionVersion != 5 && InstructionVersion != CurrentInstructionVersion)
         Invalid("unsupported instruction version");
     if (Constants.size() > MaxConstants) Invalid("too many constants");
     for (const auto& Item : Constants) {
-        if (Item.Type == Constant::Kind::String) Value::String(Item.Text);
+        if (Item.Type == Constant::Kind::String) ValidateUtf8(Item.Text);
         if (Item.Type == Constant::Kind::Function) {
             if (!Item.Function) Invalid("null function prototype");
             VerifyFunction(*this, *Item.Function);

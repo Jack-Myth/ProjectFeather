@@ -19,6 +19,19 @@ void Reject(std::string_view Source, const char* Message) {
     }
     throw std::runtime_error(Message);
 }
+class EditParameter final : public VmDebugController {
+public:
+    void OnSafePoint(const VmDebugContext& Context) override {
+        if (!Edited) {
+            Context.SetLocal(0, 0, Value::Number(99));
+            Edited = true;
+        }
+    }
+    void OnError(const VmDebugContext&, const Value&, DebugErrorOrigin) override {}
+    void OnExecutionFinished(bool) override {}
+private:
+    bool Edited = false;
+};
 class DoubleNative final : public NativeObject {
 public:
     ObjectType GetObjectType() const override { return ObjectType::Host; }
@@ -114,6 +127,14 @@ int main() {
                 if (probe(null) != null) { return false; }
                 return probe(20, 30);
             }
+            def read_original(a, b = 17) {
+                var getter = vm.GetArgument;
+                return a + b + getter(0) + vm.GetArgumentCount();
+            }
+            def mutate_parameter(a) {
+                a = a + 1;
+                return vm.GetArgument(0);
+            }
             def call_target(a,b) { return target(a,b); }
             def rebound(a,b) {
                 target = probe;
@@ -137,6 +158,13 @@ int main() {
         const auto Argc = static_cast<NativeObject*>(VmModule.AsObject())->GetMember(
             Value::String("GetArgumentCount"));
         Check(ArgsVm.Call(Argc, {}).IsError(), "argument lookup without a script frame");
+
+        Check(ArgsVm.Run(Arguments.Functions.at("mutate_parameter"), {Value::Number(5)}).AsNumber() == 5,
+              "packed add overwrote original argument");
+        ArgsVm.SetDebugController(std::make_shared<EditParameter>());
+        Check(ArgsVm.Run(Arguments.Functions.at("read_original"), {Value::Number(5)}).AsNumber() == 122,
+              "debugger parameter edit changed original argument or counted a default");
+        ArgsVm.SetDebugController({});
 
         auto ArrayProgram = Compile(R"(
             var selected = array();

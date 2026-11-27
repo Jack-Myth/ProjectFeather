@@ -71,7 +71,7 @@ public:
     static Value Byte(double Input);
     static Value Error(std::string Message);
     static Value String(std::string Input);
-    static Value FromObject(std::shared_ptr<Object> Input);
+    static Value FromObject(std::shared_ptr<NativeObject> Input);
     static Value FromScript(ScriptObject* Input);
 
     ValueType GetType() const { return Type; }
@@ -85,7 +85,7 @@ public:
     ObjectType GetObjectType() const;
     bool IsError() const;
     ScriptObject* AsScriptObject() const;
-    const std::shared_ptr<Object>& AsNativeObject() const;
+    const std::shared_ptr<NativeObject>& AsNativeObject() const;
     bool IsTruthy() const;
 
 private:
@@ -101,7 +101,7 @@ private:
         double Numeric;
         std::uint8_t ByteValue;
         std::shared_ptr<const std::string> Text;
-        std::shared_ptr<Object> Reference;
+        std::shared_ptr<NativeObject> Reference;
         ScriptObject* Script;
         Storage() {}
         ~Storage() {}
@@ -217,6 +217,7 @@ private:
         std::size_t operator()(const Key& Input) const;
         std::size_t operator()(std::string_view Text) const;
     };
+    std::optional<Value> FindMetaMethod(std::string_view Name) const;
     static std::optional<Key> ConvertKey(const Value& Input);
     std::optional<Value> FindSetIndex(const Value& Key) const;
     class ArrayMethod;
@@ -357,7 +358,7 @@ enum class Op : std::uint8_t {
     Const, Null, True, False, Pop, GetLocal, GetGlobal, SetLocal, SetGlobal,
     NewObject, GetMember, SetMember, Add, Sub, Mul, Div, Negate, Equal, Less,
     Jump, JumpIf, Call, Return, ToByte,
-    AddToLocal, AddConstToLocal, AddConst, SubConst, MulConst, GetField, StoreLocal
+    AddToLocal, AddConstToLocal, AddConst, SubConst, MulConst, GetField, StoreLocal, NotEqual
 };
 
 struct FunctionPrototype {
@@ -386,7 +387,7 @@ struct FEATHER_API Constant {
 class FEATHER_API Module final {
 public:
     std::vector<Constant> Constants;
-    static constexpr std::uint16_t CurrentInstructionVersion = 5;
+    static constexpr std::uint16_t CurrentInstructionVersion = 6;
     std::uint16_t InstructionVersion = CurrentInstructionVersion;
     std::uint32_t AddNumber(double Input);
     std::uint32_t AddByte(double Input);
@@ -495,6 +496,8 @@ public:
     std::size_t CollectGarbage();
     GcStatistics GetGcStatistics() const;
     std::size_t GetScriptObjectCount() const { return ScriptHeap.size(); }
+    // Optional, shallow host-side check for script objects, functions and typed native objects.
+    void ValidateOwnedValue(const Value& Input) const;
     std::uint32_t GetNativeCallDepth() const { return ActiveNativeCalls; }
 private:
     friend class RootHandle;
@@ -514,7 +517,6 @@ private:
     void RegisterNativeObjectType(std::shared_ptr<NativeObjectType> Input);
     NativeObjectType* FindNativeObjectType(const NativeTypeId& Id) const;
     bool OwnsScript(ScriptObject* Input) const;
-    void ValidateOwnedValue(const Value& Input) const;
     Value EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t FrameId,
                                   const std::shared_ptr<Module>& EvaluationProgram,
                                   std::uint32_t FunctionConstant,

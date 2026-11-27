@@ -14,7 +14,7 @@ inline std::size_t OperandWidth(Op Instruction) {
     case Op::Null: case Op::True: case Op::False: case Op::Pop:
     case Op::NewObject: case Op::GetMember: case Op::SetMember:
     case Op::Add: case Op::Sub: case Op::Mul: case Op::Div:
-    case Op::ToByte: case Op::Negate: case Op::Equal: case Op::Less: case Op::Return: return 0;
+    case Op::ToByte: case Op::Negate: case Op::NotEqual: case Op::Equal: case Op::Less: case Op::Return: return 0;
     }
     throw std::invalid_argument("unknown opcode");
 }

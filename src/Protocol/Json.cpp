@@ -1,4 +1,5 @@
 #include "Json.hpp"
+#include <Feather/Utf8.hpp>
 
 #include <Feather/Runtime.hpp>
 
@@ -110,7 +111,7 @@ private:
         while (Position < Input.size()) {
             unsigned char C = static_cast<unsigned char>(Input[Position++]);
             if (C == '"') {
-                (void)Value::String(Result);
+                ValidateUtf8(Result);
                 return Result;
             }
             if (C < 0x20) Fail();

@@ -1,4 +1,5 @@
 #include <Feather/Runtime.hpp>
+#include <Feather/Utf8.hpp>
 #include "Internal.hpp"
 #include "Optimize.hpp"
 
@@ -27,19 +28,20 @@ const Value* ReadGlobalBinding(const Module& Program,
     return Binding;
 }
 
-void InitializeParameterLocals(Frame& Next) {
+void InitializeParameterLocals(Frame& Next, std::span<const Value> Args) {
     const auto& Body = Next.Function->GetBody();
     Next.Locals.resize(Body.LocalCount);
     for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
-        if (I < Next.Arguments.size()) Next.Locals[I] = Next.Arguments[I];
+        if (I < Args.size()) Next.Locals[I] = Args[I];
         else if (Body.Defaults[I]) Next.Locals[I] = *Body.Defaults[I];
     }
 }
 void InitializeFrame(Frame& Next, std::shared_ptr<FunctionObject> Function, const std::vector<Value>& Args) {
     Next.Function = std::move(Function);
     Next.Pc = 0;
-    Next.Arguments = Args;
-    InitializeParameterLocals(Next);
+    Next.ArgumentCount = Args.size();
+    if (Next.NeedsArgumentCopy()) Next.Arguments = Args;
+    InitializeParameterLocals(Next, Args);
 }
 void InitializeFrameFromStack(Frame& Next, std::shared_ptr<FunctionObject> Function,
                               std::vector<Value>& Stack, std::size_t Count) {
@@ -47,7 +49,8 @@ void InitializeFrameFromStack(Frame& Next, std::shared_ptr<FunctionObject> Funct
     const auto Start = Stack.size() - Count;
     Next.Function = std::move(Function);
     Next.Pc = 0;
-    Next.Arguments.assign(Stack.begin() + Start, Stack.end());
+    Next.ArgumentCount = Count;
+    if (Next.NeedsArgumentCopy()) Next.Arguments.assign(Stack.begin() + Start, Stack.end());
     Next.Locals.resize(Body.LocalCount);
     for (std::size_t I = 0; I < Body.ParameterCount; ++I) {
         if (I < Count) Next.Locals[I] = std::move(Stack[Start + I]);
@@ -171,7 +174,7 @@ public:
     Value Call(const std::vector<Value>& Arguments) override {
         if (!Execution || Execution->Frames.empty())
             return Value::Error("no active Feather function");
-        const auto& Values = Execution->Frames.back().Arguments;
+        const auto Values = Execution->Frames.back().OriginalArguments();
         if (Count) {
             if (!Arguments.empty()) return Value::Error("GetArgumentCount expects no arguments");
             return Value::Number(static_cast<double>(Values.size()));
@@ -300,7 +303,7 @@ std::uint32_t ReadU32(const std::vector<std::uint8_t>& Code, std::size_t& Pc) {
 class OptimizedFunction final : public FunctionObject {
 public:
     OptimizedFunction(const std::shared_ptr<Module>& Owner, const std::shared_ptr<FunctionPrototype>& Body,
-                      SlotPlan Plan) : FunctionObject(Owner, Body), Plan(std::move(Plan)) {}
+                      SlotPlan Plan) : FunctionObject(Owner, Body, Plan.WritesParameters), Plan(std::move(Plan)) {}
     const SlotPlan Plan;
 };
 
@@ -315,7 +318,7 @@ std::vector<Value> BindConstants(const std::shared_ptr<Module>& Program) {
         case Constant::Kind::Function: {
             auto Plan = OptimizeFunction(*Item.Function, *Program);
             if (Plan.Blocks.empty() && Plan.Calls.empty())
-                Values.push_back(Value::FromObject(std::make_shared<FunctionObject>(Program, Item.Function)));
+                Values.push_back(Value::FromObject(std::make_shared<FunctionObject>(Program, Item.Function, Plan.WritesParameters)));
             else
                 Values.push_back(Value::FromObject(std::make_shared<OptimizedFunction>(Program, Item.Function, std::move(Plan))));
             break;
@@ -491,11 +494,11 @@ std::vector<DebugNamedValue> VmDebugContext::GetGlobals(std::size_t FrameId) con
 }
 
 std::vector<DebugProperty> VmDebugContext::GetProperties(const Value& Input) const {
-    Machine->ValidateOwnedValue(Input);
     if (Input.GetType() != ValueType::Object)
         throw std::invalid_argument("debug properties require an object");
     std::vector<DebugProperty> Result;
-    if (auto* Script = dynamic_cast<ScriptObject*>(Input.AsObject())) {
+    if (Input.IsScriptObject()) {
+        auto* Script = Input.AsScriptObject();
         if (Script->IsArray()) {
             const auto Elements = Script->GetArrayElements();
             Result.reserve(Elements.size() + 1);
@@ -513,8 +516,7 @@ std::vector<DebugProperty> VmDebugContext::GetProperties(const Value& Input) con
             Result.push_back({Value::String("[[MetaObject]]"), Value::FromScript(Script->MetaObject)});
         return Result;
     }
-    auto Native = std::dynamic_pointer_cast<NativeObject>(Input.AsNativeObject());
-    if (!Native) return Result;
+    const auto& Native = Input.AsNativeObject();
     if (auto Error = std::dynamic_pointer_cast<ErrorObject>(Native))
         Result.push_back({Value::String("message"), Value::String(Error->GetMessage())});
     for (const auto& [Name, Data] : Native->GcVisibleMembers)
@@ -534,15 +536,15 @@ Value VmDebugContext::Evaluate(std::size_t FrameId,
 }
 
 void VmDebugContext::SetLocal(std::size_t FrameId, std::size_t Slot, Value Input) const {
-    Machine->ValidateOwnedValue(Input);
     if (FrameId >= Execution->Frames.size()) throw std::out_of_range("debug frame ID out of range");
     auto& Frame = Execution->Frames[Execution->Frames.size() - 1 - FrameId];
     if (Slot >= Frame.Locals.size()) throw std::out_of_range("debug local slot out of range");
+    if (Slot < Frame.ArgumentCount && Frame.Arguments.empty())
+        Frame.Arguments.assign(Frame.Locals.begin(), Frame.Locals.begin() + Frame.ArgumentCount);
     Frame.Locals[Slot] = std::move(Input);
 }
 
 void VmDebugContext::SetStack(std::size_t FrameId, std::size_t Slot, Value Input) const {
-    Machine->ValidateOwnedValue(Input);
     if (FrameId >= Execution->Frames.size()) throw std::out_of_range("debug frame ID out of range");
     auto& Frame = Execution->Frames[Execution->Frames.size() - 1 - FrameId];
     if (Slot >= Frame.Stack.size()) throw std::out_of_range("debug stack slot out of range");
@@ -550,8 +552,7 @@ void VmDebugContext::SetStack(std::size_t FrameId, std::size_t Slot, Value Input
 }
 
 void VmDebugContext::SetGlobal(std::size_t FrameId, std::string Name, Value Input) const {
-    Machine->ValidateOwnedValue(Input);
-    (void)Value::String(Name);
+    ValidateUtf8(Name);
     if (FrameId >= Execution->Frames.size()) throw std::out_of_range("debug frame ID out of range");
     const auto& Frame = Execution->Frames[Execution->Frames.size() - 1 - FrameId];
     const auto& Owner = Frame.Function->GetOwner();
@@ -566,16 +567,11 @@ void VmDebugContext::SetGlobal(std::size_t FrameId, std::string Name, Value Inpu
 }
 
 Value VmDebugContext::SetProperty(const Value& Target, const Value& Key, Value Input) const {
-    Machine->ValidateOwnedValue(Target);
-    Machine->ValidateOwnedValue(Input);
     if (Target.GetType() != ValueType::Object)
         throw std::invalid_argument("debug property target must be an object");
     Value Result;
-    if (auto* Script = dynamic_cast<ScriptObject*>(Target.AsObject()))
-        Result = Script->SetRaw(Key, Input);
-    else if (auto* Native = dynamic_cast<NativeObject*>(Target.AsObject()))
-        Result = Native->SetMember(Key, Input);
-    else throw std::invalid_argument("debug property target has no writable members");
+    if (Target.IsScriptObject()) Result = Target.AsScriptObject()->SetRaw(Key, Input);
+    else Result = Target.AsNativeObject()->SetMember(Key, Input);
     if (Result.IsError()) {
         auto* ErrorValue = dynamic_cast<ErrorObject*>(Result.AsObject());
         throw std::invalid_argument(ErrorValue ? ErrorValue->GetMessage() : "property write failed");
@@ -631,7 +627,7 @@ void Vm::LoadModule(std::string Id, std::shared_ptr<Module> Source,
                     std::vector<std::string> ExportNames,
                     std::span<const std::uint8_t> Identity) {
     if (Id.empty()) throw std::invalid_argument("loaded module ID must be nonempty");
-    (void)Value::String(Id);
+    ValidateUtf8(Id);
     if (!Source) throw std::invalid_argument("null loaded module");
     std::unordered_set<std::string> Exports;
     for (const auto& Name : ExportNames)
@@ -673,7 +669,7 @@ bool Vm::IsModuleBuiltFrom(std::string_view Id, const std::shared_ptr<Module>& S
 }
 
 Value Vm::GetModuleGlobal(std::string_view Id, const std::string& Name) const {
-    (void)Value::String(Name);
+    ValidateUtf8(Name);
     auto Found = LoadedModules.find(std::string(Id));
     if (Found == LoadedModules.end()) throw std::invalid_argument("unknown loaded module");
     auto Global = Found->second->Globals.find(Name);
@@ -681,8 +677,7 @@ Value Vm::GetModuleGlobal(std::string_view Id, const std::string& Name) const {
 }
 
 void Vm::SetModuleGlobal(std::string_view Id, std::string Name, Value Input) {
-    (void)Value::String(Name);
-    ValidateOwnedValue(Input);
+    ValidateUtf8(Name);
     auto Found = LoadedModules.find(std::string(Id));
     if (Found == LoadedModules.end()) throw std::invalid_argument("unknown loaded module");
     Found->second->Globals.insert_or_assign(std::move(Name), std::move(Input));
@@ -734,15 +729,21 @@ void Vm::SetMetaObject(ScriptObject* Target, ScriptObject* MetaObject) {
     Target->MetaObject = MetaObject;
 }
 Value Vm::GetGlobal(const std::string& Name) const {
-    Value::String(Name); // Validate the host-supplied UTF-8 key.
+    ValidateUtf8(Name); // Validate the host-supplied UTF-8 key.
     auto Found = Globals.find(Name);
     return Found == Globals.end() ? Value::Error("undefined global") : Found->second;
 }
 void Vm::ValidateOwnedValue(const Value& Input) const {
-    if (Input.IsScriptObject() && !OwnsScript(Input.AsScriptObject()))
-        throw std::invalid_argument("ScriptObject belongs to another VM");
-    if (Input.GetType() == ValueType::Object &&
-        Input.GetObjectType() == ObjectType::Function) {
+    if (Input.GetType() != ValueType::Object) return;
+    if (Input.IsScriptObject()) {
+        if (!OwnsScript(Input.AsScriptObject()))
+            throw std::invalid_argument("ScriptObject belongs to another VM");
+        return;
+    }
+    const auto* Type = Input.AsNativeObject()->GetNativeObjectType();
+    if (Type && &Type->GetVm() != this)
+        throw std::invalid_argument("native object belongs to another VM");
+    if (Input.GetObjectType() == ObjectType::Function) {
         auto* Function = FunctionObject::FromObject(Input.AsObject());
         if (!Function || (Function->GetOwner() != Program &&
                           !ModuleByProgram.contains(Function->GetOwner().get())))
@@ -750,13 +751,12 @@ void Vm::ValidateOwnedValue(const Value& Input) const {
     }
 }
 void Vm::SetGlobal(std::string Name, Value Input) {
-    Value::String(Name);
-    ValidateOwnedValue(Input);
+    ValidateUtf8(Name);
     Globals.insert_or_assign(std::move(Name), std::move(Input));
 }
 void Vm::RegisterNativeFunction(std::string Name, std::shared_ptr<NativeObject> Input) {
     if (!Input || !Input->IsCallable()) throw std::invalid_argument("native function must be callable");
-    Value::String(Name);
+    ValidateUtf8(Name);
     RegisterNativeObject(Input);
     SetGlobal(std::move(Name), Value::FromObject(std::move(Input)));
 }
@@ -790,7 +790,6 @@ void RootHandle::Reset() {
     Lifetime.reset();
 }
 RootHandle Vm::AddToRoot(Value Input) {
-    ValidateOwnedValue(Input);
     if (NextRootToken == 0) throw std::overflow_error("RootHandle token space exhausted");
     auto Token = NextRootToken++;
     HostRoots.emplace(Token, std::move(Input));
@@ -824,7 +823,6 @@ Value Vm::Run(std::uint32_t FunctionConstant, const std::vector<Value>& Argument
     if (ActiveRuns == 0) { FaultLocation.reset(); FaultException = {}; FaultObject = nullptr; }
     if (FunctionConstant >= ConstantValues.size() || Program->Constants[FunctionConstant].Type != Constant::Kind::Function)
         throw std::invalid_argument("entry is not a function constant");
-    for (const auto& Input : Arguments) ValidateOwnedValue(Input);
     ExecutionState Execution;
     InitializeFrame(Execution.Frames.Enter(),
         std::static_pointer_cast<FunctionObject>(ConstantValues[FunctionConstant].AsNativeObject()), Arguments);
@@ -857,16 +855,14 @@ ScriptFunctionAddress Vm::GetFunctionAddress(const Value& Input) const {
 bool Vm::IsCallable(const Value& Input) const {
     Value Target = Input;
     for (unsigned Depth = 0; Depth < 64; ++Depth) {
-        ValidateOwnedValue(Target);
         if (Target.GetType() != ValueType::Object) return false;
         if (Target.IsScriptObject()) {
             auto* Meta = Target.AsScriptObject()->GetMetaObject();
-            auto Method = Meta ? Meta->GetRaw(Value::String("__call")) : std::nullopt;
+            auto Method = Meta ? Meta->FindMetaMethod("__call") : std::nullopt;
             if (!Method) return false;
             Target = *Method;
         } else {
-            auto* Native = dynamic_cast<NativeObject*>(Target.AsObject());
-            return Native && Native->IsCallable();
+            return Target.AsNativeObject()->IsCallable();
         }
     }
     return false;
@@ -877,19 +873,18 @@ Value Vm::Call(Value Target, std::vector<Value> Arguments) {
     Roots.push_back(AddToRoot(Target));
     for (const auto& Argument : Arguments) Roots.push_back(AddToRoot(Argument));
     for (unsigned Depth = 0; Depth < 64; ++Depth) {
-        ValidateOwnedValue(Target);
         if (Target.GetType() != ValueType::Object) return Value::Error("value is not callable");
         if (Target.IsScriptObject()) {
             auto* Meta = Target.AsScriptObject()->GetMetaObject();
-            auto Method = Meta ? Meta->GetRaw(Value::String("__call")) : std::nullopt;
+            auto Method = Meta ? Meta->FindMetaMethod("__call") : std::nullopt;
             if (!Method) return Value::Error("__call is missing");
             Arguments.insert(Arguments.begin(), Target);
             Target = *Method;
             Roots.push_back(AddToRoot(Target));
             continue;
         }
-        auto* Native = dynamic_cast<NativeObject*>(Target.AsObject());
-        if (!Native || !Native->IsCallable()) return Value::Error("value is not callable");
+        auto* Native = Target.AsNativeObject().get();
+        if (!Native->IsCallable()) return Value::Error("value is not callable");
         if (dynamic_cast<InvokeFunction*>(Native)) {
             if (Depth == 63) return Value::Error("Invoke forwarding limit exceeded");
             if (auto Failure = InvokeFunction::Expand(Arguments, Target, Arguments); Failure.IsError())
@@ -906,7 +901,6 @@ Value Vm::Call(Value Target, std::vector<Value> Arguments) {
         }
         ActiveRunGuard Guard(ActiveNativeCalls);
         auto Result = Native->Call(Arguments);
-        ValidateOwnedValue(Result);
         return Result;
     }
     return Value::Error("MetaObject call cycle");
@@ -920,7 +914,6 @@ Value Vm::RunModule(std::string_view Id, std::uint32_t FunctionConstant,
     const auto& Instance = *Found->second;
     if (FunctionConstant >= Instance.ConstantValues.size() || Instance.Program->Constants[FunctionConstant].Type != Constant::Kind::Function)
         throw std::invalid_argument("entry is not a function constant");
-    for (const auto& Input : Arguments) ValidateOwnedValue(Input);
     ExecutionState Execution;
     InitializeFrame(Execution.Frames.Enter(),
         std::static_pointer_cast<FunctionObject>(Instance.ConstantValues[FunctionConstant].AsNativeObject()), Arguments);
@@ -936,7 +929,7 @@ void Vm::SetModulePaths(std::vector<std::string> Paths) {
     for (const auto& Path : Paths) {
         if (Path.empty() || Path.find('\0') != std::string::npos)
             throw std::invalid_argument("module paths must be non-empty strings without NUL");
-        (void)Value::String(Path);
+        ValidateUtf8(Path);
     }
     static_cast<VmModule*>(BuiltinVmModule.AsObject())->Paths = std::move(Paths);
 }
@@ -949,7 +942,6 @@ Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t F
     if (FrameId >= PausedExecution.Frames.size())
         throw std::out_of_range("debug frame ID out of range");
     EvaluationProgram->Validate();
-    for (const auto& Input : Arguments) ValidateOwnedValue(Input);
 
     const auto& PausedFrame = PausedExecution.Frames[PausedExecution.Frames.size() - 1 - FrameId];
     const auto& PausedOwner = PausedFrame.Function->GetOwner();
@@ -1090,14 +1082,12 @@ bool Vm::TryCallArrayMethod(Frame& Current, ScriptObject& Receiver,
     auto Pc = FieldPc;
     const auto& Key = Constants[ReadU32(Code, Pc)];
     auto Operation = ScriptObject::ArrayMethod::Find(Key.AsString());
-    if (!Operation || !OwnsScript(&Receiver)) return false;
+    if (!Operation) return false;
     Pc = ArgumentPc + 1;
     const Value* Argument;
     if (ArgumentOp == Op::GetLocal) {
         Argument = &Current.Locals[ReadU32(Code, Pc)];
-        if (Argument->GetType() == ValueType::Object &&
-            !(Argument->IsScriptObject() && OwnsScript(Argument->AsScriptObject())))
-            return false; // Keep ownership and Error diagnostics on the generic path.
+        if (Argument->IsError()) return false; // Attribute the Error to its original instruction.
     } else if (ArgumentOp == Op::Const) {
         const auto Index = ReadU32(Code, Pc);
         const auto Kind = Function.GetOwner()->Constants[Index].Type;
@@ -1165,7 +1155,6 @@ FEATHER_VM_NOINLINE bool Vm::TryStoreLocalMember(Frame& Current) {
     if (DebugController || !Receiver.IsScriptObject() || Input.IsError())
         return false;
     auto* Object = Receiver.AsScriptObject();
-    // All three operands are validated VM stack values.
     if (Object->IsArray()) {
         const auto Index = Object->GetArrayIndex(Key);
         if (!Index) return false;
@@ -1210,9 +1199,7 @@ FEATHER_VM_NOINLINE bool Vm::TryEnterSlotCall(ExecutionState& Execution, const V
     if (!Callee || Callee->GetOwner() != Function.GetOwner()) return false;
     for (auto Slot : Call.Arguments) {
         const auto& Arg = Caller.Locals[Slot];
-        // Replay loads that need native ownership checks or error-location tracking at their own PC.
-        if (Arg.GetType() == ValueType::Object && !(Arg.IsScriptObject() && OwnsScript(Arg.AsScriptObject())))
-            return false;
+        if (Arg.IsError()) return false; // Replay the load to record its source location.
     }
 
     auto Owner = std::static_pointer_cast<FunctionObject>(Target->AsNativeObject());
@@ -1222,9 +1209,18 @@ FEATHER_VM_NOINLINE bool Vm::TryEnterSlotCall(ExecutionState& Execution, const V
     Next.Function = std::move(Owner);
     Next.Pc = 0;
     Next.Instance = Instance;
-    Next.Arguments.reserve(Count);
-    for (auto Slot : Call.Arguments) Next.Arguments.push_back(Locals[Slot]);
-    InitializeParameterLocals(Next);
+    Next.ArgumentCount = Count;
+    if (Next.NeedsArgumentCopy()) {
+        Next.Arguments.reserve(Count);
+        for (auto Slot : Call.Arguments) Next.Arguments.push_back(Locals[Slot]);
+        InitializeParameterLocals(Next, Next.Arguments);
+    } else {
+        const auto& Body = Callee->GetBody();
+        Next.Locals.resize(Body.LocalCount);
+        for (std::size_t I = 0; I < Count; ++I) Next.Locals[I] = Locals[Call.Arguments[I]];
+        for (std::size_t I = Count; I < Body.ParameterCount; ++I)
+            if (Body.Defaults[I]) Next.Locals[I] = *Body.Defaults[I];
+    }
     return true;
 }
 
@@ -1262,6 +1258,8 @@ Value Vm::Execute(ExecutionState& Execution) {
         InitializeFrame(Frames.Enter(), Function, Args);
         BindFrame(Frames.back());
     };
+    // A reentrant Execute has its own buffer. Release argument values after each call.
+    std::vector<Value> CallArguments;
     const FunctionPrototype* FaultBody = nullptr;
     std::size_t FaultPc = 0;
     std::string_view FaultModuleId;
@@ -1294,10 +1292,15 @@ Value Vm::Execute(ExecutionState& Execution) {
             Current.Stack.pop_back();
             return Result;
         };
-        auto Push = [&](Value Input,
-                        std::optional<DebugErrorOrigin> DebugOrigin = std::nullopt) {
-            ValidateOwnedValue(Input);
+        auto CheckStackSpace = [&] {
             if (Current.Stack.size() >= MaxOperandStackSize) throw std::runtime_error("VM stack limit exceeded");
+        };
+        auto PushPrimitive = [&](Value Input) {
+            CheckStackSpace();
+            Current.Stack.push_back(std::move(Input));
+        };
+        auto Push = [&](Value Input, std::optional<DebugErrorOrigin> DebugOrigin = std::nullopt) {
+            CheckStackSpace();
             if (Input.IsError()) {
                 auto* Error = dynamic_cast<ErrorObject*>(Input.AsObject());
                 if (Error) {
@@ -1314,7 +1317,7 @@ Value Vm::Execute(ExecutionState& Execution) {
             if (DebugOrigin && Current.Stack.back().IsError())
                 ReachDebugError(Execution, Current.Stack.back(), *DebugOrigin, InstructionStart);
         };
-        auto DispatchCall = [&](auto&& Self, Value Target, std::vector<Value> Args,
+        auto DispatchCall = [&](auto&& Self, Value Target, std::vector<Value>&& Args,
                                 unsigned Depth, bool MetaCall) -> void {
             if (Depth >= 64) {
                 Push(Value::Error("MetaObject call cycle"), DebugErrorOrigin::Operation); return;
@@ -1323,17 +1326,17 @@ Value Vm::Execute(ExecutionState& Execution) {
                 Push(Value::Error(MetaCall ? "metafunction is not callable" : "value is not callable"),
                      DebugErrorOrigin::Operation); return;
             }
-            auto ObjectValue = Target.AsObject();
-            if (auto Script = dynamic_cast<ScriptObject*>(ObjectValue)) {
+            if (Target.IsScriptObject()) {
+                auto* Script = Target.AsScriptObject();
                 auto Meta = Script->GetMetaObject();
-                auto Method = Meta ? Meta->GetRaw(Value::String("__call")) : std::nullopt;
+                auto Method = Meta ? Meta->FindMetaMethod("__call") : std::nullopt;
                 if (!Method) { Push(Value::Error("__call is missing"), DebugErrorOrigin::Operation); return; }
                 Args.insert(Args.begin(), Target);
                 Self(Self, *Method, std::move(Args), Depth + 1, true);
                 return;
             }
-            auto Native = dynamic_cast<NativeObject*>(ObjectValue);
-            if (!Native || !Native->IsCallable()) {
+            auto* Native = Target.AsNativeObject().get();
+            if (!Native->IsCallable()) {
                 Push(Value::Error(MetaCall ? "metafunction is not callable" : "value is not callable"),
                      DebugErrorOrigin::Operation); return;
             }
@@ -1364,9 +1367,9 @@ Value Vm::Execute(ExecutionState& Execution) {
             Push(FrameConstants[Id]);
             break;
         }
-        case Op::Null: Push({}); break;
-        case Op::True: Push(Value::Bool(true)); break;
-        case Op::False: Push(Value::Bool(false)); break;
+        case Op::Null: PushPrimitive({}); break;
+        case Op::True: PushPrimitive(Value::Bool(true)); break;
+        case Op::False: PushPrimitive(Value::Bool(false)); break;
         case Op::Pop: Pop(); break;
         case OptimizedLocal: {
             const auto& Plan = static_cast<const OptimizedFunction&>(*Current.Function).Plan;
@@ -1426,7 +1429,7 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         case Op::GetLocal: {
             const auto& Local = Current.Locals[ReadU32(Code, Current.Pc)];
-            // Numbers need neither ownership validation nor error tracking.
+            // Numbers never need Error tracking.
             if (Local.GetType() == ValueType::Number && Current.Stack.size() < MaxOperandStackSize)
                 Current.Stack.push_back(Local);
             else
@@ -1503,6 +1506,12 @@ Value Vm::Execute(ExecutionState& Execution) {
             Current.Stack.pop_back();
             break;
         }
+        case Op::NotEqual: {
+            auto Right = Pop();
+            auto Left = Pop();
+            Push(Value::Bool(!Equal(Left, Right)));
+            break;
+        }
         case BranchEqual: case BranchLess: {
             Instruction = Instruction == BranchLess ? Op::Less : Op::Equal;
             if (!DebugController) {
@@ -1557,7 +1566,7 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         case Op::Negate: {
             auto Input = Pop();
-            if (Input.IsNumeric()) Push(Value::Number(-Input.AsNumber()));
+            if (Input.IsNumeric()) PushPrimitive(Value::Number(-Input.AsNumber()));
             else Push(Value::Error("invalid operand"), DebugErrorOrigin::Operation);
             break;
         }
@@ -1595,10 +1604,11 @@ Value Vm::Execute(ExecutionState& Execution) {
                     break;
                 }
             }
-            std::vector<Value> Args(Count);
-            for (std::size_t I = Count; I > 0; --I) Args[I - 1] = Pop();
+            CallArguments.resize(Count);
+            for (std::size_t I = Count; I > 0; --I) CallArguments[I - 1] = Pop();
             Value Target = Pop();
-            DispatchCall(DispatchCall, std::move(Target), std::move(Args), 0, false);
+            DispatchCall(DispatchCall, std::move(Target), std::move(CallArguments), 0, false);
+            CallArguments.clear();
 
             break;
         }
@@ -1638,8 +1648,8 @@ Value Vm::Execute(ExecutionState& Execution) {
             if (Target.GetType() != ValueType::Object) {
                 Push(Value::Error("value has no members"), DebugErrorOrigin::Operation); break;
             }
-            auto ObjectValue = Target.AsObject();
-            if (auto Script = Target.IsScriptObject() ? Target.AsScriptObject() : nullptr) {
+            if (Target.IsScriptObject()) {
+                auto* Script = Target.AsScriptObject();
                 if ((Key.GetType() != ValueType::String && !Key.IsNumeric()) ||
                     (Key.GetType() == ValueType::Number && std::isnan(Key.AsNumber()))) {
                     Push(Value::Error("invalid ScriptObject key"), DebugErrorOrigin::Operation); break;
@@ -1651,14 +1661,14 @@ Value Vm::Execute(ExecutionState& Execution) {
                     break;
                 }
                 auto Meta = Script->GetMetaObject();
-                auto Method = Meta ? Meta->GetRaw(Value::String("__index")) : std::nullopt;
+                auto Method = Meta ? Meta->FindMetaMethod("__index") : std::nullopt;
                 if (!Method) {
                     Push(Value::Error("member does not exist"), DebugErrorOrigin::Operation); break;
                 }
                 DispatchCall(DispatchCall, *Method, {Target, Key}, 0, true);
-            } else if (auto Native = dynamic_cast<NativeObject*>(ObjectValue))
-                Push(Native->GetMember(Key), DebugErrorOrigin::Operation);
-            else Push(Value::Error("value has no members"), DebugErrorOrigin::Operation);
+            } else {
+                Push(Target.AsNativeObject()->GetMember(Key), DebugErrorOrigin::Operation);
+            }
             break;
         }
         default:
@@ -1681,15 +1691,15 @@ Value Vm::Execute(ExecutionState& Execution) {
             if (Target.GetType() != ValueType::Object) {
                 Push(Value::Error("value has no members"), DebugErrorOrigin::Operation); break;
             }
-            auto ObjectValue = Target.AsObject();
-            if (auto Script = Target.IsScriptObject() ? Target.AsScriptObject() : nullptr) {
+            if (Target.IsScriptObject()) {
+                auto* Script = Target.AsScriptObject();
                 if (auto Hook = Script->FindSetIndex(Key))
                     DispatchCall(DispatchCall, *Hook, {Target, Key, Input}, 0, true);
                 else
                     Push(Script->SetRaw(Key, Input), DebugErrorOrigin::Operation);
-            } else if (auto Native = dynamic_cast<NativeObject*>(ObjectValue))
-                Push(Native->SetMember(Key, Input), DebugErrorOrigin::Operation);
-            else Push(Value::Error("value has no members"), DebugErrorOrigin::Operation);
+            } else {
+                Push(Target.AsNativeObject()->SetMember(Key, Input), DebugErrorOrigin::Operation);
+            }
             break;
         }
         }

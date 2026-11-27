@@ -13,7 +13,7 @@ void RegisterModuleImport(Vm& Machine, std::string_view ModuleId,
                           ModuleImportCallback Callback);
 ```
 
-空 ModuleId 指根模块。回调收到实际调用方模块 ID 和不透明的 specifier，负责解析、缓存、初始化及返回模块值。参数必须是单个字符串，否则返回 Error；空回调被拒绝。允许返回基础值、宿主对象及同一 VM 的脚本对象/函数；跨 VM 的脚本值仍由所有权校验拒绝。
+空 ModuleId 指根模块。回调收到实际调用方模块 ID 和不透明的 specifier，负责解析、缓存、初始化及返回模块值。参数必须是单个字符串，否则返回 Error；空回调被拒绝。允许返回基础值、宿主对象及同一 VM 的脚本对象/函数；回调提供者负责保证脚本值属于调用方 VM，需要时可调用 `Vm::ValidateOwnedValue`。
 
 需要隔离 VM 时，宿主可在此回调中返回 NativeObject 代理，自行定义跨 VM 参数与结果的复制规则。`tests/Import.cpp` 保留代理及跨 VM 拒绝测试。每个 VM 分别注册自己的回调；捕获对象必须覆盖回调的使用期。
 
@@ -45,6 +45,8 @@ CLI 按列表顺序搜索裸名 Native 模块，再按同样顺序搜索 Feather
 ### 当前函数的实参
 
 `vm.GetArgumentCount()` 返回当前 Feather 调用帧的实参数量。用 `vm.GetArgument(index)` 按零基索引读取调用时的值。多传的实参和显式传入的 `null` 都计入。默认值只填入命名形参。重新给形参赋值时，原实参仍可通过 `GetArgument` 读取。
+
+VM 在装载函数时分析字节码中的形参写入。只读形参直接作为原始实参视图，实参数量单独记录；可能写形参或收到额外实参的调用保留副本。调试器改写只读形参前也会保存原值。
 
 索引必须是范围内的整数，接受 number 和 byte。参数错误、索引越界或宿主在没有活动脚本帧时调用，均返回 Error。嵌套函数读取自己的实参。通过 `__call` 等元方法调用时，VM 注入的接收对象也是实参。匿名函数按普通函数规则接收实参。
 

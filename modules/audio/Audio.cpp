@@ -283,9 +283,9 @@ public:
     std::unordered_map<std::string, Value> Members;
 };
 Sound* GetSound(const Value& Input, const SoundType& Type) {
-    if (Input.GetType() != ValueType::Object) return nullptr;
-    auto* Host = dynamic_cast<NativeObject*>(Input.AsObject());
-    return Host && Host->GetNativeObjectType() == &Type ? static_cast<Sound*>(Host) : nullptr;
+    if (Input.GetType() != ValueType::Object || Input.IsScriptObject()) return nullptr;
+    auto* Host = Input.AsNativeObject().get();
+    return Host->GetNativeObjectType() == &Type ? static_cast<Sound*>(Host) : nullptr;
 }
 Value Create(const NativeModuleContext& Context) {
     auto& Vm = Context.Machine;

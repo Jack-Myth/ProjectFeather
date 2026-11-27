@@ -1,4 +1,5 @@
 #include <Feather/Compiler.hpp>
+#include <Feather/Utf8.hpp>
 
 #include <limits>
 #include <stdexcept>
@@ -81,7 +82,7 @@ public:
         Require(Count);
         std::string Result(reinterpret_cast<const char*>(Bytes.data() + Position), Count);
         Position += Count;
-        (void)Value::String(Result);
+        ValidateUtf8(Result);
         return Result;
     }
     bool Done() const { return Position == Bytes.size(); }

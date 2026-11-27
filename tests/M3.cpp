@@ -105,7 +105,7 @@ void NativeVisibilityAndBoundaries() {
 
     auto Foreign = std::make_unique<Vm>(Program());
     auto ForeignScript = Foreign->CreateScriptObject();
-    Reject([&] { Machine.AddToRoot(Value::FromScript(ForeignScript)); }, "foreign root accepted");
+    Reject([&] { Machine.ValidateOwnedValue(Value::FromScript(ForeignScript)); }, "host validation accepted a foreign object");
     Reject([&] { Machine.SetMetaObject(Machine.CreateScriptObject(), ForeignScript); },
            "foreign MetaObject accepted");
     Native->SetGcVisibleMember("foreign", Value::FromScript(ForeignScript));

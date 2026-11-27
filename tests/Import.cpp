@@ -48,11 +48,15 @@ private:
 
 class ReturnValue final : public NativeObject {
 public:
-    explicit ReturnValue(Value Result) : Result(std::move(Result)) {}
+    ReturnValue(Vm& Owner, Value Result) : Owner(Owner), Result(std::move(Result)) {}
     ObjectType GetObjectType() const override { return ObjectType::Host; }
     bool IsCallable() const override { return true; }
-    Value Call(const std::vector<Value>&) override { return Result; }
+    Value Call(const std::vector<Value>&) override {
+        Owner.ValidateOwnedValue(Result);
+        return Result;
+    }
 private:
+    Vm& Owner;
     Value Result;
 };
 
@@ -92,18 +96,20 @@ int main() {
         auto ForeignScript = Foreign.CreateScriptObject();
         Vm Guarded(ForeignProgram.Program);
         RegisterModuleImport(Guarded, "", [&](std::string_view, std::string_view) -> Value {
-            return Value::FromScript(ForeignScript);
+            auto Result = Value::FromScript(ForeignScript);
+            Guarded.ValidateOwnedValue(Result);
+            return Result;
         });
         (void)ForeignProgram.Initialize(Guarded);
-        try { Guarded.SetGlobal("foreign_function", Foreign.GetGlobal("probe")); }
-        catch (const std::invalid_argument&) { /* expected */ }
-        Check(Guarded.GetGlobal("foreign_function").IsError(),
-              "foreign function stored in another VM");
+        bool ForeignRejected = false;
+        try { Guarded.ValidateOwnedValue(Foreign.GetGlobal("probe")); }
+        catch (const std::invalid_argument&) { ForeignRejected = true; }
+        Check(ForeignRejected, "host validation accepted a foreign function");
 
         auto NativeProgram = Compile("def probe() { return foreign(); }");
         Vm NativeGuarded(NativeProgram.Program);
         NativeGuarded.RegisterNativeFunction("foreign",
-            std::make_shared<ReturnValue>(Value::FromScript(ForeignScript)));
+            std::make_shared<ReturnValue>(NativeGuarded, Value::FromScript(ForeignScript)));
         (void)NativeProgram.Initialize(NativeGuarded);
         bool NativeReturnRejected = false;
         try { (void)NativeGuarded.Run(NativeProgram.Functions.at("probe")); }

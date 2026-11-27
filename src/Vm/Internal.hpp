@@ -8,10 +8,11 @@ namespace Feather {
 
 class FunctionObject : public NativeObject {
 public:
-    FunctionObject(std::shared_ptr<Module> Owner, std::shared_ptr<FunctionPrototype> Body)
-        : Owner(std::move(Owner)), Body(std::move(Body)) {
+    FunctionObject(std::shared_ptr<Module> Owner, std::shared_ptr<FunctionPrototype> Body, bool WritesParameters)
+        : WritesParameters(WritesParameters), Owner(std::move(Owner)), Body(std::move(Body)) {
         Flags |= static_cast<std::uint8_t>(Flag::ScriptFunction);
     }
+    const bool WritesParameters;
     FunctionObject(const FunctionObject&) = delete;
     FunctionObject& operator=(const FunctionObject&) = delete;
     static FunctionObject* FromObject(Object* Input) noexcept {
@@ -56,7 +57,16 @@ struct Frame {
     std::shared_ptr<FunctionObject> Function;
     ModuleInstance* Instance = nullptr;
     std::size_t Pc = 0;
+    // Immutable parameter slots double as the original argument list when all arguments fit.
+    std::size_t ArgumentCount = 0;
     std::vector<Value> Arguments;
+    std::span<const Value> OriginalArguments() const {
+        if (!Arguments.empty()) return Arguments;
+        return std::span<const Value>(Locals).first(ArgumentCount);
+    }
+    bool NeedsArgumentCopy() const {
+        return Function->WritesParameters || ArgumentCount > Function->GetBody().ParameterCount;
+    }
     std::vector<Value> Locals;
     std::vector<Value> Stack;
 };

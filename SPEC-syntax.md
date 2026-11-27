@@ -69,7 +69,7 @@ literal       = "null" | "true" | "false" | NUMBER | STRING ;
 - 编译结果包含一个模块、初始化函数索引、声明函数名到常量索引的映射及导出名表。宿主可用此模块构造主 VM，或调用 `CompiledProgram::LoadInto(vm, id)` 装入已有 VM，再以 `InitializeModule(vm, id)` 初始化；后者只执行顶层代码一次。主模块的 `Initialize(vm)` 接口仍可重复执行顶层代码。初始化先将所有声明函数写入所属模块的全局表，再按源码顺序执行顶层语句。因此函数可相互递归，顶层语句可调用任意声明函数。宿主随后可按映射索引调用函数。装入多个模块后的运行契约见 [SPEC-modules.md](SPEC-modules.md#文件模块)。
 - `if` 和 `while` 条件使用 VM 的真值规则；`else` 只接块。`object()` 编译为 `NewObject`。没有隐式分号、闭包、方法 `this` 绑定、逻辑短路运算或浮点字面量 `NaN`/`Infinity`。
 - `break` 和 `continue` 只允许出现在 `while` 循环体内，并作用于词法上最近的外层循环。`break` 跳到该循环之后，`continue` 跳回该循环的条件求值处；两者均以 `JUMP` 降级，不增加 ISA opcode。即使循环位于顶层，这些语句也不能跨越函数边界。
-- `!=` 与 `==` 具有相同优先级并左结合，其结果严格等于对应 `==` 结果的布尔取反。编译器可将其降级为 `Equal; False; Equal`，不新增字节码指令。
+- `!=` 与 `==` 具有相同优先级并左结合，其结果严格等于对应 `==` 结果的布尔取反。编译器使用指令版本 6 的 `NotEqual`。
 
 ## 诊断与边界
 

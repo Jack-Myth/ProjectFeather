@@ -1,33 +1,11 @@
 #include <Feather/Runtime.hpp>
+#include <Feather/Utf8.hpp>
 
 #include <new>
 #include <cmath>
 #include <utility>
 
 namespace Feather {
-namespace {
-bool IsValidUtf8(std::string_view Input) {
-    for (std::size_t I = 0; I < Input.size();) {
-        auto Lead = static_cast<unsigned char>(Input[I]);
-        if (Lead < 0x80) { ++I; continue; }
-        std::size_t Width = Lead >= 0xC2 && Lead <= 0xDF ? 2 :
-                            Lead >= 0xE0 && Lead <= 0xEF ? 3 :
-                            Lead >= 0xF0 && Lead <= 0xF4 ? 4 : 0;
-        if (Width == 0 || I + Width > Input.size()) return false;
-        for (std::size_t J = 1; J < Width; ++J) {
-            auto Byte = static_cast<unsigned char>(Input[I + J]);
-            if (Byte < 0x80 || Byte > 0xBF) return false;
-        }
-        auto Second = static_cast<unsigned char>(Input[I + 1]);
-        if ((Lead == 0xE0 && Second < 0xA0) ||
-            (Lead == 0xED && Second > 0x9F) ||
-            (Lead == 0xF0 && Second < 0x90) ||
-            (Lead == 0xF4 && Second > 0x8F)) return false;
-        I += Width;
-    }
-    return true;
-}
-} // namespace
 
 Value Value::Error(std::string Message) {
     return FromObject(std::make_shared<ErrorObject>(std::move(Message)));
@@ -64,7 +42,7 @@ void Value::CopyFrom(const Value& Other) {
     case ValueType::String: new (&Data.Text) std::shared_ptr<const std::string>(Other.Data.Text); break;
     case ValueType::Object:
         if (ScriptReference) Data.Script = Other.Data.Script;
-        else new (&Data.Reference) std::shared_ptr<Object>(Other.Data.Reference);
+        else new (&Data.Reference) std::shared_ptr<NativeObject>(Other.Data.Reference);
         break;
     }
 }
@@ -83,7 +61,7 @@ void Value::MoveFrom(Value& Other) noexcept {
     case ValueType::Object:
         if (ScriptReference) Data.Script = Other.Data.Script;
         else {
-            new (&Data.Reference) std::shared_ptr<Object>(std::move(Other.Data.Reference));
+            new (&Data.Reference) std::shared_ptr<NativeObject>(std::move(Other.Data.Reference));
             Other.Data.Reference.~shared_ptr();
         }
         break;
@@ -105,18 +83,18 @@ std::uint8_t Value::AsByte() const {
     return Data.ByteValue;
 }
 Value Value::String(std::string Input) {
-    if (!IsValidUtf8(Input)) throw std::invalid_argument("invalid UTF-8 string");
+    ValidateUtf8(Input);
     auto Text = std::make_shared<const std::string>(std::move(Input));
     Value Result(ValueType::String);
     new (&Result.Data.Text) std::shared_ptr<const std::string>(std::move(Text));
     return Result;
 }
-Value Value::FromObject(std::shared_ptr<Object> Input) {
+Value Value::FromObject(std::shared_ptr<NativeObject> Input) {
     if (!Input) throw std::invalid_argument("null object reference");
     if (Input->GetObjectType() == ObjectType::Script)
         throw std::invalid_argument("ScriptObject must come from a VM heap");
     Value Result(ValueType::Object);
-    new (&Result.Data.Reference) std::shared_ptr<Object>(std::move(Input));
+    new (&Result.Data.Reference) std::shared_ptr<NativeObject>(std::move(Input));
     return Result;
 }
 Value Value::FromScript(ScriptObject* Input) {
@@ -152,7 +130,7 @@ ScriptObject* Value::AsScriptObject() const {
         throw std::logic_error("value is not ScriptObject");
     return Data.Script;
 }
-const std::shared_ptr<Object>& Value::AsNativeObject() const {
+const std::shared_ptr<NativeObject>& Value::AsNativeObject() const {
     if (Type != ValueType::Object || ScriptReference)
         throw std::logic_error("value is not NativeObject");
     return Data.Reference;

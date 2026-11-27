@@ -99,12 +99,6 @@ private:
     void Track(const Vm& Source, const Value& Input) {
         if (Input.GetType() != ValueType::Object) return;
         Source.ValidateOwnedValue(Input);
-        if (!Input.IsScriptObject()) {
-            const auto* Native = dynamic_cast<const NativeObject*>(Input.AsObject());
-            const auto* Type = Native ? Native->GetNativeObjectType() : nullptr;
-            if (Type && &Type->GetVm() != &Source)
-                throw std::invalid_argument("message native object belongs to another VM");
-        }
         if (Input.AsObject() == Source.GetRootMetaObject() || Ids.contains(Input.AsObject())) return;
         Ids.emplace(Input.AsObject(), CheckedCount(Objects.size()));
         Objects.push_back(Input);
@@ -116,8 +110,8 @@ private:
             return;
         }
         const auto* Buffer = ByteBufferData(Input);
-        const auto* Native = dynamic_cast<const NativeObject*>(Input.AsObject());
-        if (!Buffer || !Native || !Native->GcVisibleMembers.empty())
+        const auto& Native = Input.AsNativeObject();
+        if (!Buffer || !Native->GcVisibleMembers.empty())
             throw std::invalid_argument("object type is not supported by message archives");
         const auto& Id = Native->GetNativeObjectType()->GetId();
         WriteTag(Tag::Native);

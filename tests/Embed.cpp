@@ -1,5 +1,6 @@
 #include <Feather/ByteBuffer.hpp>
-#include <Feather/Runtime.hpp>
+#include <Feather/Compiler.hpp>
+#include <Feather/NativeModule.hpp>
 
 #include <array>
 #include <future>
@@ -22,6 +23,26 @@ public:
         return Value::Number(Arguments[0].AsNumber() * 2);
     }
 };
+
+void CheckReentrantArguments() {
+    auto Program = Compile(R"(
+        def inner(x) { get_type(x); return x; }
+        def outer() { return host.reenter(3, 19, null, "retained"); }
+    )");
+    Vm Machine(Program.Program);
+    NativeModuleGuid Id{{1}};
+    NativeModuleBuilder Host(Machine, Id, "host");
+    Host.AddFunction("reenter", [&](const std::vector<Value>& Args) {
+        Check(Args.size() == 4 && Args[0].AsNumber() == 3, "outer native arguments");
+        auto Result = Machine.Run(Program.Functions.at("inner"), {Value::Number(42)});
+        Check(Result.AsNumber() == 42 && Args.size() == 4 && Args[3].AsString() == "retained",
+              "nested native call overwrote outer arguments");
+        return Args[1];
+    });
+    Machine.SetGlobal("host", Host.Build());
+    Program.Initialize(Machine);
+    Check(Machine.Run(Program.Functions.at("outer")).AsNumber() == 19, "reentrant return");
+}
 
 void CheckMessageArchive() {
     auto Program = std::make_shared<Module>();
@@ -115,6 +136,7 @@ int main() {
         Check(Missing.IsError() &&
               dynamic_cast<ErrorObject*>(Missing.AsObject())->GetMessage() == "undefined global",
               "host can inspect language Error");
+        CheckReentrantArguments();
         CheckMessageArchive();
         std::cout << "Embedding tests passed\n";
         return 0;

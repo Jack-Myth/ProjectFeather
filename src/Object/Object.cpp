@@ -1,4 +1,5 @@
 #include <Feather/Runtime.hpp>
+#include <Feather/Utf8.hpp>
 
 #include <bit>
 #include <cmath>
@@ -18,7 +19,7 @@ NativeObjectType::NativeObjectType(Vm& InputMachine, NativeModuleGuid Module,
                                    std::string Name)
     : Machine(InputMachine), Id{Module, std::move(Name)} {
     if (Id.Name.empty()) throw std::invalid_argument("empty native type name");
-    (void)Value::String(Id.Name);
+    ValidateUtf8(Id.Name);
 }
 
 void NativeObjectType::RegisterObject(const std::shared_ptr<NativeObject>& Input) {
@@ -82,6 +83,11 @@ std::optional<Value> ScriptObject::GetRaw(const Value& Input) const {
     if (Found == Members.end()) return std::nullopt;
     return Found->second;
 }
+std::optional<Value> ScriptObject::FindMetaMethod(std::string_view Name) const {
+    const auto Found = Members.find(Name);
+    if (Found == Members.end()) return std::nullopt;
+    return Found->second;
+}
 std::optional<Value> ScriptObject::FindSetIndex(const Value& Key) const {
     if (Elements || !MetaObject || MetaObject->Members.empty()) return std::nullopt;
     if (Key.GetType() != ValueType::String && (!Key.IsNumeric() || std::isnan(Key.AsNumber())))
@@ -96,13 +102,11 @@ Value ScriptObject::SetRaw(const Value& InputKey, const Value& Input) {
         if (InputKey.GetType() == ValueType::String) return Value::Error("array members are read-only");
         const auto Index = GetArrayIndex(InputKey);
         if (!Index) return Value::Error("invalid array index");
-        Owner->ValidateOwnedValue(Input);
         (*Elements)[*Index] = Input;
         return Input;
     }
     auto Key = ConvertKey(InputKey);
     if (!Key) return Value::Error("invalid ScriptObject key");
-    Owner->ValidateOwnedValue(Input);
     Members.insert_or_assign(std::move(*Key), Input);
     return Input;
 }
@@ -117,7 +121,6 @@ std::optional<std::size_t> ScriptObject::GetArrayIndex(const Value& Key) const {
 
 void ScriptObject::AppendArray(const Value& Input) {
     if (!Elements) throw std::logic_error("AppendArray requires an array");
-    Owner->ValidateOwnedValue(Input);
     Elements->push_back(Input);
 }
 

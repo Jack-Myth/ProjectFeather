@@ -72,6 +72,8 @@
 
 ### 1.4 Object 体系：ScriptObject 与 NativeObject
 
+C++ 宿主通过 `Value::FromObject(std::shared_ptr<NativeObject>)` 传入原生对象，通过 `Value::FromScript(ScriptObject*)` 传入 VM 堆上的脚本对象。原生模块与运行时使用同一版本的 C++ 头文件构建。
+
 - 划分依据：由**脚本代码**定义的 object 实例 → `ScriptObject`；由 **VM 或
       宿主**定义的 object 实例 → `NativeObject`
 - ScriptObject 自身的数据是一张哈希表；其可定制行为由关联的单层
@@ -248,6 +250,7 @@
 | `AddConst` / `SubConst` / `MulConst` | number 常量索引 u32 | `[左] → [结果]` | 指令版本 3，opcode 26～28，常量为右操作数，沿用相应运算的数值及 Error 语义 |
 | `GetField` | string 常量索引 u32 | `[对象] → [结果]` | 指令版本 3，opcode 29，以常量字段名执行普通成员读取，包含元对象及原生对象路径 |
 | `StoreLocal` | 目标局部槽 u32 | `[值] → []` | 指令版本 5，opcode 30。将栈顶值移入局部槽并消费该值；声明与独立赋值使用，求值中的赋值保留结果。 |
+| `NotEqual` | 无 | `[左, 右] → [bool]` | 指令版本 6，opcode 31。沿用 Equal 的比较规则并将结果取反。 |
 | `Negate` | 无 | `[值] → [结果]` | 数值取负；非法类型返回 Error |
 | `Equal` / `Less` | 无 | `[左, 右] → [结果]` | 按 5.3 节比较规则 |
 | `JUMP` | 相对偏移 | `[] → []` | 无条件跳转 |
@@ -366,7 +369,7 @@
 
 源码诊断由编译器和 VM 提供。编译器生成可选的内存指令位置表，也可写入独立 `.fbs`；VM 为首次观察到的 Error 记录每 VM 独立来源，宿主通过 `Vm::GetErrorLocation(value)` 查询。执行预算、分配和宿主回调等未捕获故障继续抛原有 C++ 异常，宿主可在捕获后通过 `Vm::GetFaultLocation()` 查询位置。最外层新执行会清除上次故障位置；继承 `std::exception` 的同一异常穿过宿主重入时保留内层位置，宿主改抛的新异常标在当前调用点。这些位置不进入 Error 值本身，也不改变 Error 的普通值语义。普通来源查询记录对象的首次位置；Error 调试事件观察每个结果边界，两者相互独立。
 
-通用嵌入式调试见 [SPEC-debugging.md](SPEC-debugging.md)。核心在指令前安全点及 Error 结果边界调用可选 `VmDebugController`，并提供回调期间有效的帧、全局和对象属性视图；默认检查为只读，受控调试接口可修改槽位/global/属性，或在同一 VM 中运行由上层编译好的临时表达式函数。临时执行屏蔽安全点、Error 与结束回调，避免递归进入控制器；它仍受当前 VM 预算和所有权校验约束。JSON 命令、暂停等待、表达式编译和宿主 channel 位于可剥离的调试实现。暂停时执行帧仍在 `ExecutionState` 中，继续作为 GC 根；协议线程不得直接访问该上下文。
+通用嵌入式调试见 [SPEC-debugging.md](SPEC-debugging.md)。核心在指令前安全点及 Error 结果边界调用可选 `VmDebugController`，并提供回调期间有效的帧、全局和对象属性视图；默认检查为只读，受控调试接口可修改槽位/global/属性，或在同一 VM 中运行由上层编译好的临时表达式函数。临时执行屏蔽安全点、Error 与结束回调，避免递归进入控制器；它仍使用当前 VM 的预算，调试宿主应保证传入值归属正确。JSON 命令、暂停等待、表达式编译和宿主 channel 位于可剥离的调试实现。暂停时执行帧仍在 `ExecutionState` 中，继续作为 GC 根；协议线程不得直接访问该上下文。
 
 ### 5.3 条件真值与数值边界
 
@@ -392,9 +395,7 @@
 - `Equal`：同类型的 null、bool、number、byte 按值比较，string 按 UTF-8
       字节内容比较，object 按对象身份比较；不同顶层类型返回 false，但 byte/number 按无损数值提升后比较。
       NaN 不等于任何数，`+0` 等于 `-0`。
-- 源码 `a != b` 是 `a == b` 结果的布尔取反；编译器以
-      `Equal; False; Equal` 降级，不增加 ISA opcode，因此同样继承 NaN、跨类型
-      和 object 身份比较规则。
+- 源码 `a != b` 是 `a == b` 结果的布尔取反；编译器生成 `NotEqual`，其 NaN、跨类型和对象身份比较规则与 `Equal` 一致。
 - `Less` 对 number/byte 数值组合有定义；NaN 参与时返回 false，其余
       类型组合生成新 Error。初版不支持字符串排序。
 - `Add` 对 number/byte 数值组合执行 IEEE 754 双精度加法，对 string/string
@@ -418,7 +419,7 @@
 - `Vm(shared_ptr<Module>, MaxScriptObjects, MaxInstructionsPerInvocation)` 构造时验证并冻结模块；
       析构销毁 VM 堆及全局状态。宿主用 `Run(functionConstantIndex, args)`
       调用主模块入口。`GetGlobal(name)`/`SetGlobal(name, value)` 访问主模块全局表；
-      未定义全局读取返回新 Error。跨 VM ScriptObject 或 Function 使用报 API 错误。
+      未定义全局读取返回新 Error。宿主负责传入本 VM 的 ScriptObject 和脚本函数，可在入口显式调用 `Vm::ValidateOwnedValue` 检查归属。
 - 宿主对返回 Value 先看顶层类型，再看 `GetObjectType()` 或 `IsError()`；
       Error 的 `message` 可通过其 `get_member` 或 C++ ErrorObject 接口读取。
       语言 Error 是正常返回值；无效模块/API 误用与 `std::bad_alloc` 走 C++

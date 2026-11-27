@@ -16,7 +16,7 @@
 |---|---|---|
 | magic | 8 bytes | `46 54 48 52 42 43 00 00`（`FTHRBC` 加两个零字节） |
 | format version | u16 | 6 |
-| instruction version | u16 | 5。旧版本字节码不再接受，须用对应源码重编译 |
+| instruction version | u16 | 新编译的程序使用 6。加载器也接受版本 5，按文件声明的版本验证指令。 |
 | payload size | u32 | 后续负载的精确字节数 |
 | source size | u64 | 源文件字节数，计入 payload size；无源文件大小信息时为 UINT64_MAX |
 | constant count | u32 | 常量条数，最多 65536 |
@@ -50,7 +50,7 @@
 |---|---|---|
 | magic | 8 bytes | `FTHRSY` 后接两个零字节 |
 | format version | u16 | 3 |
-| instruction version | u16 | 5，必须匹配对应 `.fbc` 的指令版本 |
+| instruction version | u16 | 5 或 6，必须匹配对应的 `.fbc` 指令版本。 |
 | payload size | u32 | 从头部结束到文件末尾的精确字节数，含校验和 |
 | bytecode size | u32 | 对应 `.fbc` 的总字节数 |
 | bytecode fingerprint | u64 | 标准 v6 程序编码的 FNV-1a 64 位指纹（计算时将源码大小字段统一为 UINT64_MAX） |

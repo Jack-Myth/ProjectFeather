@@ -60,8 +60,8 @@ std::size_t Vm::CollectGarbageImpl() {
         if (Input.GetType() != ValueType::Object) return;
         if (Input.IsScriptObject()) MarkScript(Input.AsScriptObject());
         else {
-            auto Native = std::dynamic_pointer_cast<NativeObject>(Input.AsNativeObject());
-            if (Native && SeenNative.insert(Native.get()).second) NativeWork.push_back(std::move(Native));
+            const auto& Native = Input.AsNativeObject();
+            if (SeenNative.insert(Native.get()).second) NativeWork.push_back(Native);
         }
     };
     MarkScript(RootMetaObject);

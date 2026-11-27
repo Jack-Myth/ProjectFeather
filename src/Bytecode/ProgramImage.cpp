@@ -1,4 +1,5 @@
 #include <Feather/Compiler.hpp>
+#include <Feather/Utf8.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -83,7 +84,7 @@ public:
     std::string String() {
         auto Bytes = Blob();
         std::string Result(Bytes.begin(), Bytes.end());
-        (void)Value::String(Result);
+        ValidateUtf8(Result);
         return Result;
     }
     bool Done() const { return Position == Input.size(); }
@@ -210,7 +211,7 @@ CompiledProgram DeserializeProgram(std::span<const std::uint8_t> Bytes, std::siz
     for (auto Byte : Magic) if (Input.U8() != Byte) Invalid("invalid bytecode magic");
     if (Input.U16() != FormatVersion) Invalid("unsupported bytecode format version");
     const auto InstructionVersion = Input.U16();
-    if (InstructionVersion != Module::CurrentInstructionVersion)
+    if (InstructionVersion != 5 && InstructionVersion != Module::CurrentInstructionVersion)
         Invalid("unsupported instruction version");
     if (Bytes.size() < HeaderSize || Input.U32() != Bytes.size() - HeaderSize)
         Invalid("invalid bytecode payload size");

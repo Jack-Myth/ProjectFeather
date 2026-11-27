@@ -38,6 +38,7 @@ void CheckOptimizedInstructions() {
     auto Source = Compile(R"(
         def update(x, y) { x = x + y; return x; }
         def doubled(x) { x = x + x; return x; }
+        def different(x, y) { return x != y; }
         def increment(x) { x = x + 1; return x; }
         def score(o) { return (o.value * 3 + 4) - 2; }
     )");
@@ -50,10 +51,22 @@ void CheckOptimizedInstructions() {
     Check(HasOp("update", Op::AddToLocal) && HasOp("increment", Op::AddConstToLocal) &&
           HasOp("score", Op::GetField) && HasOp("score", Op::MulConst) &&
           HasOp("score", Op::AddConst) && HasOp("score", Op::SubConst), "optimized opcodes missing");
+    Check(HasOp("different", Op::NotEqual), "compiler did not emit NotEqual");
     auto Bytes = SerializeProgram(Source);
     auto Loaded = DeserializeProgram(Bytes);
     AttachSymbols(Loaded, SerializeSymbols(Source));
     Vm Machine(Loaded.Program);
+    const auto Different = Loaded.Functions.at("different");
+    Check(!Machine.Run(Different, {Value::Byte(3), Value::Number(3)}).AsBool(), "NotEqual numeric promotion");
+    Check(Machine.Run(Different, {Value::String("3"), Value::Number(3)}).AsBool(), "NotEqual mixed types");
+    Source.Program->InstructionVersion = 5;
+    Reject([&] { Source.Program->Validate(); }, "NotEqual accepted under ISA 5");
+    auto Legacy = Compile("def id(x) { return x; }");
+    Legacy.Program->InstructionVersion = 5;
+    auto LoadedLegacy = DeserializeProgram(SerializeProgram(Legacy));
+    AttachSymbols(LoadedLegacy, SerializeSymbols(Legacy));
+    Vm LegacyVm(LoadedLegacy.Program);
+    Check(LegacyVm.Run(LoadedLegacy.Functions.at("id"), {Value::Byte(7)}).AsByte() == 7, "ISA 5 round trip");
     auto Update = Loaded.Functions.at("update");
     Check(Machine.Run(Loaded.Functions.at("doubled"), {Value::Number(1.25)}).AsNumber() == 2.5,
           "aliased number operands changed");

@@ -37,7 +37,7 @@ std::optional<std::size_t> MemberStore(const Code& Bytes, std::size_t Pc) {
             if (Values < 1) return {};
             break;
         case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::GetMember:
-        case Op::Equal: case Op::Less:
+        case Op::NotEqual: case Op::Equal: case Op::Less:
             if (Values < 2) return {};
             --Values;
             break;
@@ -111,9 +111,15 @@ bool MatchBlock(const Code& Bytes, std::size_t Start, const Module& Program, Slo
 
 SlotPlan OptimizeFunction(FunctionPrototype& Body, const Module& Program) {
     auto& Bytes = Body.Code;
+    SlotPlan Plan;
     std::vector<std::size_t> Targets;
     for (std::size_t Pc = 0; Pc < Bytes.size();) {
         const auto Instruction = At(Bytes, Pc);
+        // Inspect the original destinations before slot and return-store fusion.
+        if (Instruction == Op::SetLocal || Instruction == Op::StoreLocal)
+            Plan.WritesParameters |= Operand(Bytes, Pc) < Body.ParameterCount;
+        if (Instruction == Op::AddToLocal || Instruction == Op::AddConstToLocal)
+            Plan.WritesParameters |= (Operand(Bytes, Pc) & 0xffff) < Body.ParameterCount;
         if (Instruction == Op::Jump || Instruction == Op::JumpIf)
             Targets.push_back(JumpTarget(Bytes, Pc));
         if ((Instruction == Op::Less || Instruction == Op::Equal) && Bytes.size()-Pc > 2*JumpSize &&
@@ -124,7 +130,6 @@ SlotPlan OptimizeFunction(FunctionPrototype& Body, const Module& Program) {
         Pc += 1 + OperandWidth(Instruction);
     }
     std::sort(Targets.begin(), Targets.end());
-    SlotPlan Plan;
     std::size_t LoadStart = 0;
     for (std::size_t Pc = 0; Pc < Bytes.size();) {
         const auto Instruction = static_cast<Op>(Bytes[Pc] & 0x7f);

@@ -1,4 +1,5 @@
 #include "Render2D.hpp"
+#include <Feather/Utf8.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -126,7 +127,7 @@ std::string NormalizeResourcePath(std::string_view Input) {
     std::string Result;
     Result.reserve(Normalized.size());
     for (char8_t Byte : Normalized) Result.push_back(static_cast<char>(Byte));
-    (void)Value::String(Result);
+    ValidateUtf8(Result);
     return Result;
 }
 
