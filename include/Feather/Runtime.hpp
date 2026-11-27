@@ -544,6 +544,7 @@ private:
     Value BuiltinArray;
     Value BuiltinVmModule;
     std::unordered_map<std::string, Value> Globals;
+    std::vector<const Value*> GlobalBindings;
     std::unordered_map<std::string, std::shared_ptr<ModuleInstance>> LoadedModules;
     std::unordered_map<const Module*, std::shared_ptr<ModuleInstance>> ModuleByProgram;
     struct ErrorOrigin {

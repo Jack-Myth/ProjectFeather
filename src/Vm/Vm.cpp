@@ -14,6 +14,19 @@ namespace Feather {
 namespace {
 constexpr std::size_t MaxOperandStackSize = 65'536;
 
+// Both program and module scopes own this cache. Cache existing binding cells,
+// not values or misses; assigning and rehashing the globals table leaves cells live.
+const Value* ReadGlobalBinding(const Module& Program,
+                               const std::unordered_map<std::string, Value>& Globals,
+                               std::vector<const Value*>& Bindings, std::uint32_t Id) {
+    auto& Binding = Bindings[Id];
+    if (!Binding) {
+        const auto Found = Globals.find(Program.Constants[Id].Text);
+        if (Found != Globals.end()) Binding = &Found->second;
+    }
+    return Binding;
+}
+
 void InitializeParameterLocals(Frame& Next) {
     const auto& Body = Next.Function->GetBody();
     Next.Locals.resize(Body.LocalCount);
@@ -611,6 +624,7 @@ Vm::Vm(std::shared_ptr<Module> Input, std::size_t MaxScriptObjects,
             Item.Function = std::make_shared<FunctionPrototype>(*Item.Function);
     }
     ConstantValues = BindConstants(Program);
+    GlobalBindings.resize(Program->Constants.size());
 }
 
 void Vm::LoadModule(std::string Id, std::shared_ptr<Module> Source,
@@ -642,6 +656,7 @@ void Vm::LoadModule(std::string Id, std::shared_ptr<Module> Source,
         if (Item.Type == Constant::Kind::Function)
             Item.Function = std::make_shared<FunctionPrototype>(*Item.Function);
     Instance->ConstantValues = BindConstants(Instance->Program);
+    Instance->GlobalBindings.resize(Instance->Program->Constants.size());
     Instance->Namespace = std::make_shared<ModuleNamespace>(Instance);
     auto [Inserted, _] = LoadedModules.emplace(Id, Instance);
     try { ModuleByProgram.emplace(Instance->Program.get(), Instance); }
@@ -954,6 +969,7 @@ Value Vm::EvaluateDebugExpression(ExecutionState& PausedExecution, std::size_t F
         if (Item.Type == Constant::Kind::Function)
             Item.Function = std::make_shared<FunctionPrototype>(*Item.Function);
     Instance->ConstantValues = BindConstants(Instance->Program);
+    Instance->GlobalBindings.resize(Instance->Program->Constants.size());
     if (FunctionConstant >= Instance->ConstantValues.size() || Instance->Program->Constants[FunctionConstant].Type != Constant::Kind::Function)
         throw std::invalid_argument("debug expression entry is not a function constant");
     auto [Registration, Inserted] = ModuleByProgram.emplace(Instance->Program.get(), Instance);
@@ -1179,9 +1195,9 @@ FEATHER_VM_NOINLINE bool Vm::TryEnterSlotCall(ExecutionState& Execution, const V
     auto* Instance = Caller.Instance;
     if (Call.Global) {
         auto& Scope = Instance ? Instance->Globals : Globals;
-        const auto Found = Scope.find(Function.GetOwner()->Constants[Call.Target].Text);
-        if (Found == Scope.end()) return false;
-        Target = &Found->second;
+        auto& Bindings = Instance ? Instance->GlobalBindings : GlobalBindings;
+        Target = ReadGlobalBinding(*Function.GetOwner(), Scope, Bindings, Call.Target);
+        if (!Target) return false;
     } else {
         Target = &Caller.Locals[Call.Target];
     }
@@ -1429,10 +1445,11 @@ Value Vm::Execute(ExecutionState& Execution) {
         }
         case Op::GetGlobal: {
             auto Id = ReadU32(Code, Current.Pc);
-            auto Found = FrameGlobals.find(FrameOwner->Constants[Id].Text);
-            if (Found == FrameGlobals.end())
+            auto& Bindings = FrameInstance ? FrameInstance->GlobalBindings : GlobalBindings;
+            const auto* Binding = ReadGlobalBinding(*FrameOwner, FrameGlobals, Bindings, Id);
+            if (!Binding)
                 Push(Value::Error("undefined global"), DebugErrorOrigin::Operation);
-            else Push(Found->second);
+            else Push(*Binding);
             break;
         }
         case Op::SetGlobal: {

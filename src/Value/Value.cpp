@@ -78,14 +78,18 @@ void Value::MoveFrom(Value& Other) noexcept {
     case ValueType::Byte: Data.ByteValue = Other.Data.ByteValue; break;
     case ValueType::String:
         new (&Data.Text) std::shared_ptr<const std::string>(std::move(Other.Data.Text));
+        Other.Data.Text.~shared_ptr();
         break;
     case ValueType::Object:
         if (ScriptReference) Data.Script = Other.Data.Script;
-        else new (&Data.Reference) std::shared_ptr<Object>(std::move(Other.Data.Reference));
+        else {
+            new (&Data.Reference) std::shared_ptr<Object>(std::move(Other.Data.Reference));
+            Other.Data.Reference.~shared_ptr();
+        }
         break;
     }
-    // Destroy the now-empty shared_ptr union member before changing its tag.
-    Other.Destroy();
+    Other.Type = ValueType::Null;
+    Other.ScriptReference = false;
 }
 Value Value::Bool(bool Input) { Value Result(ValueType::Bool); Result.Data.Boolean = Input; return Result; }
 Value Value::Number(double Input) { Value Result(ValueType::Number); Result.Data.Numeric = Input; return Result; }

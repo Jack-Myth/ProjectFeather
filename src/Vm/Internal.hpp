@@ -34,6 +34,7 @@ struct ModuleInstance {
     std::shared_ptr<Module> Program;
     std::vector<Value> ConstantValues;
     std::unordered_map<std::string, Value> Globals;
+    std::vector<const Value*> GlobalBindings;
     std::unordered_set<std::string> Exports;
     std::shared_ptr<NativeObject> Namespace;
     State Initialization = State::Loaded;
